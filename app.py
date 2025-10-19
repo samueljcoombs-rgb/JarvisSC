@@ -1,8 +1,12 @@
 # app.py
 # My JARVIS — Streamlit dashboard with an in-app AI agent
+# Includes rate-limit handling, rerun guards, and caching.
 
 import json
+import time
 import datetime as dt
+from typing import List, Dict, Any
+
 import requests
 import feedparser
 import streamlit as st
@@ -21,14 +25,13 @@ OPENAI_API_KEY       = _secret("OPENAI_API_KEY")
 OWM_KEY              = _secret("OWM_API_KEY")
 TMDB_KEY             = _secret("TMDB_API_KEY")
 DEFAULT_CITY         = _secret("DEFAULT_CITY", "Basingstoke,GB")
-PODCAST_FEEDS        = [s.strip() for s in _secret("PODCAST_FEEDS", "").split(",") if s.strip()]
-YOUTUBE_CHANNEL_IDS  = [s.strip() for s in _secret("YOUTUBE_CHANNEL_IDS", "").split(",") if s.strip()]
+PODCAST_FEEDS        = [s.strip() for s in _secret("PODCAST_FEEDS","").split(",") if s.strip()]
+YOUTUBE_CHANNEL_IDS  = [s.strip() for s in _secret("YOUTUBE_CHANNEL_IDS","").split(",") if s.strip()]
 ATHLETIC_QUERY       = _secret("ATHLETIC_QUERY", "Manchester United")
 SA_INFO              = _secret("GOOGLE_SERVICE_ACCOUNT_JSON")
 
-# Friendly checks
 if not OPENAI_API_KEY:
-    st.error("OpenAI API key not set. Go to **Settings → Secrets** and add `OPENAI_API_KEY`.")
+    st.error("OpenAI API key not set. Add it in **Settings → Secrets** as `OPENAI_API_KEY`.")
     st.stop()
 
 if not OWM_KEY:
@@ -59,9 +62,31 @@ TODO_SHEET_NAME    = "ToDo"
 WORKOUT_SHEET_NAME = "Workouts"
 # -------------------------------------------
 
-# ---------- OpenAI client ----------
+# ---------- OpenAI client + retry/backoff ----------
 from openai import OpenAI
-client = OpenAI(api_key=OPENAI_API_KEY)
+_client_cache = None
+
+def get_openai_client():
+    global _client_cache
+    if _client_cache is None:
+        _client_cache = OpenAI(api_key=OPENAI_API_KEY)
+    return _client_cache
+
+def call_openai_with_retry(create_kwargs: Dict[str, Any], max_retries: int = 5):
+    """Retry on rate limits/transient errors with exponential backoff."""
+    delay = 1.0
+    last_err = None
+    for _ in range(max_retries):
+        try:
+            return get_openai_client().chat.completions.create(**create_kwargs)
+        except Exception as e:
+            last_err = e
+            time.sleep(delay)
+            delay = min(delay * 2, 8)
+    st.warning("The AI is currently rate-limited. Please try again in ~10 seconds.")
+    if last_err:
+        st.caption("Retried and still blocked; details are in Streamlit logs.")
+    return None
 
 # ---------- Styling ----------
 st.markdown("""
@@ -116,7 +141,8 @@ def workout_today():
             return r.get("Plan","(No plan)")
     return "(No plan for today)"
 
-# ---------- Data fetchers ----------
+# ---------- Data fetchers (cached) ----------
+@st.cache_data(ttl=300)
 def get_weather(city: str = DEFAULT_CITY):
     if not OWM_KEY: return "Weather key missing."
     try:
@@ -148,25 +174,24 @@ def parse_rss(url: str, since_hours: int = 36):
                           "link": it.get("link","#")})
     return items
 
+@st.cache_data(ttl=300)
 def get_podcasts(feeds=PODCAST_FEEDS):
     out = []
     for f in feeds:
-        try:
-            out += parse_rss(f)
-        except Exception:
-            pass
+        try: out += parse_rss(f)
+        except Exception: pass
     return out[:8]
 
+@st.cache_data(ttl=300)
 def get_youtube_uploads(channel_ids=YOUTUBE_CHANNEL_IDS):
     out = []
     for cid in channel_ids:
         rss = f"https://www.youtube.com/feeds/videos.xml?channel_id={cid}"
-        try:
-            out += parse_rss(rss)
-        except Exception:
-            pass
+        try: out += parse_rss(rss)
+        except Exception: pass
     return out[:6]
 
+@st.cache_data(ttl=300)
 def get_athletic_mu(query=ATHLETIC_QUERY):
     # Google News RSS scoped to The Athletic
     q = f"https://news.google.com/rss/search?q=site:theathletic.com+{requests.utils.quote(query)}&hl=en-GB&gl=GB&ceid=GB:en"
@@ -175,6 +200,7 @@ def get_athletic_mu(query=ATHLETIC_QUERY):
     except Exception:
         return []
 
+@st.cache_data(ttl=300)
 def get_cinema_now_playing(region="GB"):
     if not TMDB_KEY: return ["TMDB key missing."]
     try:
@@ -230,45 +256,55 @@ def run_tool(name, args):
         return f"[{name}] error: {e}"
     return "Unknown tool."
 
-def agent_chat(history):
+def agent_chat(history: List[Dict[str, Any]]):
     tools = [{"type":"function","function":{
         "name": t["name"], "description": t["description"], "parameters": t["parameters"]
     }} for t in TOOL_SPECS]
 
-    # First call (may request tool calls)
-    resp = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=history,
-        tools=tools,
-        tool_choice="auto",
-        temperature=0.2,
-    )
+    # First request (with retry)
+    resp = call_openai_with_retry({
+        "model": "gpt-4o-mini",
+        "messages": history,
+        "tools": tools,
+        "tool_choice": "auto",
+        "temperature": 0.2,
+        "max_tokens": 400,
+    })
+    if resp is None:
+        return "Sorry — I’m temporarily rate-limited. Please try again in ~10s."
+
     msg = resp.choices[0].message
     all_messages = history + [msg]
 
-    # Handle tool-call loops
-    while getattr(msg, "tool_calls", None):
+    # Tool-call loop with cap to avoid many API hits
+    MAX_TOOL_LOOPS = 2
+    loops = 0
+    while getattr(msg, "tool_calls", None) and loops < MAX_TOOL_LOOPS:
+        loops += 1
         tool_msgs = []
         for call in msg.tool_calls:
             fn = call.function
             args = json.loads(fn.arguments or "{}")
             result = run_tool(fn.name, args)
             tool_msgs.append({
-                "role":"tool",
+                "role": "tool",
                 "tool_call_id": call.id,
                 "name": fn.name,
                 "content": json.dumps(result)
             })
 
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=all_messages + tool_msgs,
-            temperature=0.2,
-        )
+        resp = call_openai_with_retry({
+            "model": "gpt-4o-mini",
+            "messages": all_messages + tool_msgs,
+            "temperature": 0.2,
+            "max_tokens": 500,
+        })
+        if resp is None:
+            return "Got rate-limited while finishing the answer. Try again in a few seconds."
         msg = resp.choices[0].message
         all_messages = all_messages + tool_msgs + [msg]
 
-    return msg.content
+    return msg.content or "Done."
 
 # ---------- UI ----------
 st.title("🤖 My JARVIS")
@@ -323,18 +359,24 @@ else:
     st.write("(No items)")
 st.markdown('</div>', unsafe_allow_html=True)
 
+# --- Rerun guard for the agent ---
+if "chat" not in st.session_state: st.session_state.chat = []
+if "last_prompt" not in st.session_state: st.session_state.last_prompt = None
+
 # Agent chat
 st.markdown('<div class="card">', unsafe_allow_html=True)
 st.subheader("Agent")
-if "chat" not in st.session_state:
-    st.session_state.chat = []
 
 prompt = st.chat_input("Ask me to update sections, tick tasks, summarize news, etc.")
 if prompt:
-    st.session_state.chat.append({"role":"user","content":prompt})
-    with st.spinner("Thinking..."):
-        out = agent_chat([*st.session_state.chat])
-    st.session_state.chat.append({"role":"assistant","content":out})
+    if prompt != st.session_state.last_prompt:
+        st.session_state.chat.append({"role":"user","content":prompt})
+        with st.spinner("Thinking..."):
+            out = agent_chat([*st.session_state.chat])
+        st.session_state.chat.append({"role":"assistant","content":out})
+        st.session_state.last_prompt = prompt
+    else:
+        st.info("That prompt was just answered. Type something new.")
 
 for m in st.session_state.chat:
     with st.chat_message(m["role"]):
