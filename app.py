@@ -1,25 +1,18 @@
-# app.py
-# My JARVIS — Streamlit dashboard with an in-app AI agent
-# Includes rate-limit handling, rerun guards, and caching.
+# app.py — My JARVIS (Agent + Dashboard)
+# Includes memory (memory.py), code-reading tool, Make webhook PRs, retry/backoff, rerun guards, and caching.
 
-import json
-import time
-import datetime as dt
+import json, time, datetime as dt, os
 from typing import List, Dict, Any
 
-import requests
-import feedparser
-import streamlit as st
+import requests, feedparser, streamlit as st
+import memory  # <— persistent memory module
 
-# ---------- Page ----------
 st.set_page_config(page_title="My JARVIS", page_icon="🤖", layout="centered")
 
-# ---------- Secrets & Config ----------
+# -------- Secrets --------
 def _secret(name, default=""):
-    try:
-        return st.secrets[name]
-    except Exception:
-        return default
+    try: return st.secrets[name]
+    except Exception: return default
 
 OPENAI_API_KEY       = _secret("OPENAI_API_KEY")
 OWM_KEY              = _secret("OWM_API_KEY")
@@ -29,43 +22,37 @@ PODCAST_FEEDS        = [s.strip() for s in _secret("PODCAST_FEEDS","").split(","
 YOUTUBE_CHANNEL_IDS  = [s.strip() for s in _secret("YOUTUBE_CHANNEL_IDS","").split(",") if s.strip()]
 ATHLETIC_QUERY       = _secret("ATHLETIC_QUERY", "Manchester United")
 SA_INFO              = _secret("GOOGLE_SERVICE_ACCOUNT_JSON")
+MAKE_WEBHOOK_URL     = _secret("MAKE_WEBHOOK_URL")
+GITHUB_REPO          = _secret("GITHUB_REPO", "yourname/yourrepo")
+GITHUB_BRANCH        = _secret("GITHUB_BRANCH", "main")
 
 if not OPENAI_API_KEY:
-    st.error("OpenAI API key not set. Add it in **Settings → Secrets** as `OPENAI_API_KEY`.")
-    st.stop()
+    st.error("OPENAI_API_KEY missing in Secrets."); st.stop()
 
-if not OWM_KEY:
-    st.warning("OWM_API_KEY (weather) is missing — Weather card will show an error.")
-
-if not TMDB_KEY:
-    st.warning("TMDB_API_KEY (cinema) is missing — Cinema card will show an error.")
-
-# ---------- Google Sheets auth ----------
+# -------- Google Sheets auth --------
 import gspread
 from google.oauth2.service_account import Credentials
-
 gc = None
 if SA_INFO:
     try:
         creds = Credentials.from_service_account_info(
             json.loads(SA_INFO),
-            scopes=["https://www.googleapis.com/auth/spreadsheets"]
+            scopes=[
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive"  # open_by_title / open by name
+            ]
         )
         gc = gspread.authorize(creds)
     except Exception as e:
-        st.error(f"Google Sheets auth failed. Check GOOGLE_SERVICE_ACCOUNT_JSON in Secrets. Details: {e}")
+        st.error(f"Google Sheets auth failed: {e}")
 else:
-    st.warning("GOOGLE_SERVICE_ACCOUNT_JSON missing — To-Do & Workouts won’t load until you add it in **Secrets**.")
+    st.info("Add GOOGLE_SERVICE_ACCOUNT_JSON in Secrets for To-Do & Workouts.")
 
-# ---- CHANGE THESE TO MATCH YOUR SHEETS ----
-TODO_SHEET_NAME    = "ToDo"
-WORKOUT_SHEET_NAME = "Workouts"
-# -------------------------------------------
+TODO_SHEET_NAME, WORKOUT_SHEET_NAME = "ToDo", "Workouts"
 
-# ---------- OpenAI client + retry/backoff ----------
+# -------- OpenAI client + retry --------
 from openai import OpenAI
 _client_cache = None
-
 def get_openai_client():
     global _client_cache
     if _client_cache is None:
@@ -73,39 +60,29 @@ def get_openai_client():
     return _client_cache
 
 def call_openai_with_retry(create_kwargs: Dict[str, Any], max_retries: int = 5):
-    """Retry on rate limits/transient errors with exponential backoff."""
     delay = 1.0
-    last_err = None
     for _ in range(max_retries):
         try:
             return get_openai_client().chat.completions.create(**create_kwargs)
-        except Exception as e:
-            last_err = e
-            time.sleep(delay)
-            delay = min(delay * 2, 8)
-    st.warning("The AI is currently rate-limited. Please try again in ~10 seconds.")
-    if last_err:
-        st.caption("Retried and still blocked; details are in Streamlit logs.")
+        except Exception:
+            time.sleep(delay); delay = min(delay * 2, 8)
+    st.warning("The AI is rate-limited. Try again in ~10s.")
     return None
 
-# ---------- Styling ----------
+# -------- Styling --------
 st.markdown("""
 <style>
 .block-container { padding-top: 1rem; max-width: 780px; }
-.card {
-  border-radius: 14px; padding: 16px 18px;
-  border: 1px solid rgba(0,0,0,0.06);
-  box-shadow: 0 4px 20px rgba(0,0,0,0.04);
-  margin-bottom: 14px; background: #ffffffaa; backdrop-filter: blur(4px);
-}
-.small { font-size: 0.9rem; color: #666; }
+.card { border-radius:14px; padding:16px 18px; border:1px solid rgba(0,0,0,.06);
+        box-shadow:0 4px 20px rgba(0,0,0,.04); margin-bottom:14px; background:#ffffffaa; backdrop-filter: blur(4px);}
+.small { color:#666; }
 </style>
 """, unsafe_allow_html=True)
 
-# ---------- Google Sheets helpers ----------
+# -------- Sheets helpers --------
 def open_sheet(name: str):
     if not gc:
-        st.error("Google Sheets not connected. Ensure Secrets include GOOGLE_SERVICE_ACCOUNT_JSON and the sheet is shared with that service account email (Editor).")
+        st.error("Google Sheets not connected. Ensure Secrets include GOOGLE_SERVICE_ACCOUNT_JSON and you shared sheets with the service-account email (Editor).")
         return None
     try:
         return gc.open(name).sheet1
@@ -141,7 +118,7 @@ def workout_today():
             return r.get("Plan","(No plan)")
     return "(No plan for today)"
 
-# ---------- Data fetchers (cached) ----------
+# -------- Data fetchers (cached) --------
 @st.cache_data(ttl=300)
 def get_weather(city: str = DEFAULT_CITY):
     if not OWM_KEY: return "Weather key missing."
@@ -193,7 +170,6 @@ def get_youtube_uploads(channel_ids=YOUTUBE_CHANNEL_IDS):
 
 @st.cache_data(ttl=300)
 def get_athletic_mu(query=ATHLETIC_QUERY):
-    # Google News RSS scoped to The Athletic
     q = f"https://news.google.com/rss/search?q=site:theathletic.com+{requests.utils.quote(query)}&hl=en-GB&gl=GB&ceid=GB:en"
     try:
         return parse_rss(q)
@@ -214,7 +190,16 @@ def get_cinema_now_playing(region="GB"):
     except Exception as e:
         return [f"TMDB error: {e}"]
 
-# ---------- Agent tool-calling ----------
+# -------- Code-reading tool --------
+def read_code(filename="app.py", max_chars=8000):
+    try:
+        with open(filename, "r", encoding="utf-8") as f:
+            code = f.read()[:max_chars]
+        return f"--- Start of {filename} ---\n{code}\n--- End of {filename} ---"
+    except Exception as e:
+        return f"Error reading {filename}: {e}"
+
+# -------- Tools exposed to the agent --------
 TOOL_SPECS = [
     {"name":"get_weather", "description":"Get weather for a city",
      "parameters":{"type":"object","properties":{"city":{"type":"string"}}}},
@@ -231,7 +216,9 @@ TOOL_SPECS = [
     {"name":"todo_toggle", "description":"Toggle a To-Do by exact Task text",
      "parameters":{"type":"object","properties":{"task_text":{"type":"string"},"done":{"type":"boolean"}}}},
     {"name":"workout_today", "description":"Read today's workout plan from sheet",
-     "parameters":{"type":"object","properties":{}}}
+     "parameters":{"type":"object","properties":{}}},
+    {"name":"read_code", "description":"Read the app.py (or other) file to understand how the system works.",
+     "parameters":{"type":"object","properties":{"filename":{"type":"string"}}}}
 ]
 
 def run_tool(name, args):
@@ -252,19 +239,31 @@ def run_tool(name, args):
             return todo_toggle(args.get("task_text",""), bool(args.get("done", True)))
         if name == "workout_today":
             return workout_today()
+        if name == "read_code":
+            return read_code(args.get("filename","app.py"))
     except Exception as e:
         return f"[{name}] error: {e}"
     return "Unknown tool."
 
+# -------- Agent core --------
 def agent_chat(history: List[Dict[str, Any]]):
     tools = [{"type":"function","function":{
         "name": t["name"], "description": t["description"], "parameters": t["parameters"]
     }} for t in TOOL_SPECS]
 
-    # First request (with retry)
+    system_msg = {
+        "role": "system",
+        "content": (
+            "You are the user's integrated life agent inside a Streamlit dashboard. "
+            "Use tools when helpful. Be concise. Incorporate the following persistent memories:\n\n"
+            + memory.recent_summary()
+        )
+    }
+
+    # First request (light model -> fewer rate limits)
     resp = call_openai_with_retry({
-        "model": "gpt-4o-mini",
-        "messages": history,
+        "model": "gpt-3.5-turbo",
+        "messages": [system_msg] + history,
         "tools": tools,
         "tool_choice": "auto",
         "temperature": 0.2,
@@ -274,9 +273,9 @@ def agent_chat(history: List[Dict[str, Any]]):
         return "Sorry — I’m temporarily rate-limited. Please try again in ~10s."
 
     msg = resp.choices[0].message
-    all_messages = history + [msg]
+    all_messages = [system_msg] + history + [msg]
 
-    # Tool-call loop with cap to avoid many API hits
+    # Tool-call loop (capped)
     MAX_TOOL_LOOPS = 2
     loops = 0
     while getattr(msg, "tool_calls", None) and loops < MAX_TOOL_LOOPS:
@@ -294,7 +293,7 @@ def agent_chat(history: List[Dict[str, Any]]):
             })
 
         resp = call_openai_with_retry({
-            "model": "gpt-4o-mini",
+            "model": "gpt-3.5-turbo",
             "messages": all_messages + tool_msgs,
             "temperature": 0.2,
             "max_tokens": 500,
@@ -306,7 +305,19 @@ def agent_chat(history: List[Dict[str, Any]]):
 
     return msg.content or "Done."
 
-# ---------- UI ----------
+# -------- Health check --------
+def ping_openai():
+    resp = call_openai_with_retry({
+        "model": "gpt-3.5-turbo",
+        "messages": [{"role":"user","content":"Say: pong"}],
+        "max_tokens": 5,
+        "temperature": 0
+    }, max_retries=3)
+    if resp and resp.choices:
+        return resp.choices[0].message.content
+    return None
+
+# -------- UI --------
 st.title("🤖 My JARVIS")
 st.caption("Agent + life dashboard")
 
@@ -359,27 +370,70 @@ else:
     st.write("(No items)")
 st.markdown('</div>', unsafe_allow_html=True)
 
-# --- Rerun guard for the agent ---
+# --- Agent card ---
 if "chat" not in st.session_state: st.session_state.chat = []
 if "last_prompt" not in st.session_state: st.session_state.last_prompt = None
 
-# Agent chat
 st.markdown('<div class="card">', unsafe_allow_html=True)
 st.subheader("Agent")
 
+# Memory + Controls
+colA, colB, colC = st.columns(3)
+with colA:
+    if st.button("🧠 View Memory"):
+        st.info(memory.recent_summary() or "(No saved memories yet)")
+with colB:
+    new_fact = st.text_input("Remember this (press Enter):", key="remember_box", label_visibility="collapsed", placeholder="e.g., I prefer evening workouts")
+    if new_fact:
+        memory.add_fact(new_fact, kind="preference")
+        st.success("Saved to memory.")
+with colC:
+    if st.button("🩺 Ping OpenAI"):
+        pong = ping_openai()
+        st.success(f"OpenAI OK → {pong}") if pong else st.error("OpenAI didn’t answer (check API billing / key).")
+
+# Chat history (render before input so you always see it)
+for m in st.session_state.chat:
+    with st.chat_message(m["role"]):
+        st.markdown(m["content"])
+
+# Chat input
 prompt = st.chat_input("Ask me to update sections, tick tasks, summarize news, etc.")
 if prompt:
+    st.session_state.chat.append({"role":"user","content":prompt})  # show immediately
     if prompt != st.session_state.last_prompt:
-        st.session_state.chat.append({"role":"user","content":prompt})
         with st.spinner("Thinking..."):
-            out = agent_chat([*st.session_state.chat])
+            out = agent_chat(st.session_state.chat)
+        if not out:
+            out = "I couldn’t respond (rate limit or network). Try again in ~10s."
         st.session_state.chat.append({"role":"assistant","content":out})
         st.session_state.last_prompt = prompt
     else:
         st.info("That prompt was just answered. Type something new.")
 
-for m in st.session_state.chat:
-    with st.chat_message(m["role"]):
-        st.markdown(m["content"])
+# Developer Mode — propose code changes via Make webhook -> GitHub PR
+st.markdown("### Developer Mode")
+dev_req = st.text_area("Describe the change you want (e.g., 'move To-Do above Feeds and use larger font')", height=90)
+if st.button("🚀 Propose PR"):
+    if not MAKE_WEBHOOK_URL:
+        st.error("MAKE_WEBHOOK_URL not set in Secrets.")
+    else:
+        try:
+            with open(__file__, "r", encoding="utf-8") as f:
+                code_now = f.read()
+            payload = {
+                "repo": GITHUB_REPO,
+                "branch": GITHUB_BRANCH,
+                "filename": "app.py",
+                "change_request": dev_req or "(no details)",
+                "code_now": code_now
+            }
+            r = requests.post(MAKE_WEBHOOK_URL, json=payload, timeout=20)
+            if r.status_code == 200:
+                st.success("Sent to Make. It will open a Pull Request shortly.")
+            else:
+                st.error(f"Webhook error {r.status_code}: {r.text[:160]}")
+        except Exception as e:
+            st.error(f"Failed to send request: {e}")
 
 st.markdown('</div>', unsafe_allow_html=True)
