@@ -40,8 +40,6 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 def get_weather(city: str = "Basingstoke") -> str:
     """
     Fetch current weather from OpenWeatherMap.
-    You gave this key earlier: e5084c56702e0e7de0de917e0e7edbe3
-    We'll try env/secrets first, then fall back to that.
     """
     owm_key = (
         os.getenv("OWM_API_KEY")
@@ -137,12 +135,12 @@ for msg in st.session_state.chat:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# input
+# ----------------- CHAT INPUT -----------------
 user_msg = st.chat_input("Ask / tell Jarvis something...")
+
 if user_msg:
     # add user msg to history
     st.session_state.chat.append({"role": "user", "content": user_msg})
-
     lower = user_msg.lower().strip()
 
     # explicit memory command
@@ -157,38 +155,33 @@ if user_msg:
         with st.chat_message("assistant"):
             st.markdown(ai_reply)
 
-else:
-    # 3) normal AI flow
-    with st.chat_message("assistant"):
-        with st.spinner("Jarvis thinking..."):
-            try:
-                mem_now = memory.recent_summary()
-                ai_reply = call_jarvis(st.session_state.chat, mem_now)
+    else:
+        # normal AI flow
+        with st.chat_message("assistant"):
+            with st.spinner("Jarvis thinking..."):
+                try:
+                    mem_now = memory.recent_summary()
+                    ai_reply = call_jarvis(st.session_state.chat, mem_now)
 
-                # show reply
-                st.markdown(ai_reply)
-                st.session_state.chat.append({"role": "assistant", "content": ai_reply})
+                    # show reply
+                    st.markdown(ai_reply)
+                    st.session_state.chat.append({"role": "assistant", "content": ai_reply})
 
-                # 🧠 Auto-save memory when Jarvis confirms remembering something
-                if any(kw in ai_reply.lower() for kw in ["i will remember", "stored", "saved to memory", "noted", "core directive"]):
-                    memory.add_fact(ai_reply, kind="assistant")
-                    st.sidebar.success("Jarvis memory updated.")
+                    # 🧠 Auto-save memory when Jarvis confirms remembering something
+                    if any(
+                        kw in ai_reply.lower()
+                        for kw in [
+                            "i will remember",
+                            "stored",
+                            "saved to memory",
+                            "noted",
+                            "core directive",
+                        ]
+                    ):
+                        memory.add_fact(ai_reply, kind="assistant")
+                        st.sidebar.success("Jarvis memory updated.")
 
-                # 4) did Jarvis output new code?
-                if "```python" in ai_reply:
-                    start = ai_reply.find("```python") + len("```python")
-                    end = ai_reply.find("```", start)
-                    if end != -1:
-                        new_code = ai_reply[start:end].strip()
-                        with open("app.py", "w", encoding="utf-8") as f:
-                            f.write(new_code)
-                        st.success("✅ Code updated — rerunning app...")
-                        st.stop()
-            except Exception as e:
-                st.error("Jarvis error.")
-                st.code(traceback.format_exc())
-
-                    # did Jarvis output code? (self-update)
+                    # 🧩 Self-update app.py if code was returned
                     if "```python" in ai_reply:
                         start = ai_reply.find("```python") + len("```python")
                         end = ai_reply.find("```", start)
@@ -198,6 +191,7 @@ else:
                                 f.write(new_code)
                             st.success("✅ Code updated — rerunning app...")
                             st.stop()
+
                 except Exception:
                     st.error("Jarvis error.")
                     st.code(traceback.format_exc())
