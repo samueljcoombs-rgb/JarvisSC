@@ -27,6 +27,9 @@ if not OPENAI_API_KEY:
     st.error("No OPENAI_API_KEY found. Add it in Streamlit secrets or env.")
     st.stop()
 
+src = "env" if os.getenv("OPENAI_API_KEY") else "st.secrets"
+st.sidebar.write(f"🔍 Loaded from {src}: {OPENAI_API_KEY[:10]}")
+
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 
