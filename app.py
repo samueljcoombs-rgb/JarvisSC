@@ -157,17 +157,36 @@ if user_msg:
         with st.chat_message("assistant"):
             st.markdown(ai_reply)
 
-    else:
-        # normal AI flow
-        with st.chat_message("assistant"):
-            with st.spinner("Jarvis thinking..."):
-                try:
-                    mem_now = memory.recent_summary()
-                    ai_reply = call_jarvis(st.session_state.chat, mem_now)
+   else:
+    # 3) normal AI flow
+    with st.chat_message("assistant"):
+        with st.spinner("Jarvis thinking..."):
+            try:
+                mem_now = memory.recent_summary()
+                ai_reply = call_jarvis(st.session_state.chat, mem_now)
 
-                    # show reply
-                    st.markdown(ai_reply)
-                    st.session_state.chat.append({"role": "assistant", "content": ai_reply})
+                # show reply
+                st.markdown(ai_reply)
+                st.session_state.chat.append({"role": "assistant", "content": ai_reply})
+
+                # 🧠 Auto-save memory when Jarvis confirms remembering something
+                if any(kw in ai_reply.lower() for kw in ["i will remember", "stored", "saved to memory", "noted", "core directive"]):
+                    memory.add_fact(ai_reply, kind="assistant")
+                    st.sidebar.success("Jarvis memory updated.")
+
+                # 4) did Jarvis output new code?
+                if "```python" in ai_reply:
+                    start = ai_reply.find("```python") + len("```python")
+                    end = ai_reply.find("```", start)
+                    if end != -1:
+                        new_code = ai_reply[start:end].strip()
+                        with open("app.py", "w", encoding="utf-8") as f:
+                            f.write(new_code)
+                        st.success("✅ Code updated — rerunning app...")
+                        st.stop()
+            except Exception as e:
+                st.error("Jarvis error.")
+                st.code(traceback.format_exc())
 
                     # did Jarvis output code? (self-update)
                     if "```python" in ai_reply:
