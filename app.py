@@ -157,7 +157,7 @@ if user_msg:
         with st.chat_message("assistant"):
             st.markdown(ai_reply)
 
-   else:
+else:
     # 3) normal AI flow
     with st.chat_message("assistant"):
         with st.spinner("Jarvis thinking..."):
