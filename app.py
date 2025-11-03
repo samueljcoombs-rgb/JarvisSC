@@ -47,7 +47,7 @@ def get_weather(city: str = "Basingstoke") -> str:
         or st.secrets.get("weather_api_key")
         or "e5084c56702e0e7de0de917e0e7edbe3"
     )
-
+    
     try:
         url = (
             f"http://api.openweathermap.org/data/2.5/weather"
