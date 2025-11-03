@@ -18,7 +18,7 @@ MODULES_DIR = BASE_DIR / "modules"
 TEMP_CHAT_FILE = BASE_DIR / "temp_chat.json"
 CHAT_SESSIONS_FILE = BASE_DIR / "chat_sessions.json"
 
-JARVIS_MODEL = "gpt-5"  # model used inside the app
+JARVIS_MODEL = "gpt-5"  # latest model version
 client = OpenAI()  # uses OPENAI_API_KEY from env / Streamlit secrets
 
 
@@ -41,7 +41,7 @@ def safe_save_json(path: Path, data):
         st.warning(f"⚠️ Could not save {path.name}: {e}")
 
 
-# ----------------- MODULE EDIT / BACKUP -----------------
+# ----------------- MODULE BACKUP & SAFE WRITE -----------------
 def backup_module(module_name: str):
     src = MODULES_DIR / f"{module_name}.py"
     dst = MODULES_DIR / f"{module_name}_backup.py"
@@ -52,7 +52,7 @@ def backup_module(module_name: str):
 def safe_write_module(module_name: str, new_code: str) -> bool:
     """
     Safely overwrite one module file (e.g. weather_panel.py).
-    We compile first to avoid syntax errors, and keep a backup.
+    Compiles before saving, and keeps a backup.
     """
     path = MODULES_DIR / f"{module_name}.py"
     if not path.exists():
@@ -60,7 +60,7 @@ def safe_write_module(module_name: str, new_code: str) -> bool:
         return False
 
     try:
-        compile(new_code, str(path), "exec")  # syntax check only
+        compile(new_code, str(path), "exec")  # syntax check
     except SyntaxError as e:
         st.error(f"❌ Syntax error in new {module_name}.py: {e}")
         return False
@@ -72,6 +72,7 @@ def safe_write_module(module_name: str, new_code: str) -> bool:
 
 
 def load_module(name: str):
+    """Dynamically import a module from /modules."""
     try:
         spec = importlib.util.spec_from_file_location(
             name, MODULES_DIR / f"{name}.py"
@@ -88,19 +89,17 @@ def load_module(name: str):
 # ----------------- OPENAI / JARVIS CALL -----------------
 def call_jarvis(chat_history, mem_text: str) -> str:
     """
-    Send the conversation + memory summary to the OpenAI model
-    and get Jarvis's reply.
+    Send chat + memory context to GPT-5 and get a response.
     """
     system_prompt = (
         "You are Jarvis, a modular AI assistant living inside a Streamlit app.\n"
-        "You can modify layout, visuals, and *module* code inside the /modules folder only.\n"
+        "You can modify layout, visuals, and module code inside the /modules folder only.\n"
         "You MUST NOT change app.py, memory.py, or any API key handling.\n"
-        "Modules you are allowed to edit include: chat_ui.py, weather_panel.py, layout_manager.py.\n"
+        "Allowed editable modules include: chat_ui.py, weather_panel.py, layout_manager.py, and any new modules you create.\n"
         "Each module defines a render(...) function that Streamlit calls.\n"
-        "When you output code, it must be FULL code for a single module inside one ```python``` block.\n"
-        "If you want to change layout, edit layout_manager.py.\n"
-        "If you want to change the weather widget UI, edit weather_panel.py.\n"
-        "Always keep your code syntactically valid Python.\n"
+        "If you output code, it must be full, runnable code for one module only inside one ```python``` block.\n"
+        "Do not invent paths or unsafe imports. Always keep Python syntax valid.\n"
+        "You are using GPT-5, the latest and most capable model.\n"
     )
 
     messages = [
@@ -142,7 +141,7 @@ with st.sidebar:
     st.caption(f"📚 Saved sessions: {len(sessions)}")
 
     st.divider()
-    st.subheader("Long-term memory (summary)")
+    st.subheader("🧠 Long-term memory (summary)")
     st.write(mem_text or "No memories yet.")
 
     new_mem = st.text_input("Add to memory:")
@@ -152,6 +151,8 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
+    st.subheader("💬 Chat Controls")
+
     if st.button("💾 Save current chat"):
         sessions.append(
             {
@@ -167,41 +168,53 @@ with st.sidebar:
     if st.button("🗑️ Start new chat"):
         st.session_state.chat = []
         safe_save_json(TEMP_CHAT_FILE, [])
-        st.success("Cleared current chat.")
+        st.success("Started new chat.")
         st.rerun()
 
     st.divider()
-    if st.button("🔙 Restore module backups"):
-        any_restored = False
+    st.subheader("🛠️ Restore Module Backups")
+
+    if st.button("🔙 Restore all backups"):
+        restored = False
         for backup in MODULES_DIR.glob("*_backup.py"):
             target = backup.with_name(
                 backup.stem.replace("_backup", "") + ".py"
             )
-            target.write_text(
-                backup.read_text(encoding="utf-8"), encoding="utf-8"
-            )
-            any_restored = True
-        if any_restored:
+            target.write_text(backup.read_text(encoding="utf-8"), encoding="utf-8")
+            restored = True
+        if restored:
             st.success("Restored module backups. Reloading...")
             st.experimental_rerun()
         else:
-            st.info("No module backups found.")
+            st.info("No backups found.")
 
 
 # ----------------- MAIN LAYOUT -----------------
 st.title("🤖 Jarvis Modular Dashboard")
 
-layout_mod = load_module("layout_manager")
-if layout_mod is None:
-    st.error("layout_manager.py is missing or broken in /modules.")
+# Dynamically discover and render all modules with a render() function
+loaded_modules = []
+for mod_path in MODULES_DIR.glob("*.py"):
+    name = mod_path.stem
+    if name.endswith("_backup") or name == "__init__":
+        continue
+    mod = load_module(name)
+    if mod and hasattr(mod, "render"):
+        loaded_modules.append(mod)
+
+if not loaded_modules:
+    st.error("No valid modules found in /modules.")
 else:
-    # layout_manager is responsible for placing chat/weather/etc on the page
-    layout_mod.render(
-        chat=st.session_state.chat,
-        mem_text=memory.recent_summary(),
-        call_jarvis=call_jarvis,
-        safe_write_module=safe_write_module,
-        safe_save_json=safe_save_json,
-        temp_chat_file=TEMP_CHAT_FILE,
-        memory_module=memory,
-    )
+    for mod in loaded_modules:
+        try:
+            mod.render(
+                chat=st.session_state.chat,
+                mem_text=memory.recent_summary(),
+                call_jarvis=call_jarvis,
+                safe_write_module=safe_write_module,
+                safe_save_json=safe_save_json,
+                temp_chat_file=TEMP_CHAT_FILE,
+                memory_module=memory,
+            )
+        except Exception as e:
+            st.error(f"⚠️ Error in {mod.__name__}.render(): {e}")
