@@ -4,24 +4,28 @@ import traceback
 
 def render(chat, mem_text, call_jarvis, safe_write_module, safe_save_json, temp_chat_file, memory_module):
     """
-    The main chat interface — handles user input, displaying conversation, and calling Jarvis.
+    Main chat interface — shows chat, accepts input, handles Jarvis responses.
     """
+
     st.header("💬 Chat with Jarvis")
 
-    # Display chat history
+    # Display history
     for msg in chat:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # Single chat input with a unique key
-    user_msg = st.chat_input("Message Jarvis...", key="main_chat_input")
+    # Unique key per session avoids duplicate widget errors
+    user_msg = st.chat_input(
+        "Message Jarvis...",
+        key=f"chat_input_{id(st.session_state)}"
+    )
 
     if user_msg:
         chat.append({"role": "user", "content": user_msg})
         safe_save_json(temp_chat_file, chat)
         lower = user_msg.lower().strip()
 
-        # "remember" command
+        # Handle "remember" command
         if lower.startswith("remember "):
             to_store = user_msg[len("remember "):].strip()
             if to_store:
@@ -29,12 +33,14 @@ def render(chat, mem_text, call_jarvis, safe_write_module, safe_save_json, temp_
                 ai_reply = f"Got it — I’ll remember: **{to_store}**"
             else:
                 ai_reply = "You said 'remember' but didn’t tell me what to remember."
+
             chat.append({"role": "assistant", "content": ai_reply})
             safe_save_json(temp_chat_file, chat)
             with st.chat_message("assistant"):
                 st.markdown(ai_reply)
+
         else:
-            # Normal AI message
+            # Normal AI reply
             with st.chat_message("assistant"):
                 with st.spinner("Jarvis thinking..."):
                     try:
@@ -43,14 +49,14 @@ def render(chat, mem_text, call_jarvis, safe_write_module, safe_save_json, temp_
                         chat.append({"role": "assistant", "content": ai_reply})
                         safe_save_json(temp_chat_file, chat)
 
-                        # Allow module-level updates (Jarvis edits modules safely)
+                        # Check if Jarvis proposed module code updates
                         if "```python" in ai_reply:
                             start = ai_reply.find("```python") + len("```python")
                             end = ai_reply.find("```", start)
                             if end != -1:
                                 code = ai_reply[start:end].strip()
 
-                                # Detect module name
+                                # Identify target module and update safely
                                 for target_module in ["chat_ui", "weather_panel", "layout_manager"]:
                                     if target_module in code:
                                         safe_write_module(target_module, code)
