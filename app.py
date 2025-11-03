@@ -18,7 +18,7 @@ MODULES_DIR = BASE_DIR / "modules"
 TEMP_CHAT_FILE = BASE_DIR / "temp_chat.json"
 CHAT_SESSIONS_FILE = BASE_DIR / "chat_sessions.json"
 
-JARVIS_MODEL = "gpt-4o-mini"  # model used inside the app
+JARVIS_MODEL = "gpt-5"  # model used inside the app
 client = OpenAI()  # uses OPENAI_API_KEY from env / Streamlit secrets
 
 
