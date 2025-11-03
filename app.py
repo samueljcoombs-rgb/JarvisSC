@@ -18,36 +18,6 @@ import memory  # your memory.py
 # ----------------- CONFIG -----------------
 st.set_page_config(page_title="Jarvis AI Dashboard", layout="wide")
 
-# Model Jarvis should use
-JARVIS_MODEL = "gpt-5"
-
-# Ensure OpenAI API key is available via environment or Streamlit secrets
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY", None)
-if not OPENAI_API_KEY:
-    st.error("No OPENAI_API_KEY found. Add it in environment or Streamlit secrets.")
-    st.stop()
-
-# Bridge secrets to env for the OpenAI client if needed
-if not os.getenv("OPENimport os
-import json
-import time
-import traceback
-from datetime import datetime
-
-import requests
-import streamlit as st
-
-try:
-    from openai import OpenAI
-except ImportError:
-    raise RuntimeError("You need to install openai: pip install openai")
-
-import memory  # your memory.py
-
-
-# ----------------- CONFIG -----------------
-st.set_page_config(page_title="Jarvis AI Dashboard", layout="wide")
-
 # Use GPT-5 as the Jarvis model
 JARVIS_MODEL = "gpt-5"
 
