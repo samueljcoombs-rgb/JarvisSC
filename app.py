@@ -1,4 +1,6 @@
 import os
+import json
+import time
 import traceback
 from datetime import datetime
 
@@ -38,9 +40,7 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ----------------- WEATHER -----------------
 def get_weather(city: str = "Basingstoke") -> str:
-    """
-    Fetch current weather from OpenWeatherMap.
-    """
+    """Fetch current weather from OpenWeatherMap."""
     owm_key = (
         os.getenv("OWM_API_KEY")
         or st.secrets.get("OWM_API_KEY", "e5084c56702e0e7de0de917e0e7edbe3")
@@ -60,13 +60,86 @@ def get_weather(city: str = "Basingstoke") -> str:
         return "Weather data not available."
 
 
+# ----------------- TEMPORARY CHAT STORAGE -----------------
+TEMP_CHAT_FILE = "temp_chat.json"
+
+
+def load_temp_chat():
+    """Load temporary chat history from disk (if exists)."""
+    if os.path.exists(TEMP_CHAT_FILE):
+        try:
+            with open(TEMP_CHAT_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+
+def save_temp_chat(chat_data):
+    """Save chat history to disk."""
+    try:
+        with open(TEMP_CHAT_FILE, "w", encoding="utf-8") as f:
+            json.dump(chat_data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        st.warning(f"Could not save temporary chat: {e}")
+
+
+# ----------------- CHAT SESSION ARCHIVE -----------------
+CHAT_SESSIONS_FILE = "chat_sessions.json"
+
+
+def load_chat_sessions():
+    """Load all archived chat sessions."""
+    if os.path.exists(CHAT_SESSIONS_FILE):
+        try:
+            with open(CHAT_SESSIONS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+
+def save_chat_sessions(sessions):
+    """Save all archived chat sessions."""
+    try:
+        with open(CHAT_SESSIONS_FILE, "w", encoding="utf-8") as f:
+            json.dump(sessions, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        st.warning(f"Could not save chat sessions: {e}")
+
+
+def archive_current_chat(label: str | None = None):
+    """Archive the current chat into the sessions file, if there is any content."""
+    chat = st.session_state.get("chat", [])
+    if not chat:
+        return  # nothing to save
+
+    sessions = load_chat_sessions()
+    new_id = max([s.get("id", 0) for s in sessions], default=0) + 1
+    ts = int(time.time())
+
+    # Try to infer a simple title from the first user message
+    first_user_msg = next((m["content"] for m in chat if m["role"] == "user"), "")
+    if label:
+        title = label
+    elif first_user_msg:
+        title = first_user_msg[:60]
+    else:
+        title = f"Session {new_id}"
+
+    new_session = {
+        "id": new_id,
+        "ts": ts,
+        "title": title,
+        "messages": chat,
+    }
+    sessions.append(new_session)
+    save_chat_sessions(sessions)
+
+
 # ----------------- HELPER: call OpenAI -----------------
 def call_jarvis(chat_history, mem_text: str) -> str:
-    """
-    chat_history: list of {"role": "user"/"assistant", "content": "..."}
-    mem_text: recent memory from memory.py
-    returns: assistant text
-    """
+    """Handles all communication with the OpenAI model."""
     system_msg = {
         "role": "system",
         "content": (
@@ -93,15 +166,32 @@ def call_jarvis(chat_history, mem_text: str) -> str:
 
 # ----------------- SESSION STATE -----------------
 if "chat" not in st.session_state:
-    st.session_state.chat = []
+    st.session_state.chat = load_temp_chat()
 
 if "last_ai" not in st.session_state:
     st.session_state.last_ai = ""
 
 
-# ----------------- SIDEBAR (memory) -----------------
+# Pre-load sessions + long-term memory counts for sidebar
+_chat_sessions = load_chat_sessions()
+_long_term_data = memory._load()  # list of all memory entries
+
+
+# ----------------- SIDEBAR (memory + controls + session archive) -----------------
 with st.sidebar:
-    st.header("🧠 Memory")
+    st.header("🧠 Memory & Sessions")
+
+    # tracker
+    short_term_count = len(st.session_state.chat)
+    long_term_count = len(_long_term_data)
+    sessions_count = len(_chat_sessions)
+
+    st.caption(f"💬 Current chat messages: {short_term_count}")
+    st.caption(f"🧠 Long-term memories: {long_term_count}")
+    st.caption(f"📚 Saved chat sessions: {sessions_count}")
+
+    st.divider()
+    st.subheader("Long-term memory (summary)")
     mem_text = memory.recent_summary()
     if mem_text:
         st.write(mem_text)
@@ -113,6 +203,58 @@ with st.sidebar:
         memory.add_fact(new_mem, kind="manual")
         st.success("Saved to memory.")
         st.rerun()
+
+    st.divider()
+    st.subheader("Chat controls")
+
+    if st.button("💾 Save current chat"):
+        archive_current_chat()
+        st.success("Current chat archived.")
+        # Reload sessions and re-render
+        _chat_sessions = load_chat_sessions()
+        st.rerun()
+
+    if st.button("🗑️ Start New Chat"):
+        # archive before clearing
+        archive_current_chat()
+        st.session_state.chat = []
+        save_temp_chat([])
+        st.success("Chat archived & cleared. Start fresh!")
+        st.rerun()
+
+    st.divider()
+    st.subheader("📚 Load a saved chat")
+
+    if _chat_sessions:
+        # Build labels for selection
+        options = []
+        for s in _chat_sessions:
+            dt = datetime.fromtimestamp(s["ts"]).strftime("%Y-%m-%d %H:%M")
+            msg_count = len(s.get("messages", []))
+            title = s.get("title", f"Session {s.get('id')}")
+            label = f"{s['id']} | {dt} | {msg_count} msgs | {title}"
+            options.append(label)
+
+        selected = st.selectbox(
+            "Pick a session to load into the current chat:",
+            options,
+            index=len(options) - 1,  # by default show the most recent
+        )
+
+        if st.button("🔁 Load selected session"):
+            # find the matching session by id
+            try:
+                sel_id_str = selected.split("|", 1)[0].strip()
+                sel_id = int(sel_id_str)
+                sess = next(s for s in _chat_sessions if s["id"] == sel_id)
+                st.session_state.chat = sess.get("messages", [])
+                save_temp_chat(st.session_state.chat)
+                st.success(f"Loaded session {sel_id}.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not load session: {e}")
+    else:
+        st.caption("No archived chats yet.")
 
 
 # ----------------- MAIN UI -----------------
@@ -126,6 +268,7 @@ st.subheader(f"Today: {today}  |  Basingstoke weather: {weather}")
 st.write("Talk to Jarvis below. You can say things like:")
 st.write("- **remember** that I prefer evening workouts")
 st.write("- **what do you remember about me?**")
+st.write("- **save this chat** so we can reload it later")
 st.write("- **add a feeds panel**")
 st.write("- **change the layout** to put weather at the top (Jarvis will rewrite app.py)")
 st.divider()
@@ -141,17 +284,19 @@ user_msg = st.chat_input("Ask / tell Jarvis something...")
 if user_msg:
     # add user msg to history
     st.session_state.chat.append({"role": "user", "content": user_msg})
+    save_temp_chat(st.session_state.chat)
     lower = user_msg.lower().strip()
 
     # explicit memory command
     if lower.startswith("remember "):
-        to_store = user_msg[len("remember ") :].strip()
+        to_store = user_msg[len("remember "):].strip()
         if to_store:
             memory.add_fact(to_store, kind="user")
             ai_reply = f"Got it. I will remember: **{to_store}**"
         else:
             ai_reply = "You said 'remember' but didn't tell me what to remember."
         st.session_state.chat.append({"role": "assistant", "content": ai_reply})
+        save_temp_chat(st.session_state.chat)
         with st.chat_message("assistant"):
             st.markdown(ai_reply)
 
@@ -166,6 +311,7 @@ if user_msg:
                     # show reply
                     st.markdown(ai_reply)
                     st.session_state.chat.append({"role": "assistant", "content": ai_reply})
+                    save_temp_chat(st.session_state.chat)
 
                     # 🧠 Auto-save memory when Jarvis confirms remembering something
                     if any(
