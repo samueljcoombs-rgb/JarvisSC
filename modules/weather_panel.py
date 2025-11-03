@@ -1,7 +1,8 @@
-import streamlit as st
-import requests
-from datetime import datetime
 import os
+from datetime import datetime
+
+import requests
+import streamlit as st
 
 
 def get_weather(city="Basingstoke"):
@@ -11,14 +12,16 @@ def get_weather(city="Basingstoke"):
     api_key = (
         os.getenv("OWM_API_KEY")
         or st.secrets.get("OWM_API_KEY")
-        or st.secrets.get("weather" + "_api_key")
-        or None
+        or st.secrets.get("weather_api_key", None)
     )
     if not api_key:
         return None
 
     try:
-        url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={api_key}&units=metric"
+        url = (
+            f"http://api.openweathermap.org/data/2.5/weather"
+            f"?q={city}&appid={api_key}&units=metric"
+        )
         r = requests.get(url, timeout=8)
         r.raise_for_status()
         data = r.json()
@@ -33,13 +36,13 @@ def get_weather(city="Basingstoke"):
         return None
 
 
-def render(**kwargs):
+def render():
     """
-    Render weather panel. Flexible **kwargs so app.py can pass anything.
+    Render weather panel. No weird kwargs, no duplicate keys.
     """
     st.header("🌦️ Weather")
 
-    city = st.text_input("City:", "Basingstoke", key=f"weather_city_{id(st.session_state)}")
+    city = st.text_input("City:", "Basingstoke", key="weather_city")
     w = get_weather(city)
 
     if not w:
@@ -52,7 +55,7 @@ def render(**kwargs):
         emoji = "☁️"
     elif "rain" in desc or "drizzle" in desc:
         emoji = "🌧️"
-    elif "storm" in desc:
+    elif "storm" in desc or "thunder" in desc:
         emoji = "⛈️"
     elif "snow" in desc:
         emoji = "❄️"
