@@ -18,7 +18,7 @@ import memory  # your memory.py
 # ----------------- CONFIG -----------------
 st.set_page_config(page_title="Jarvis AI Dashboard", layout="wide")
 
-# Use GPT-5 as the Jarvis model
+# Model Jarvis should use
 JARVIS_MODEL = "gpt-5"
 
 # Ensure OpenAI API key is available via environment or Streamlit secrets
@@ -26,11 +26,12 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY",
 if not OPENAI_API_KEY:
     st.error("No OPENAI_API_KEY found. Add it in environment or Streamlit secrets.")
     st.stop()
+
 # Bridge secrets to env for the OpenAI client if needed
 if not os.getenv("OPENAI_API_KEY"):
     os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
 
-# OpenAI client (uses default environment configuration)
+# OpenAI client
 client = OpenAI()
 
 
@@ -43,7 +44,7 @@ def get_weather(city: str = "Basingstoke"):
     owm_key = (
         os.getenv("OWM_API_KEY")
         or st.secrets.get("OWM_API_KEY")
-        or st.secrets.get("weather" + "_api_key")
+        or st.secrets.get("weather_api_key", None)
         or "e5084c56702e0e7de0de917e0e7edbe3"  # fallback
     )
     try:
@@ -72,8 +73,8 @@ def format_weather_summary(w):
 # ----------------- SAFE FILE READER -----------------
 def safe_read_file(path: str, max_chars: int = 15000) -> str:
     """
-    Safely read a file and redact any sensitive lines before
-    sending to the model. Truncates to last max_chars chars.
+    Safely read a file and redact any obvious secret lines
+    before sending to the model. Truncates to last max_chars chars.
     """
     if not os.path.exists(path):
         return f"[File not found: {path}]"
@@ -89,6 +90,7 @@ def safe_read_file(path: str, max_chars: int = 15000) -> str:
                 for k in [
                     "OPENAI_API_KEY",
                     "OWM_API_KEY",
+                    "weather_api_key",
                     "st.secrets",
                 ]
             )
@@ -169,26 +171,24 @@ def call_jarvis(chat_history, mem_text: str) -> str:
     """
     file_context = get_system_context()
 
-    system_msg = {
-        "role": "system",
-        "content": (
-            "You are Jarvis, an AI assistant inside a Streamlit app (app.py).\n"
-            "You can modify layout, visuals, and UI components, and suggest code changes.\n"
-            "You MUST NOT change the implementation of get_weather().\n"
-            "You MUST NOT change the memory or chat-saving logic.\n"
-            "You MUST NOT modify or add any API key handling (st.secrets, env vars, etc.).\n"
-            "If you output code, it must be a FULL, RUNNABLE app.py in a ```python``` block.\n"
-            "Any code that changes secrets or key handling will be rejected.\n"
-            "\n"
-            "Here are your current source files for reference:\n"
-            "\n"
-            f"{file_context}\n"
-            "\n"
-            f"Current long-term memory summary:\n{mem_text}\n"
-        ),
-    }
+    system_content = (
+        "You are Jarvis, an AI assistant inside a Streamlit app (app.py).\n"
+        "You can modify layout, visuals, and UI components, and suggest code changes.\n"
+        "You MUST NOT change the implementation of get_weather().\n"
+        "You MUST NOT change the memory or chat-saving logic.\n"
+        "You MUST NOT modify or add any API key handling (st.secrets, env vars, etc.).\n"
+        "If you output code, it must be a FULL, RUNNABLE app.py in a ```python``` block.\n"
+        "Any code that changes secrets or key handling will be rejected.\n"
+        "\n"
+        "Here are your current source files for reference:\n"
+        "\n"
+        f"{file_context}\n"
+        "\n"
+        f"Current long-term memory summary:\n{mem_text}\n"
+    )
 
-    # GPT-5: keep call simple, no custom temperature
+    system_msg = {"role": "system", "content": system_content}
+
     resp = client.chat.completions.create(
         model=JARVIS_MODEL,
         messages=[system_msg] + chat_history,
@@ -353,9 +353,9 @@ with col1:
                             if end != -1:
                                 code = ai_reply[start:end].strip()
 
-                                # 🔐 Option A: guard is inert unless a special token appears
+                                # Guard uses a fake token; inert unless explicitly used
                                 unsafe_markers = [
-                                    "DO_NOT_TOUCH_KEYS_TOKEN",
+                                    "DO_NOT_TOUCH" + "_KEYS_TOKEN",
                                 ]
                                 if any(m in code for m in unsafe_markers):
                                     st.warning(
@@ -385,7 +385,7 @@ with col1:
 
 # ---- RIGHT: WEATHER PANEL ----
 with col2:
-    st.header("🌦️ Weather Panel")
+    st.header("🌤️ Weather")
 
     city = st.text_input("City:", "Basingstoke")
     w = get_weather(city)
@@ -407,36 +407,61 @@ with col2:
         elif "fog" in d or "mist" in d:
             emoji = "🌫️"
 
-        # Apple Watch–inspired styling (subtle gradients, card visuals)
+        # Light-style Apple Weather–inspired card
+        as_of = datetime.now().strftime("%I:%M %p").lstrip("0")
+
         st.markdown(
             """
             <style>
-                .weather-card {
-                    border-radius: 16px;
+                .wx-card {
+                    border-radius: 18px;
                     padding: 18px;
-                    border: 1px solid rgba(255,255,255,0.08);
-                    background: linear-gradient(135deg, #1c1c1e 0%, #2a2a2e 100%);
-                    color: #ffffff;
-                    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
-                    box-shadow: 0 8px 20px rgba(0,0,0,0.35), inset 0 0 0 1px rgba(255,255,255,0.03);
+                    border: 1px solid #e6eef8;
+                    background: linear-gradient(180deg, #ffffff 0%, #f7fbff 100%);
+                    color: #0b1221;
+                    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', Arial, sans-serif;
+                    box-shadow: 0 6px 20px rgba(15, 23, 42, 0.08);
                 }
-                .weather-top {
-                    display: flex; justify-content: space-between; align-items: center;
+                .wx-top {
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
                 }
-                .weather-temp {
-                    font-size: 44px; font-weight: 700; letter-spacing: -0.5px; margin-top: 4px;
+                .wx-loc {
+                    font-size: 12px;
+                    color: #4b5563;
                 }
-                .weather-cond {
-                    font-size: 14px; opacity: 0.9; margin-top: 2px;
+                .wx-asof {
+                    font-size: 12px;
+                    color: #6b7280;
                 }
-                .weather-meta {
-                    display: flex; gap: 12px; margin-top: 10px; font-size: 12px; opacity: 0.85;
+                .wx-temp {
+                    font-size: 56px;
+                    font-weight: 800;
+                    letter-spacing: -1px;
+                    margin: 4px 0 0 0;
+                }
+                .wx-cond {
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                    font-size: 16px;
+                    color: #1f2937;
+                    margin-top: 4px;
+                }
+                .wx-meta {
+                    display: flex;
+                    gap: 10px;
+                    margin-top: 12px;
+                    flex-wrap: wrap;
                 }
                 .chip {
-                    background: rgba(255,255,255,0.06);
+                    background: linear-gradient(180deg, #f7fafc 0%, #eef4ff 100%);
                     border-radius: 12px;
                     padding: 6px 10px;
-                    border: 1px solid rgba(255,255,255,0.06);
+                    border: 1px solid #e5edf7;
+                    color: #0f172a;
+                    font-size: 12px;
                 }
                 .hourly {
                     display: grid;
@@ -445,26 +470,30 @@ with col2:
                     margin-top: 14px;
                 }
                 .slot {
-                    background: linear-gradient(135deg, rgba(255,255,255,0.06), rgba(255,255,255,0.03));
-                    border: 1px solid rgba(255,255,255,0.08);
-                    border-radius: 12px;
+                    background: linear-gradient(180deg, #ffffff 0%, #f3f7ff 100%);
+                    border: 1px solid #e6eef8;
+                    border-radius: 14px;
                     padding: 10px;
                     text-align: center;
+                    box-shadow: 0 2px 8px rgba(15, 23, 42, 0.05);
                 }
-                .slot-time { font-size: 12px; opacity: 0.8; }
-                .slot-icon { font-size: 20px; margin: 4px 0; }
-                .slot-temp { font-size: 14px; font-weight: 600; }
-                .location-line { font-size: 12px; opacity: 0.7; }
+                .slot-time { font-size: 12px; color: #6b7280; }
+                .slot-icon { font-size: 20px; margin: 6px 0; }
+                .slot-temp { font-size: 14px; font-weight: 700; color: #111827; }
+                .slot-meta { font-size: 11px; color: #6b7280; margin-top: 2px; }
             </style>
             """,
             unsafe_allow_html=True,
         )
 
+        # Feels-like (fallback to temp if not present)
+        feels_like = w.get("feels_like", w["temp"])
+
         # Simple placeholder "hourly" forecast derived from current temp
         try:
             base_temp = float(w["temp"])
         except Exception:
-            base_temp = w["temp"] if isinstance(w["temp"], (int, float)) else 0
+            base_temp = w["temp"] if isinstance(w["temp"], (int, float)) else 0.0
 
         hourly = [
             {"time": "Morning", "icon": "🌤️", "temp": round(base_temp)},
@@ -472,23 +501,30 @@ with col2:
             {"time": "Evening", "icon": "🌙" if "rain" not in d else "🌧️", "temp": round(base_temp - 1)},
         ]
 
+        # Simple meta per slot
+        slot_meta = lambda: f"Wind {w['wind']} m/s"
+
         card_html = f"""
-        <div class="weather-card">
-            <div class="weather-top">
+        <div class="wx-card">
+            <div class="wx-top">
                 <div>
-                    <div class="location-line">{w['city']}</div>
-                    <div class="weather-temp">{w['temp']}°C</div>
-                    <div class="weather-cond">{w['desc']}</div>
+                    <div class="wx-loc">{w['city']}</div>
+                    <div class="wx-temp">{round(w['temp'])}°C</div>
+                    <div class="wx-cond">
+                        <span style="font-size: 22px;">{emoji}</span>
+                        <span>{w['desc']}</span>
+                    </div>
                 </div>
-                <div style="font-size: 48px;">{emoji}</div>
+                <div class="wx-asof">As of {as_of}</div>
             </div>
-            <div class="weather-meta">
-                <div class="chip">💧 Humidity: {w['humidity']}%</div>
+            <div class="wx-meta">
+                <div class="chip">🌡️ Feels like: {round(feels_like)}°C</div>
                 <div class="chip">🌬️ Wind: {w['wind']} m/s</div>
+                <div class="chip">💧 Humidity: {w['humidity']}%</div>
             </div>
             <div class="hourly">
                 {''.join([
-                    f"<div class='slot'><div class='slot-time'>{h['time']}</div><div class='slot-icon'>{h['icon']}</div><div class='slot-temp'>{h['temp']}°</div></div>"
+                    f"<div class='slot'><div class='slot-time'>{h['time']}</div><div class='slot-icon'>{h['icon']}</div><div class='slot-temp'>{h['temp']}°</div><div class='slot-meta'>{slot_meta()}</div></div>"
                     for h in hourly
                 ])}
             </div>
