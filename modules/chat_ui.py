@@ -1,96 +1,61 @@
-import traceback
 import streamlit as st
+import traceback
 
 
-def _extract_module_name(ai_reply: str) -> str | None:
+def render(chat, mem_text, call_jarvis, safe_write_module, safe_save_json, temp_chat_file, memory_module):
     """
-    Very simple heuristic:
-    - if reply mentions 'weather', assume weather_panel
-    - if reply mentions 'layout', assume layout_manager
-    - otherwise None (no auto-update)
+    The main chat interface — handles user input, displaying conversation, and calling Jarvis.
     """
-    text = ai_reply.lower()
-    if "weather" in text:
-        return "weather_panel"
-    if "layout" in text:
-        return "layout_manager"
-    return None
+    st.header("💬 Chat with Jarvis")
 
-
-def _extract_code_block(ai_reply: str) -> str | None:
-    if "```python" not in ai_reply:
-        return None
-    start = ai_reply.find("```python") + len("```python")
-    end = ai_reply.find("```", start)
-    if end == -1:
-        return None
-    return ai_reply[start:end].strip()
-
-
-def render(
-    chat,
-    mem_text: str,
-    call_jarvis,
-    safe_write_module,
-    safe_save_json,
-    temp_chat_file,
-    memory_module,
-):
-    """
-    Renders the chat interface and wires it up to Jarvis.
-    """
-    # Show history
+    # Display chat history
     for msg in chat:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    user_msg = st.chat_input("Ask / tell Jarvis something...")
+    # Single chat input with a unique key
+    user_msg = st.chat_input("Message Jarvis...", key="main_chat_input")
 
-    if not user_msg:
-        return
-
-    # Add user message
-    chat.append({"role": "user", "content": user_msg})
-    safe_save_json(temp_chat_file, chat)
-
-    lower = user_msg.lower().strip()
-
-    # Explicit memory command: "remember ..."
-    if lower.startswith("remember "):
-        to_store = user_msg[len("remember ") :].strip()
-        if to_store:
-            memory_module.add_fact(to_store, kind="user")
-            ai_reply = f"Got it. I will remember: **{to_store}**"
-        else:
-            ai_reply = "You said 'remember' but didn’t tell me what to remember."
-
-        chat.append({"role": "assistant", "content": ai_reply})
+    if user_msg:
+        chat.append({"role": "user", "content": user_msg})
         safe_save_json(temp_chat_file, chat)
-        with st.chat_message("assistant"):
-            st.markdown(ai_reply)
-        return
+        lower = user_msg.lower().strip()
 
-    # Normal AI flow
-    with st.chat_message("assistant"):
-        with st.spinner("Jarvis thinking..."):
-            try:
-                ai_reply = call_jarvis(chat, mem_text)
+        # "remember" command
+        if lower.startswith("remember "):
+            to_store = user_msg[len("remember "):].strip()
+            if to_store:
+                memory_module.add_fact(to_store, kind="user")
+                ai_reply = f"Got it — I’ll remember: **{to_store}**"
+            else:
+                ai_reply = "You said 'remember' but didn’t tell me what to remember."
+            chat.append({"role": "assistant", "content": ai_reply})
+            safe_save_json(temp_chat_file, chat)
+            with st.chat_message("assistant"):
                 st.markdown(ai_reply)
-                chat.append({"role": "assistant", "content": ai_reply})
-                safe_save_json(temp_chat_file, chat)
+        else:
+            # Normal AI message
+            with st.chat_message("assistant"):
+                with st.spinner("Jarvis thinking..."):
+                    try:
+                        ai_reply = call_jarvis(chat, memory_module.recent_summary())
+                        st.markdown(ai_reply)
+                        chat.append({"role": "assistant", "content": ai_reply})
+                        safe_save_json(temp_chat_file, chat)
 
-                # Optional: auto-update a module if a python code block is present
-                code = _extract_code_block(ai_reply)
-                if code:
-                    module_name = _extract_module_name(ai_reply)
-                    if module_name:
-                        ok = safe_write_module(module_name, code)
-                        if ok:
-                            st.info(
-                                f"Module `{module_name}.py` updated. "
-                                "Reload the app to see changes."
-                            )
+                        # Allow module-level updates (Jarvis edits modules safely)
+                        if "```python" in ai_reply:
+                            start = ai_reply.find("```python") + len("```python")
+                            end = ai_reply.find("```", start)
+                            if end != -1:
+                                code = ai_reply[start:end].strip()
 
-            except Exception:
-                st.error("Jarvis error.")
-                st.code(traceback.format_exc())
+                                # Detect module name
+                                for target_module in ["chat_ui", "weather_panel", "layout_manager"]:
+                                    if target_module in code:
+                                        safe_write_module(target_module, code)
+                                        st.stop()
+
+                    except Exception:
+                        st.error("Jarvis encountered an error.")
+                        st.code(traceback.format_exc())
