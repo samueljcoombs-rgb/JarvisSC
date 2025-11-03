@@ -170,6 +170,7 @@ def call_jarvis(chat_history, mem_text: str) -> str:
         ),
     }
 
+
     # GPT-5 currently does not allow custom temperature; keep call simple
     resp = client.chat.completions.create(
         model=JARVIS_MODEL,
