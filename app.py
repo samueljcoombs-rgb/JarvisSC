@@ -18,9 +18,10 @@ import memory  # your memory.py
 # ----------------- CONFIG -----------------
 st.set_page_config(page_title="Jarvis AI Dashboard", layout="wide")
 
-# Use the same top-tier model family you're chatting with here
+# Use GPT-5 as the primary model
 JARVIS_MODEL = "gpt-5"
 
+# Get OpenAI key from environment or Streamlit secrets
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     st.error("No OPENAI_API_KEY found. Add it in Streamlit secrets or env.")
@@ -39,7 +40,7 @@ def get_weather(city: str = "Basingstoke"):
         os.getenv("OWM_API_KEY")
         or st.secrets.get("OWM_API_KEY")
         or st.secrets.get("weather_api_key")
-        or "e5084c56702e0e7de0de917e0e7edbe3"  # fallback from earlier
+        or "e5084c56702e0e7de0de917e0e7edbe3"  # fallback
     )
     try:
         url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={owm_key}&units=metric"
@@ -102,6 +103,10 @@ def archive_current_chat():
 
 # ----------------- OPENAI CALL -----------------
 def call_jarvis(chat_history, mem_text: str) -> str:
+    """
+    Handles all communication with the OpenAI model (GPT-5 by default).
+    GPT-5 does not support a custom temperature parameter, so we handle that gracefully.
+    """
     system_msg = {
         "role": "system",
         "content": (
@@ -116,11 +121,20 @@ def call_jarvis(chat_history, mem_text: str) -> str:
         ),
     }
 
-    resp = client.chat.completions.create(
-        model=JARVIS_MODEL,
-        messages=[system_msg] + chat_history,
-        temperature=0.4,
-    )
+    try:
+        # For older models that allow temperature
+        resp = client.chat.completions.create(
+            model=JARVIS_MODEL,
+            messages=[system_msg] + chat_history,
+            temperature=0.4,
+        )
+    except Exception:
+        # GPT-5 doesn’t support temperature customization
+        resp = client.chat.completions.create(
+            model=JARVIS_MODEL,
+            messages=[system_msg] + chat_history,
+        )
+
     return resp.choices[0].message.content
 
 
@@ -140,6 +154,7 @@ with st.sidebar:
     sessions = load_json(CHAT_SESSIONS_FILE, [])
 
     st.caption(f"🤖 Jarvis model: {JARVIS_MODEL}")
+    st.caption(f"🔑 API key loaded: {'✅' if OPENAI_API_KEY else '❌'}")
     st.caption(f"💬 Current chat messages: {len(st.session_state.chat)}")
     st.caption(f"🧠 Long-term memories: {len(long_term)}")
     st.caption(f"📚 Saved sessions: {len(sessions)}")
@@ -197,7 +212,6 @@ with st.sidebar:
     st.divider()
     st.subheader("Code safety")
 
-    # 🔙 Revert to last code backup (app_backup.py)
     if st.button("🔙 Revert to last code backup"):
         if os.path.exists("app_backup.py"):
             try:
@@ -260,24 +274,18 @@ with col1:
             with st.chat_message("assistant"):
                 with st.spinner("Jarvis thinking..."):
                     try:
-                        ai_reply = call_jarvis(
-                            st.session_state.chat,
-                            memory.recent_summary()
-                        )
+                        ai_reply = call_jarvis(st.session_state.chat, memory.recent_summary())
                         st.markdown(ai_reply)
-                        st.session_state.chat.append(
-                            {"role": "assistant", "content": ai_reply}
-                        )
+                        st.session_state.chat.append({"role": "assistant", "content": ai_reply})
                         save_json(TEMP_CHAT_FILE, st.session_state.chat)
 
-                        # 🔧 Self-update: ONLY if safe (no secrets / key handling)
+                        # Self-update logic (safe only)
                         if "```python" in ai_reply:
                             start = ai_reply.find("```python") + len("```python")
                             end = ai_reply.find("```", start)
                             if end != -1:
                                 code = ai_reply[start:end].strip()
 
-                                # Reject if code tries to touch secrets or key vars
                                 unsafe_markers = [
                                     "st.secrets",
                                     "OPENAI_API_KEY",
@@ -285,25 +293,18 @@ with col1:
                                     "weather_api_key",
                                 ]
                                 if any(m in code for m in unsafe_markers):
-                                    st.warning(
-                                        "❌ Update rejected: unsafe API key changes detected."
-                                    )
+                                    st.warning("❌ Update rejected: unsafe API key changes detected.")
                                 else:
-                                    # First, back up current app.py
                                     try:
                                         with open("app.py", "r", encoding="utf-8") as f_old:
                                             old_code = f_old.read()
                                         with open("app_backup.py", "w", encoding="utf-8") as f_backup:
                                             f_backup.write(old_code)
                                     except Exception as e:
-                                        st.warning(
-                                            f"⚠️ Could not create backup before update: {e}"
-                                        )
+                                        st.warning(f"⚠️ Could not create backup: {e}")
 
-                                    # Now write the new code
                                     with open("app.py", "w", encoding="utf-8") as f:
                                         f.write(code)
-
                                     st.success("✅ Code updated — reloading app...")
                                     st.stop()
 
@@ -321,7 +322,6 @@ with col2:
     if not w:
         st.write("Weather data not available.")
     else:
-        # Apple Watch-ish card
         st.markdown(
             """
             <div style="
