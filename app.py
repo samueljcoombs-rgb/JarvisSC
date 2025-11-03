@@ -71,7 +71,7 @@ def format_weather_summary(w):
 
 
 # ----------------- SAFE FILE READER -----------------
-def safe_read_file(path: str, max_chars: int = 15000) -> str:
+def safe_read_file(path: str, max_chars: int = 1000000) -> str:
     """
     Safely read a file and redact any obvious secret lines
     before sending to the model. Truncates to last max_chars chars.
