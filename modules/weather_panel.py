@@ -1,4 +1,4 @@
-iimport streamlit as st
+import streamlit as st
 import requests
 from datetime import datetime
 import os
@@ -6,7 +6,7 @@ import os
 
 def get_weather(city="Basingstoke"):
     """
-    Safe weather fetcher using OpenWeatherMap.
+    Fetch current weather from OpenWeatherMap safely.
     """
     api_key = (
         os.getenv("OWM_API_KEY")
@@ -16,6 +16,7 @@ def get_weather(city="Basingstoke"):
     )
     if not api_key:
         return None
+
     try:
         url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={api_key}&units=metric"
         r = requests.get(url, timeout=8)
@@ -27,7 +28,6 @@ def get_weather(city="Basingstoke"):
             "desc": data["weather"][0]["description"].capitalize(),
             "humidity": data["main"]["humidity"],
             "wind": data["wind"]["speed"],
-            "icon": data["weather"][0]["icon"],
         }
     except Exception:
         return None
@@ -35,20 +35,19 @@ def get_weather(city="Basingstoke"):
 
 def render(**kwargs):
     """
-    Renders the weather panel on the right side.
-    Flexible signature so app.py can safely pass any kwargs.
+    Render weather panel. Flexible **kwargs so app.py can pass anything.
     """
     st.header("🌦️ Weather")
 
-    city = st.text_input("City:", "Basingstoke", key="weather_city_input")
+    city = st.text_input("City:", "Basingstoke", key=f"weather_city_{id(st.session_state)}")
     w = get_weather(city)
 
     if not w:
-        st.write("Weather data not available.")
+        st.info("Weather data not available.")
         return
 
-    emoji = "☀️"
     desc = w["desc"].lower()
+    emoji = "☀️"
     if "cloud" in desc:
         emoji = "☁️"
     elif "rain" in desc or "drizzle" in desc:
@@ -62,7 +61,6 @@ def render(**kwargs):
 
     as_of = datetime.now().strftime("%I:%M %p").lstrip("0")
 
-    # Light Apple-style weather card
     st.markdown(
         f"""
         <div style="
