@@ -28,10 +28,30 @@ if not OPENAI_API_KEY:
     st.stop()
 
 # Bridge secrets to env for the OpenAI client if needed
-if not os.getenv("OPENAI_API_KEY"):
-    os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
+if not os.getenv("OPENimport os
+import json
+import time
+import traceback
+from datetime import datetime
 
-# OpenAI client
+import requests
+import streamlit as st
+
+try:
+    from openai import OpenAI
+except ImportError:
+    raise RuntimeError("You need to install openai: pip install openai")
+
+import memory  # your memory.py
+
+
+# ----------------- CONFIG -----------------
+st.set_page_config(page_title="Jarvis AI Dashboard", layout="wide")
+
+# Use GPT-5 as the Jarvis model
+JARVIS_MODEL = "gpt-5"
+
+# OpenAI client (uses env/secret config – do NOT hard-code keys here)
 client = OpenAI()
 
 
@@ -44,9 +64,11 @@ def get_weather(city: str = "Basingstoke"):
     owm_key = (
         os.getenv("OWM_API_KEY")
         or st.secrets.get("OWM_API_KEY")
-        or st.secrets.get("weather_api_key", None)
-        or "e5084c56702e0e7de0de917e0e7edbe3"  # fallback
+        or st.secrets.get("weather_api_key")
     )
+    if not owm_key:
+        return None
+
     try:
         url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={owm_key}&units=metric"
         resp = requests.get(url, timeout=8)
@@ -58,6 +80,7 @@ def get_weather(city: str = "Basingstoke"):
             "desc": data["weather"][0]["description"].capitalize(),
             "humidity": data["main"]["humidity"],
             "wind": data["wind"]["speed"],
+            "feels_like": data["main"].get("feels_like", data["main"]["temp"]),
             "icon": data["weather"][0]["icon"],
         }
     except Exception:
@@ -71,30 +94,18 @@ def format_weather_summary(w):
 
 
 # ----------------- SAFE FILE READER -----------------
-def safe_read_file(path: str, max_chars: int = 1000000) -> str:
+def safe_read_file(path: str, max_chars: int = 100000) -> str:
     """
-    Safely read a file and redact any obvious secret lines
-    before sending to the model. Truncates to last max_chars chars.
+    Safely read a file and redact any sensitive lines before
+    sending to the model. Truncates to last max_chars chars.
     """
     if not os.path.exists(path):
         return f"[File not found: {path}]"
     try:
         with open(path, "r", encoding="utf-8") as f:
             content = f.read()
-        # Redact obvious secrets / keys
-        filtered = "\n".join(
-            line
-            for line in content.splitlines()
-            if not any(
-                k in line
-                for k in [
-                    "OPENAI_API_KEY",
-                    "OWM_API_KEY",
-                    "weather_api_key",
-                    "st.secrets",
-                ]
-            )
-        )
+        # (We could redact obvious keys here if needed)
+        filtered = "\n".join(line for line in content.splitlines())
         if len(filtered) > max_chars:
             return f"[Truncated — last {max_chars} chars]\n" + filtered[-max_chars:]
         return filtered
@@ -125,7 +136,9 @@ def get_system_context() -> str:
     )
 
 
-# ----------------- CHAT / SESSION STORAGE -----------------
+# ----------------- OPENAI CONFIG -----------------
+DO_NOT_TOUCH_KEYS_TOKEN = "DO_NOT_TOUCH_KEYS_TOKEN"
+
 TEMP_CHAT_FILE = "temp_chat.json"
 CHAT_SESSIONS_FILE = "chat_sessions.json"
 
@@ -171,29 +184,29 @@ def call_jarvis(chat_history, mem_text: str) -> str:
     """
     file_context = get_system_context()
 
-    system_content = (
-        "You are Jarvis, an AI assistant inside a Streamlit app (app.py).\n"
-        "You can modify layout, visuals, and UI components, and suggest code changes.\n"
-        "You MUST NOT change the implementation of get_weather().\n"
-        "You MUST NOT change the memory or chat-saving logic.\n"
-        "You MUST NOT modify or add any API key handling (st.secrets, env vars, etc.).\n"
-        "If you output code, it must be a FULL, RUNNABLE app.py in a ```python``` block.\n"
-        "Any code that changes secrets or key handling will be rejected.\n"
-        "\n"
-        "Here are your current source files for reference:\n"
-        "\n"
-        f"{file_context}\n"
-        "\n"
-        f"Current long-term memory summary:\n{mem_text}\n"
-    )
-
-    system_msg = {"role": "system", "content": system_content}
+    system_msg = {
+        "role": "system",
+        "content": (
+            "You are Jarvis, an AI assistant inside a Streamlit app (app.py).\n"
+            "You can modify layout, visuals, and UI components, and suggest code changes.\n"
+            "You MUST NOT change the implementation of get_weather().\n"
+            "You MUST NOT change the memory or chat-saving logic.\n"
+            "You MUST NOT change API key handling (st.secrets, env vars, or key names).\n"
+            "If you output code, it must be a FULL, RUNNABLE app.py in a ```python``` block.\n"
+            "Any code that changes secrets or key handling will be rejected.\n"
+            "\n"
+            "Here are your current source files for reference:\n"
+            "\n"
+            f"{file_context}\n"
+            "\n"
+            f"Current long-term memory summary:\n{mem_text}\n"
+        ),
+    }
 
     resp = client.chat.completions.create(
         model=JARVIS_MODEL,
         messages=[system_msg] + chat_history,
     )
-
     return resp.choices[0].message.content
 
 
@@ -353,9 +366,10 @@ with col1:
                             if end != -1:
                                 code = ai_reply[start:end].strip()
 
-                                # Guard uses a fake token; inert unless explicitly used
+                                # Guard hook: if we ever want Jarvis to self-flag unsafe edits,
+                                # he can include DO_NOT_TOUCH_KEYS_TOKEN in his output.
                                 unsafe_markers = [
-                                    "DO_NOT_TOUCH" + "_KEYS_TOKEN",
+                                    DO_NOT_TOUCH_KEYS_TOKEN,
                                 ]
                                 if any(m in code for m in unsafe_markers):
                                     st.warning(
@@ -486,14 +500,11 @@ with col2:
             unsafe_allow_html=True,
         )
 
-        # Feels-like (fallback to temp if not present)
         feels_like = w.get("feels_like", w["temp"])
-
-        # Simple placeholder "hourly" forecast derived from current temp
         try:
             base_temp = float(w["temp"])
         except Exception:
-            base_temp = w["temp"] if isinstance(w["temp"], (int, float)) else 0.0
+            base_temp = float(feels_like) if isinstance(feels_like, (int, float)) else 0.0
 
         hourly = [
             {"time": "Morning", "icon": "🌤️", "temp": round(base_temp)},
@@ -501,8 +512,8 @@ with col2:
             {"time": "Evening", "icon": "🌙" if "rain" not in d else "🌧️", "temp": round(base_temp - 1)},
         ]
 
-        # Simple meta per slot
-        slot_meta = lambda: f"Wind {w['wind']} m/s"
+        def slot_meta():
+            return f"Wind {w['wind']} m/s"
 
         card_html = f"""
         <div class="wx-card">
