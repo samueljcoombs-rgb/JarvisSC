@@ -132,7 +132,7 @@ if "last_processed_index" not in st.session_state:
     st.session_state.last_processed_index = -1
 
 with st.sidebar:
-    # Collapsed expander for Memory & Sessions
+    # Collapsed expander for Memory & Sessions (remains in sidebar, not on-page)
     with st.expander("🧠 Memory & Sessions", expanded=False):
         long_term = memory._load()
         mem_text = memory.recent_summary()
@@ -179,7 +179,7 @@ layout_mod     = load_module("layout_manager")
 chat_mod       = load_module("chat_ui")
 weather_mod    = load_module("weather_panel")
 podcasts_mod   = load_module("podcasts_panel")
-athletic_mod   = load_module("athletic_feed")  # NEW
+athletic_mod   = load_module("athletic_feed")  # Athletic module
 
 if layout_mod:
     layout_mod.render(
@@ -193,5 +193,5 @@ if layout_mod:
         chat_module=chat_mod,
         weather_module=weather_mod,
         podcasts_module=podcasts_mod,
-        athletic_module=athletic_mod,  # NEW
+        athletic_module=athletic_mod,
     )
