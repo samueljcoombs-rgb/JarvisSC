@@ -41,7 +41,7 @@ def _select_best_model(client: OpenAI) -> str:
     if PREFERRED_ENV:
         return PREFERRED_ENV
     try:
-        names = {m.id for m in client.models.list().data}
+        names = {m.id for m in client.models.list().data}  # may fail depending on perms
         for candidate in [
             "gpt-5",
             "gpt-latest",
@@ -124,7 +124,7 @@ def call_jarvis(chat_history, mem_text):
     return resp.choices[0].message.content
 
 # ----- App -----
-st.set_page_config(page_title="Jarvis Modular Dashboard", layout="wide")
+st.set_page_config(page_title="Jarvis Modular AI", layout="wide")
 
 if "chat" not in st.session_state:
     st.session_state.chat = safe_load_json(TEMP_CHAT_FILE, [])
@@ -132,53 +132,53 @@ if "last_processed_index" not in st.session_state:
     st.session_state.last_processed_index = -1
 
 with st.sidebar:
-    # Collapsed by default
-    with st.expander("🧠 Memory & Sessions", expanded=False):
-        long_term = memory._load()
-        mem_text = memory.recent_summary()
-        sessions = safe_load_json(CHAT_SESSIONS_FILE, [])
+    st.header("🧠 Memory & Sessions")
+    long_term = memory._load()
+    mem_text = memory.recent_summary()
+    sessions = safe_load_json(CHAT_SESSIONS_FILE, [])
 
-        st.caption(f"Model: {JARVIS_MODEL}")
-        st.caption(f"Messages: {len(st.session_state.chat)}")
-        st.caption(f"Memories: {len(long_term)}")
-        st.caption(f"Sessions: {len(sessions)}")
+    st.caption(f"Model: {JARVIS_MODEL}")
+    st.caption(f"Messages: {len(st.session_state.chat)}")
+    st.caption(f"Memories: {len(long_term)}")
+    st.caption(f"Sessions: {len(sessions)}")
 
-        st.subheader("Memory (preview)")
-        preview = (mem_text or "").strip()
-        if preview and len(preview) > 220:
-            st.write(preview[:220] + "…")
-            with st.expander("Show full recent memory"):
-                st.write(preview)
-        else:
-            st.write(preview or "No memories yet.")
+    st.divider()
+    st.subheader("Memory (preview)")
+    preview = (mem_text or "").strip()
+    if preview and len(preview) > 220:
+        st.write(preview[:220] + "…")
+        with st.expander("Show full recent memory"):
+            st.write(preview)
+    else:
+        st.write(preview or "No memories yet.")
 
-        new_mem = st.text_input("Add to memory:")
-        if new_mem:
-            memory.add_fact(new_mem, "manual")
-            st.success("Saved.")
-            st.rerun()
+    new_mem = st.text_input("Add to memory:")
+    if new_mem:
+        memory.add_fact(new_mem, "manual")
+        st.success("Saved.")
+        st.rerun()
 
-        st.divider()
-        if st.button("💾 Save chat"):
-            sessions.append({"id": int(time.time()), "ts": int(time.time()), "messages": st.session_state.chat})
-            safe_save_json(CHAT_SESSIONS_FILE, sessions)
-            st.success("Saved.")
-            st.rerun()
-        if st.button("🗑️ New chat"):
-            st.session_state.chat = []
-            safe_save_json(TEMP_CHAT_FILE, [])
-            st.session_state.last_processed_index = -1
-            st.success("Cleared.")
-            st.rerun()
+    st.divider()
+    if st.button("💾 Save chat"):
+        sessions.append({"id": int(time.time()), "ts": int(time.time()), "messages": st.session_state.chat})
+        safe_save_json(CHAT_SESSIONS_FILE, sessions)
+        st.success("Saved.")
+        st.rerun()
+    if st.button("🗑️ New chat"):
+        st.session_state.chat = []
+        safe_save_json(TEMP_CHAT_FILE, [])
+        st.session_state.last_processed_index = -1
+        st.success("Cleared.")
+        st.rerun()
 
 st.title("🤖 Jarvis Modular Dashboard")
 
-# Load modules (note the athletic module name to match your file)
+# Load modules
 layout_mod     = load_module("layout_manager")
 chat_mod       = load_module("chat_ui")
 weather_mod    = load_module("weather_panel")
 podcasts_mod   = load_module("podcasts_panel")
-athletic_mod   = load_module("athletic_manu_feed")  # <- match your filename
+athletic_mod   = load_module("athletic_feed")  # NEW
 
 if layout_mod:
     layout_mod.render(
@@ -192,5 +192,5 @@ if layout_mod:
         chat_module=chat_mod,
         weather_module=weather_mod,
         podcasts_module=podcasts_mod,
-        athletic_module=athletic_mod,
+        athletic_module=athletic_mod,  # NEW
     )
