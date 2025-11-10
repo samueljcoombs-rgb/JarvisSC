@@ -16,7 +16,8 @@ def render(
     temp_chat_file,
     memory_module,
     chat_module=None,
-    weather_module=None
+    weather_module=None,
+    podcasts_module=None,  # <-- NEW
 ):
     st.subheader(f"Today: {datetime.now().strftime('%A, %B %d, %Y')}")
 
@@ -48,3 +49,6 @@ def render(
     with c2:
         if weather_module:
             weather_module.render()
+        if podcasts_module:
+            st.divider()
+            podcasts_module.render()
