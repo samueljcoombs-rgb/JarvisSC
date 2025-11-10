@@ -17,12 +17,14 @@ def render(
     memory_module,
     chat_module=None,
     weather_module=None,
-    podcasts_module=None,  # <-- NEW
+    podcasts_module=None,
+    athletic_module=None,   # NEW
 ):
     st.subheader(f"Today: {datetime.now().strftime('%A, %B %d, %Y')}")
 
     c1, c2 = st.columns([2, 1])
 
+    # Left: chat
     with c1:
         st.header("💬 Chat with Jarvis")
         if chat_module:
@@ -32,6 +34,7 @@ def render(
         last_processed = st.session_state.get("last_processed_index", -1)
         last_user_idx = _find_last_user_index(lst)
 
+        # Process only new user messages
         if last_user_idx > last_processed:
             try:
                 reply = call_jarvis(lst, mem_text)
@@ -46,9 +49,13 @@ def render(
         st.session_state.chat = lst
         safe_save_json(temp_chat_file, lst)
 
+    # Right: widgets
     with c2:
         if weather_module:
             weather_module.render()
         if podcasts_module:
             st.divider()
             podcasts_module.render()
+        if athletic_module:
+            st.divider()
+            athletic_module.render()
