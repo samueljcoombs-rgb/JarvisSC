@@ -41,7 +41,7 @@ def _select_best_model(client: OpenAI) -> str:
     if PREFERRED_ENV:
         return PREFERRED_ENV
     try:
-        names = {m.id for m in client.models.list().data}  # may fail depending on perms
+        names = {m.id for m in client.models.list().data}
         for candidate in [
             "gpt-5",
             "gpt-latest",
@@ -124,7 +124,7 @@ def call_jarvis(chat_history, mem_text):
     return resp.choices[0].message.content
 
 # ----- App -----
-st.set_page_config(page_title="Jarvis Modular AI", layout="wide")
+st.set_page_config(page_title="Jarvis Modular Dashboard", layout="wide")
 
 if "chat" not in st.session_state:
     st.session_state.chat = safe_load_json(TEMP_CHAT_FILE, [])
@@ -132,7 +132,7 @@ if "last_processed_index" not in st.session_state:
     st.session_state.last_processed_index = -1
 
 with st.sidebar:
-    # Collapsed expander for Memory & Sessions
+    # Collapsed by default
     with st.expander("🧠 Memory & Sessions", expanded=False):
         long_term = memory._load()
         mem_text = memory.recent_summary()
@@ -143,7 +143,6 @@ with st.sidebar:
         st.caption(f"Memories: {len(long_term)}")
         st.caption(f"Sessions: {len(sessions)}")
 
-        st.divider()
         st.subheader("Memory (preview)")
         preview = (mem_text or "").strip()
         if preview and len(preview) > 220:
@@ -174,12 +173,12 @@ with st.sidebar:
 
 st.title("🤖 Jarvis Modular Dashboard")
 
-# Load modules
+# Load modules (note the athletic module name to match your file)
 layout_mod     = load_module("layout_manager")
 chat_mod       = load_module("chat_ui")
 weather_mod    = load_module("weather_panel")
 podcasts_mod   = load_module("podcasts_panel")
-athletic_mod   = load_module("athletic_feed")  # NEW
+athletic_mod   = load_module("athletic_manu_feed")  # <- match your filename
 
 if layout_mod:
     layout_mod.render(
@@ -193,5 +192,5 @@ if layout_mod:
         chat_module=chat_mod,
         weather_module=weather_mod,
         podcasts_module=podcasts_mod,
-        athletic_module=athletic_mod,  # NEW
+        athletic_module=athletic_mod,
     )
