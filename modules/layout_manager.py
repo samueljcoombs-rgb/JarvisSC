@@ -18,21 +18,14 @@ def render(
     chat_module=None,
     weather_module=None,
     podcasts_module=None,
-    athletic_module=None,
+    athletic_module=None,   # NEW
 ):
-    # Top bar
     st.subheader(f"Today: {datetime.now().strftime('%A, %B %d, %Y')}")
 
-    # Three fixed columns: LEFT (Athletic), MIDDLE (Chat), RIGHT (Weather/Podcasts)
-    c_left, c_mid, c_right = st.columns([1.15, 1.75, 1.10], gap="large")
+    c1, c2 = st.columns([2, 1])
 
-    # --- LEFT: Athletic feed only ---
-    with c_left:
-        if athletic_module:
-            athletic_module.render()
-
-    # --- MIDDLE: Chat only ---
-    with c_mid:
+    # Left: chat
+    with c1:
         st.header("💬 Chat with Jarvis")
         if chat_module:
             chat_module.render()
@@ -53,14 +46,16 @@ def render(
             except Exception as e:
                 st.error(f"Jarvis error: {e}")
 
-        # Persist chat history even if nothing new
         st.session_state.chat = lst
         safe_save_json(temp_chat_file, lst)
 
-    # --- RIGHT: Weather (top) then Podcasts (no Athletic here) ---
-    with c_right:
+    # Right: widgets
+    with c2:
         if weather_module:
             weather_module.render()
         if podcasts_module:
             st.divider()
             podcasts_module.render()
+        if athletic_module:
+            st.divider()
+            athletic_module.render()
