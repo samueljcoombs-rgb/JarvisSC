@@ -1,4 +1,4 @@
-import os, json, time, traceback
+import os, json, time
 from datetime import datetime
 from pathlib import Path
 import importlib.util
@@ -10,7 +10,9 @@ BASE_DIR = Path(__file__).parent
 MODULES_DIR = BASE_DIR / "modules"
 TEMP_CHAT_FILE = BASE_DIR / "temp_chat.json"
 CHAT_SESSIONS_FILE = BASE_DIR / "chat_sessions.json"
-JARVIS_MODEL = "gpt-4o-mini"  # can be switched to GPT-5 later
+
+# ----- Model selection: always try to use the best available GPT automatically -----
+PREFERRED_ENV = os.getenv("PREFERRED_OPENAI_MODEL", "").strip()
 
 def _init_client() -> OpenAI:
     api_key = os.getenv("OPENAI_API_KEY")
@@ -20,11 +22,46 @@ def _init_client() -> OpenAI:
         except Exception:
             api_key = None
     if not api_key:
-        st.error("Missing OPENAI_API_KEY."); st.stop()
+        st.error("Missing OPENAI_API_KEY.")
+        st.stop()
     return OpenAI(api_key=api_key)
 
 client = _init_client()
 
+def _select_best_model(client: OpenAI) -> str:
+    """
+    Picks the best available chat model without hardcoding to 4o-mini.
+    Preference order:
+    1) PREFERRED_OPENAI_MODEL (env)
+    2) gpt-5 (if available)
+    3) gpt-latest
+    4) gpt-4.1, gpt-4o, gpt-4.1-mini
+    5) gpt-4o-mini (last resort)
+    """
+    if PREFERRED_ENV:
+        return PREFERRED_ENV
+
+    try:
+        # List models once and pick by preference.
+        # If listing fails (permissions), fall back to a safe default.
+        names = {m.id for m in client.models.list().data}  # type: ignore[attr-defined]
+        for candidate in [
+            "gpt-5",
+            "gpt-latest",
+            "gpt-4.1",
+            "gpt-4o",
+            "gpt-4.1-mini",
+            "gpt-4o-mini",
+        ]:
+            if candidate in names:
+                return candidate
+    except Exception:
+        pass
+    return "gpt-4o"  # sensible default if listing not permitted
+
+JARVIS_MODEL = _select_best_model(client)
+
+# ----- JSON helpers (with atomic saves) -----
 def safe_load_json(path: Path, default):
     if path.exists():
         try:
@@ -36,11 +73,14 @@ def safe_load_json(path: Path, default):
 
 def safe_save_json(path: Path, data):
     try:
-        with open(path, "w", encoding="utf-8") as f:
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
+        tmp.replace(path)
     except Exception as e:
         st.warning(f"⚠️ Could not save {path.name}: {e}")
 
+# ----- Module hot-loader + guarded writer -----
 def backup_module(name: str):
     src = MODULES_DIR / f"{name}.py"
     dst = MODULES_DIR / f"{name}_backup.py"
@@ -55,10 +95,13 @@ def safe_write_module(name: str, code: str) -> bool:
     try:
         compile(code, str(path), "exec")
     except SyntaxError as e:
-        st.error(f"❌ Syntax error: {e}")
+        st.error(f"❌ Syntax error in {name}.py: {e}")
         return False
     backup_module(name)
-    path.write_text(code, encoding="utf-8")
+    # atomic write
+    tmp = path.with_suffix(".py.tmp")
+    tmp.write_text(code, encoding="utf-8")
+    tmp.replace(path)
     st.success(f"✅ {name}.py updated.")
     return True
 
@@ -67,12 +110,13 @@ def load_module(name: str):
         path = MODULES_DIR / f"{name}.py"
         spec = importlib.util.spec_from_file_location(name, path)
         mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
+        spec.loader.exec_module(mod)  # type: ignore[attr-defined]
         return mod
     except Exception as e:
         st.error(f"⚠️ Failed to load {name}: {e}")
         return None
 
+# ----- OpenAI call -----
 def call_jarvis(chat_history, mem_text):
     sys = (
         "You are Jarvis inside a Streamlit app. "
@@ -84,6 +128,7 @@ def call_jarvis(chat_history, mem_text):
     resp = client.chat.completions.create(model=JARVIS_MODEL, messages=msgs)
     return resp.choices[0].message.content
 
+# ----- App -----
 st.set_page_config(page_title="Jarvis Modular AI", layout="wide")
 
 if "chat" not in st.session_state:
@@ -96,6 +141,7 @@ with st.sidebar:
     long_term = memory._load()
     mem_text = memory.recent_summary()
     sessions = safe_load_json(CHAT_SESSIONS_FILE, [])
+
     st.caption(f"Model: {JARVIS_MODEL}")
     st.caption(f"Messages: {len(st.session_state.chat)}")
     st.caption(f"Memories: {len(long_term)}")
@@ -104,9 +150,11 @@ with st.sidebar:
     st.divider()
     st.subheader("Memory (preview)")
     preview = (mem_text or "").strip()
-    short = (preview[:200] + "…") if preview and len(preview) > 200 else (preview or "No memories yet.")
-    st.write(short)
-    with st.expander("Show full recent memory"):
+    if preview and len(preview) > 220:
+        st.write(preview[:220] + "…")
+        with st.expander("Show full recent memory"):
+            st.write(preview)
+    else:
         st.write(preview or "No memories yet.")
 
     new_mem = st.text_input("Add to memory:")
