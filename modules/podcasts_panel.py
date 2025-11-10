@@ -12,9 +12,10 @@ import streamlit as st
 # ------------------------------------------------------------
 # Podcasts Panel (Spotify)
 # - Direct Spotify episode links released TODAY (Europe/London)
-# - Works with show names (auto-search) or explicit Spotify Show IDs
-# - Requires SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET in env or st.secrets
+# - Auto-searches show IDs by name (or accept explicit IDs)
+# - Requires SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET
 # - Sleek UI: glassy cards, Spotify-green CTA, tiny "NEW" badge
+# - Adds a bottom-right rounded artwork thumbnail (episode > show)
 # ------------------------------------------------------------
 
 # ✅ Your favourites (name, optional Spotify Show ID)
@@ -34,9 +35,9 @@ FAVOURITE_SHOWS: List[Tuple[str, Optional[str]]] = [
     ("Chatabix", None),
 ]
 
-MARKET = "GB"                     # Market for availability
-TZ = ZoneInfo("Europe/London")    # Your local day boundary
-MAX_SHOW_EPISODES = 20            # Fetch per show before filtering
+MARKET = "GB"
+TZ = ZoneInfo("Europe/London")
+MAX_SHOW_EPISODES = 20
 TIMEOUT = 15
 
 # ---------------- Spotify auth helpers ----------------
@@ -73,12 +74,13 @@ def _get_token() -> Optional[str]:
     except Exception:
         return None
 
-def _sp_get(url: str, params: Dict) -> Optional[dict]:
+def _sp_get(url: str, params: Dict | None = None) -> Optional[dict]:
     token = _get_token()
     if not token:
         return None
     try:
-        r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, params=params, timeout=TIMEOUT)
+        headers = {"Authorization": f"Bearer {token}"}
+        r = requests.get(url, headers=headers, params=params or {}, timeout=TIMEOUT)
         if r.status_code == 401:
             # refresh once
             st.session_state.pop("_sp_token", None)
@@ -86,7 +88,8 @@ def _sp_get(url: str, params: Dict) -> Optional[dict]:
             token = _get_token()
             if not token:
                 return None
-            r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, params=params, timeout=TIMEOUT)
+            headers = {"Authorization": f"Bearer {token}"}
+            r = requests.get(url, headers=headers, params=params or {}, timeout=TIMEOUT)
         r.raise_for_status()
         return r.json()
     except Exception:
@@ -118,6 +121,33 @@ def _get_show_episodes(show_id: str, limit: int = MAX_SHOW_EPISODES) -> List[dic
     except Exception:
         return []
 
+def _get_show_image(show_id: str) -> Optional[str]:
+    """
+    Fetch and cache a show's primary image (medium/small).
+    """
+    cache = st.session_state.setdefault("_show_img_cache", {})
+    if show_id in cache:
+        return cache[show_id]
+
+    data = _sp_get(f"https://api.spotify.com/v1/shows/{show_id}")
+    url = None
+    try:
+        imgs = (data or {}).get("images", []) or []
+        # Prefer a smaller image for the thumbnail to keep it sharp + light.
+        # Spotify images are usually sorted largest->smallest; pick last or middle.
+        if imgs:
+            # pick the smallest available, else first
+            imgs_sorted = sorted(
+                [i for i in imgs if isinstance(i, dict) and i.get("url")],
+                key=lambda i: (i.get("width", 10**9), i.get("height", 10**9))
+            )
+            url = imgs_sorted[0]["url"] if imgs_sorted else None
+    except Exception:
+        url = None
+
+    cache[show_id] = url
+    return url
+
 # ---------------- UI helpers ----------------
 
 def _today_str() -> str:
@@ -134,27 +164,25 @@ def _inject_css_once():
   background: rgba(255,255,255,0.66);
   border: 1px solid rgba(0,0,0,0.06);
   border-radius: 16px;
-  padding: 10px 12px;               /* tightened from 14x16 */
-  box-shadow: 0 8px 20px rgba(0,0,0,0.10); /* slightly lighter */
-  margin-bottom: 8px;               /* tightened from 12px */
+  padding: 10px 12px;                 /* tight */
+  box-shadow: 0 8px 20px rgba(0,0,0,0.10);
+  margin-bottom: 8px;                 /* tight */
   position: relative;
+  overflow: hidden;
 }
-.pod-title {                        /* keep font weight/colour same */
+.pod-title {                          /* keep fonts/colours as requested */
   font-weight: 800; margin: 0 0 2px 0; color: #0f172a; letter-spacing: .1px;
 }
 .pod-meta {
-  font-size: 0.9rem; opacity: 0.8; margin-bottom: 8px; /* tightened */
+  font-size: 0.9rem; opacity: 0.8; margin-bottom: 8px;
 }
 .pod-actions a {
-  display: inline-flex;             /* icon + text */
-  align-items: center;
-  gap: 6px;                         /* compact spacing */
+  display: inline-flex; align-items: center; gap: 6px;
   text-decoration: none !important;
-  padding: 6px 10px;                /* tightened from 8x12 */
+  padding: 6px 10px;                  /* tight */
   border-radius: 999px;
   border: 1px solid rgba(0,0,0,0.10);
-  font-weight: 800; font-size: 0.9rem;
-  line-height: 1;
+  font-weight: 800; font-size: 0.9rem; line-height: 1;
 }
 .pod-actions a.spotify {
   background: #1DB954; color: #fff; border: 1px solid #17a84a;
@@ -162,15 +190,23 @@ def _inject_css_once():
 }
 .pod-actions a.spotify:hover { filter: brightness(1.05); }
 .pod-badge {
-  position: absolute; top: 8px; right: 8px;             /* tightened */
+  position: absolute; top: 8px; right: 8px;
   background: linear-gradient(135deg, #f59e0b, #f97316);
   color: #fff; font-weight: 900; font-size: .7rem;
-  padding: 2px 7px; border-radius: 999px;               /* tightened */
+  padding: 2px 7px; border-radius: 999px;
   box-shadow: 0 2px 6px rgba(0,0,0,0.18);
 }
 .pod-spot {
-  width: 14px; height: 14px; display: inline-block;
-  vertical-align: middle;
+  width: 14px; height: 14px; display: inline-block; vertical-align: middle;
+}
+
+/* Thumbnail in bottom-right */
+.pod-thumb {
+  position: absolute; right: 10px; bottom: 10px;
+  width: 44px; height: 44px; object-fit: cover;
+  border-radius: 10px;
+  box-shadow: 0 6px 16px rgba(0,0,0,0.25);
+  border: 1px solid rgba(0,0,0,0.08);
 }
 </style>
         """,
@@ -184,10 +220,31 @@ _SPOTIFY_SVG = """
 </svg>
 """.strip()
 
-def _episode_card(show_display: str, ep: dict):
+def _episode_image_url(ep: dict, fallback_show_img: Optional[str]) -> Optional[str]:
+    """
+    Prefer an episode image if present; otherwise fallback to the show's image.
+    Spotify episode objects sometimes include an 'images' array; if not, use show image.
+    """
+    # Episode-level images
+    try:
+        imgs = ep.get("images", []) or []
+        if imgs and isinstance(imgs, list):
+            imgs_sorted = sorted(
+                [i for i in imgs if isinstance(i, dict) and i.get("url")],
+                key=lambda i: (i.get("width", 10**9), i.get("height", 10**9))
+            )
+            if imgs_sorted:
+                return imgs_sorted[0]["url"]
+    except Exception:
+        pass
+    return fallback_show_img
+
+def _episode_card(show_display: str, ep: dict, thumb_url: Optional[str]):
     title = ep.get("name", "Untitled")
     url = ep.get("external_urls", {}).get("spotify", "")
     date = ep.get("release_date", "")
+
+    thumb_html = f'<img class="pod-thumb" src="{thumb_url}" alt="artwork"/>' if thumb_url else ""
 
     st.markdown(
         f"""
@@ -201,6 +258,7 @@ def _episode_card(show_display: str, ep: dict):
       <span>▶︎ Listen on Spotify</span>
     </a>
   </div>
+  {thumb_html}
 </div>
         """,
         unsafe_allow_html=True,
@@ -226,15 +284,18 @@ def render():
         if not sid:
             continue
 
-        episodes = _get_show_episodes(sid, limit=MAX_SHOW_EPISODES)
+        # Fetch show image once per show (cached)
+        show_img = _get_show_image(sid)
 
+        episodes = _get_show_episodes(sid, limit=MAX_SHOW_EPISODES)
         todays = [
             ep for ep in episodes
             if isinstance(ep, dict) and ep.get("release_date") == today
         ]
 
         for ep in todays:
-            _episode_card(show_display, ep)
+            thumb = _episode_image_url(ep, show_img)
+            _episode_card(show_display, ep, thumb)
         total_found += len(todays)
 
     if total_found == 0:
