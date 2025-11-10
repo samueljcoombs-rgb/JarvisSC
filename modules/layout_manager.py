@@ -24,15 +24,14 @@ def render(
     st.subheader(f"Today: {datetime.now().strftime('%A, %B %d, %Y')}")
 
     # Three fixed columns: LEFT (Athletic), MIDDLE (Chat), RIGHT (Weather/Podcasts)
-    # Using simple columns to avoid any Streamlit version quirks.
-    c_left, c_mid, c_right = st.columns([1.1, 1.8, 1.1])
+    c_left, c_mid, c_right = st.columns([1.15, 1.75, 1.10], gap="large")
 
-    # LEFT: Athletic feed only
+    # --- LEFT: Athletic feed only ---
     with c_left:
         if athletic_module:
             athletic_module.render()
 
-    # MIDDLE: Chat only
+    # --- MIDDLE: Chat only ---
     with c_mid:
         st.header("💬 Chat with Jarvis")
         if chat_module:
@@ -58,7 +57,7 @@ def render(
         st.session_state.chat = lst
         safe_save_json(temp_chat_file, lst)
 
-    # RIGHT: Weather (top) then Podcasts — no Athletic here
+    # --- RIGHT: Weather (top) then Podcasts (no Athletic here) ---
     with c_right:
         if weather_module:
             weather_module.render()
