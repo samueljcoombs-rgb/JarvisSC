@@ -20,36 +20,26 @@ def _ensure():
         st.session_state[CHAT_KEY] = []
 
 def _render_input_top():
-    # Input at the TOP, always visible
     return st.chat_input("Talk to Jarvis...", key="chat_ui_input")
 
-def _render_msgs_reversed():
-    # Latest message first (just beneath the input)
-    messages = list(reversed(st.session_state[CHAT_KEY]))
-    for m in messages:
-        role = m.get("role", "assistant")
-        content = m.get("content", "")
-        with st.chat_message(role):
-            st.write(content)
+def _render_msgs_newest_first():
+    # Render newest directly beneath input
+    for m in reversed(st.session_state[CHAT_KEY]):
+        with st.chat_message(m.get("role", "assistant")):
+            st.write(m.get("content", ""))
 
 def render(*_, **__):
     _backup()
     _ensure()
 
-    # Toolbar
     cols = st.columns([1, 1])
     with cols[0]:
         if st.button("Clear chat", key="chat_ui_clear_btn"):
             st.session_state[CHAT_KEY] = []
             st.session_state["last_processed_index"] = -1
             st.rerun()
-    with cols[1]:
-        st.write("")  # spacer
 
-    # Chat input at top
     txt = _render_input_top()
-
-    # Append new user message immediately
     if txt:
         st.session_state[CHAT_KEY].append({
             "role": "user",
@@ -57,5 +47,4 @@ def render(*_, **__):
             "ts": datetime.datetime.utcnow().isoformat() + "Z"
         })
 
-    # Then show messages (latest first)
-    _render_msgs_reversed()
+    _render_msgs_newest_first()
