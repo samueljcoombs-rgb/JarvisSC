@@ -114,7 +114,6 @@ def _get_show_episodes(show_id: str, limit: int = MAX_SHOW_EPISODES) -> List[dic
     )
     try:
         items = (data or {}).get("items", []) or []
-        # Ensure list of dicts only
         return [it for it in items if isinstance(it, dict)]
     except Exception:
         return []
@@ -135,43 +134,55 @@ def _inject_css_once():
   background: rgba(255,255,255,0.66);
   border: 1px solid rgba(0,0,0,0.06);
   border-radius: 16px;
-  padding: 14px 16px;
-  box-shadow: 0 10px 24px rgba(0,0,0,0.10);
-  margin-bottom: 12px;
+  padding: 10px 12px;               /* tightened from 14x16 */
+  box-shadow: 0 8px 20px rgba(0,0,0,0.10); /* slightly lighter */
+  margin-bottom: 8px;               /* tightened from 12px */
   position: relative;
 }
-.pod-title {
-  font-weight: 800; margin: 0 0 4px 0; color: #0f172a; letter-spacing: .1px;
+.pod-title {                        /* keep font weight/colour same */
+  font-weight: 800; margin: 0 0 2px 0; color: #0f172a; letter-spacing: .1px;
 }
 .pod-meta {
-  font-size: 0.9rem; opacity: 0.8; margin-bottom: 10px;
+  font-size: 0.9rem; opacity: 0.8; margin-bottom: 8px; /* tightened */
 }
 .pod-actions a {
-  display: inline-block;
+  display: inline-flex;             /* icon + text */
+  align-items: center;
+  gap: 6px;                         /* compact spacing */
   text-decoration: none !important;
-  padding: 8px 12px;
+  padding: 6px 10px;                /* tightened from 8x12 */
   border-radius: 999px;
   border: 1px solid rgba(0,0,0,0.10);
   font-weight: 800; font-size: 0.9rem;
+  line-height: 1;
 }
 .pod-actions a.spotify {
   background: #1DB954; color: #fff; border: 1px solid #17a84a;
-  box-shadow: 0 6px 14px rgba(29,185,84,0.35);
+  box-shadow: 0 5px 12px rgba(29,185,84,0.32);
 }
-.pod-actions a.spotify:hover {
-  filter: brightness(1.05);
-}
+.pod-actions a.spotify:hover { filter: brightness(1.05); }
 .pod-badge {
-  position: absolute; top: 10px; right: 10px;
+  position: absolute; top: 8px; right: 8px;             /* tightened */
   background: linear-gradient(135deg, #f59e0b, #f97316);
   color: #fff; font-weight: 900; font-size: .7rem;
-  padding: 2px 8px; border-radius: 999px;
+  padding: 2px 7px; border-radius: 999px;               /* tightened */
   box-shadow: 0 2px 6px rgba(0,0,0,0.18);
+}
+.pod-spot {
+  width: 14px; height: 14px; display: inline-block;
+  vertical-align: middle;
 }
 </style>
         """,
         unsafe_allow_html=True,
     )
+
+_SPOTIFY_SVG = """
+<svg class="pod-spot" viewBox="0 0 168 168" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+  <circle fill="#191414" cx="84" cy="84" r="84"/>
+  <path fill="#1ED760" d="M119.3 115.1c-1.5 2.5-4.8 3.3-7.3 1.8-20-12.2-45.2-15-74.8-8.4-2.8.6-5.6-1.2-6.2-4-0.6-2.8 1.2-5.6 4-6.2 32.6-7.2 61.1-4.1 83.1 9.1 2.5 1.6 3.3 4.9 1.9 7.7zm10.3-22.9c-1.9 3.1-5.9 4.1-9 2.2-22.9-14-57.7-18.1-84.7-10.1-3.5 1-7.2-1-8.1-4.5-1-3.5 1-7.2 4.5-8.1 30.9-8.9 69.4-4.5 95.6 11.3 3.1 1.9 4.1 5.9 2.2 9.1zM130 68.5c-25.7-15.3-68.3-16.7-92.9-9.4-4.2 1.3-8.7-1.1-10-5.3-1.3-4.2 1.1-8.7 5.3-10 28.9-8.9 76-7.4 106.2 10.6 3.8 2.2 5 7 2.8 11.1-1.3 4.2-7.1 5.6-11.6 3z"/>
+</svg>
+""".strip()
 
 def _episode_card(show_display: str, ep: dict):
     title = ep.get("name", "Untitled")
@@ -185,7 +196,10 @@ def _episode_card(show_display: str, ep: dict):
   <div class="pod-title">{title}</div>
   <div class="pod-meta">{show_display} — {date}</div>
   <div class="pod-actions">
-    <a class="spotify" href="{url}" target="_blank">▶︎ Listen on Spotify</a>
+    <a class="spotify" href="{url}" target="_blank">
+      {_SPOTIFY_SVG}
+      <span>▶︎ Listen on Spotify</span>
+    </a>
   </div>
 </div>
         """,
@@ -208,14 +222,12 @@ def render():
     total_found = 0
 
     for show_display, maybe_id in FAVOURITE_SHOWS:
-        # Resolve show ID if not provided
         sid = maybe_id or _search_show_id(show_display)
         if not sid:
             continue
 
         episodes = _get_show_episodes(sid, limit=MAX_SHOW_EPISODES)
 
-        # 🔧 Robust filter: guard against None/non-dicts
         todays = [
             ep for ep in episodes
             if isinstance(ep, dict) and ep.get("release_date") == today
