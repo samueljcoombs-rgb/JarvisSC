@@ -132,44 +132,45 @@ if "last_processed_index" not in st.session_state:
     st.session_state.last_processed_index = -1
 
 with st.sidebar:
-    st.header("🧠 Memory & Sessions")
-    long_term = memory._load()
-    mem_text = memory.recent_summary()
-    sessions = safe_load_json(CHAT_SESSIONS_FILE, [])
+    # Collapsed expander for Memory & Sessions
+    with st.expander("🧠 Memory & Sessions", expanded=False):
+        long_term = memory._load()
+        mem_text = memory.recent_summary()
+        sessions = safe_load_json(CHAT_SESSIONS_FILE, [])
 
-    st.caption(f"Model: {JARVIS_MODEL}")
-    st.caption(f"Messages: {len(st.session_state.chat)}")
-    st.caption(f"Memories: {len(long_term)}")
-    st.caption(f"Sessions: {len(sessions)}")
+        st.caption(f"Model: {JARVIS_MODEL}")
+        st.caption(f"Messages: {len(st.session_state.chat)}")
+        st.caption(f"Memories: {len(long_term)}")
+        st.caption(f"Sessions: {len(sessions)}")
 
-    st.divider()
-    st.subheader("Memory (preview)")
-    preview = (mem_text or "").strip()
-    if preview and len(preview) > 220:
-        st.write(preview[:220] + "…")
-        with st.expander("Show full recent memory"):
-            st.write(preview)
-    else:
-        st.write(preview or "No memories yet.")
+        st.divider()
+        st.subheader("Memory (preview)")
+        preview = (mem_text or "").strip()
+        if preview and len(preview) > 220:
+            st.write(preview[:220] + "…")
+            with st.expander("Show full recent memory"):
+                st.write(preview)
+        else:
+            st.write(preview or "No memories yet.")
 
-    new_mem = st.text_input("Add to memory:")
-    if new_mem:
-        memory.add_fact(new_mem, "manual")
-        st.success("Saved.")
-        st.rerun()
+        new_mem = st.text_input("Add to memory:")
+        if new_mem:
+            memory.add_fact(new_mem, "manual")
+            st.success("Saved.")
+            st.rerun()
 
-    st.divider()
-    if st.button("💾 Save chat"):
-        sessions.append({"id": int(time.time()), "ts": int(time.time()), "messages": st.session_state.chat})
-        safe_save_json(CHAT_SESSIONS_FILE, sessions)
-        st.success("Saved.")
-        st.rerun()
-    if st.button("🗑️ New chat"):
-        st.session_state.chat = []
-        safe_save_json(TEMP_CHAT_FILE, [])
-        st.session_state.last_processed_index = -1
-        st.success("Cleared.")
-        st.rerun()
+        st.divider()
+        if st.button("💾 Save chat"):
+            sessions.append({"id": int(time.time()), "ts": int(time.time()), "messages": st.session_state.chat})
+            safe_save_json(CHAT_SESSIONS_FILE, sessions)
+            st.success("Saved.")
+            st.rerun()
+        if st.button("🗑️ New chat"):
+            st.session_state.chat = []
+            safe_save_json(TEMP_CHAT_FILE, [])
+            st.session_state.last_processed_index = -1
+            st.success("Cleared.")
+            st.rerun()
 
 st.title("🤖 Jarvis Modular Dashboard")
 
