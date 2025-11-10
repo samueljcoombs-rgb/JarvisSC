@@ -14,6 +14,7 @@ import streamlit as st
 # - Direct Spotify episode links released TODAY (Europe/London)
 # - Works with show names (auto-search) or explicit Spotify Show IDs
 # - Requires SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET in env or st.secrets
+# - Sleek UI: glassy cards, Spotify-green CTA, tiny "NEW" badge
 # ------------------------------------------------------------
 
 # ✅ Your favourites (name, optional Spotify Show ID)
@@ -33,9 +34,10 @@ FAVOURITE_SHOWS: List[Tuple[str, Optional[str]]] = [
     ("Chatabix", None),
 ]
 
-MARKET = "GB"                    # Market for availability
-TZ = ZoneInfo("Europe/London")   # Your local day boundary
-MAX_SHOW_EPISODES = 20           # Fetch before filtering to "today"
+MARKET = "GB"                     # Market for availability
+TZ = ZoneInfo("Europe/London")    # Your local day boundary
+MAX_SHOW_EPISODES = 20            # Fetch per show before filtering
+TIMEOUT = 15
 
 # ---------------- Spotify auth helpers ----------------
 
@@ -59,14 +61,14 @@ def _get_token() -> Optional[str]:
             "https://accounts.spotify.com/api/token",
             data={"grant_type": "client_credentials"},
             auth=(cid, cs),
-            timeout=15,
+            timeout=TIMEOUT,
         )
         r.raise_for_status()
         data = r.json()
         token = data["access_token"]
         expires_in = int(data.get("expires_in", 3600))
         st.session_state["_sp_token"] = token
-        st.session_state["_sp_token_exp"] = time.time() + expires_in * 0.9
+        st.session_state["_sp_token_exp"] = time.time() + int(expires_in * 0.9)
         return token
     except Exception:
         return None
@@ -76,7 +78,7 @@ def _sp_get(url: str, params: Dict) -> Optional[dict]:
     if not token:
         return None
     try:
-        r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, params=params, timeout=15)
+        r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, params=params, timeout=TIMEOUT)
         if r.status_code == 401:
             # refresh once
             st.session_state.pop("_sp_token", None)
@@ -84,7 +86,7 @@ def _sp_get(url: str, params: Dict) -> Optional[dict]:
             token = _get_token()
             if not token:
                 return None
-            r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, params=params, timeout=15)
+            r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, params=params, timeout=TIMEOUT)
         r.raise_for_status()
         return r.json()
     except Exception:
@@ -98,9 +100,9 @@ def _search_show_id(show_name: str) -> Optional[str]:
         {"q": show_name, "type": "show", "limit": 1, "market": MARKET},
     )
     try:
-        items = (data or {}).get("shows", {}).get("items", [])
-        if items:
-            return items[0]["id"]
+        items = (data or {}).get("shows", {}).get("items", []) or []
+        if items and isinstance(items[0], dict):
+            return items[0].get("id")
     except Exception:
         pass
     return None
@@ -111,7 +113,9 @@ def _get_show_episodes(show_id: str, limit: int = MAX_SHOW_EPISODES) -> List[dic
         {"market": MARKET, "limit": limit},
     )
     try:
-        return (data or {}).get("items", []) or []
+        items = (data or {}).get("items", []) or []
+        # Ensure list of dicts only
+        return [it for it in items if isinstance(it, dict)]
     except Exception:
         return []
 
@@ -120,6 +124,55 @@ def _get_show_episodes(show_id: str, limit: int = MAX_SHOW_EPISODES) -> List[dic
 def _today_str() -> str:
     return datetime.now(TZ).date().isoformat()  # 'YYYY-MM-DD'
 
+def _inject_css_once():
+    if st.session_state.get("_pod_css_loaded"):
+        return
+    st.session_state["_pod_css_loaded"] = True
+    st.markdown(
+        """
+<style>
+.pod-card {
+  background: rgba(255,255,255,0.66);
+  border: 1px solid rgba(0,0,0,0.06);
+  border-radius: 16px;
+  padding: 14px 16px;
+  box-shadow: 0 10px 24px rgba(0,0,0,0.10);
+  margin-bottom: 12px;
+  position: relative;
+}
+.pod-title {
+  font-weight: 800; margin: 0 0 4px 0; color: #0f172a; letter-spacing: .1px;
+}
+.pod-meta {
+  font-size: 0.9rem; opacity: 0.8; margin-bottom: 10px;
+}
+.pod-actions a {
+  display: inline-block;
+  text-decoration: none !important;
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(0,0,0,0.10);
+  font-weight: 800; font-size: 0.9rem;
+}
+.pod-actions a.spotify {
+  background: #1DB954; color: #fff; border: 1px solid #17a84a;
+  box-shadow: 0 6px 14px rgba(29,185,84,0.35);
+}
+.pod-actions a.spotify:hover {
+  filter: brightness(1.05);
+}
+.pod-badge {
+  position: absolute; top: 10px; right: 10px;
+  background: linear-gradient(135deg, #f59e0b, #f97316);
+  color: #fff; font-weight: 900; font-size: .7rem;
+  padding: 2px 8px; border-radius: 999px;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.18);
+}
+</style>
+        """,
+        unsafe_allow_html=True,
+    )
+
 def _episode_card(show_display: str, ep: dict):
     title = ep.get("name", "Untitled")
     url = ep.get("external_urls", {}).get("spotify", "")
@@ -127,21 +180,12 @@ def _episode_card(show_display: str, ep: dict):
 
     st.markdown(
         f"""
-<div style="
-  background: rgba(255,255,255,0.6);
-  border: 1px solid rgba(0,0,0,0.06);
-  border-radius: 14px;
-  padding: 12px 14px;
-  box-shadow: 0 6px 16px rgba(0,0,0,0.08);
-  margin-bottom: 10px;">
-  <div style="font-weight:700; color:#0f172a; margin: 0 0 4px 0;">{title}</div>
-  <div style="font-size:0.9rem; opacity:0.8; margin-bottom:8px;">{show_display} — {date}</div>
-  <div>
-    <a href="{url}" target="_blank" style="
-      display:inline-block; text-decoration:none; padding:6px 10px; border-radius:999px;
-      border:1px solid rgba(0,0,0,0.10); font-weight:700; font-size:0.9rem;">
-      ▶︎ Listen on Spotify
-    </a>
+<div class="pod-card">
+  <div class="pod-badge">NEW</div>
+  <div class="pod-title">{title}</div>
+  <div class="pod-meta">{show_display} — {date}</div>
+  <div class="pod-actions">
+    <a class="spotify" href="{url}" target="_blank">▶︎ Listen on Spotify</a>
   </div>
 </div>
         """,
@@ -152,6 +196,8 @@ def _episode_card(show_display: str, ep: dict):
 
 def render():
     st.header("🎧 New Podcast Episodes (Today)")
+
+    _inject_css_once()
 
     cid, cs = _spotify_creds()
     if not cid or not cs:
@@ -168,9 +214,13 @@ def render():
             continue
 
         episodes = _get_show_episodes(sid, limit=MAX_SHOW_EPISODES)
-        todays = [ep for ep in episodes if ep.get("release_date") == today]
 
-        # Removed the per-show subheader line as requested
+        # 🔧 Robust filter: guard against None/non-dicts
+        todays = [
+            ep for ep in episodes
+            if isinstance(ep, dict) and ep.get("release_date") == today
+        ]
+
         for ep in todays:
             _episode_card(show_display, ep)
         total_found += len(todays)
