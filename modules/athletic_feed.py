@@ -9,46 +9,51 @@ import streamlit as st
 
 FEED_URL = "https://www.nytimes.com/athletic/rss/football/manchester-united/"
 
-# --- Safe image helper --------------------------------------------------------
+# --- Safe image helper + compatibility ----------------------------------------
 try:
     from PIL import Image as _PILImage  # optional
 except Exception:
     _PILImage = None  # type: ignore
 
 
-def _st_image_safe(img: Any, *, use_container_width: bool = True) -> None:
+def _image_compat(img: Any, *, container_width: bool = True) -> None:
     """
-    Robust wrapper for st.image that accepts:
-      - URL strings
-      - bytes / bytearray
-      - PIL.Image.Image
-      - requests.Response (uses .content)
-      - file-like objects with .read()
-    Silently skips if nothing valid is provided.
+    Call st.image with compatibility across Streamlit versions:
+    - Prefer use_container_width (newer)
+    - Fallback to use_column_width=True (older)
+    Accepts URL string, bytes, PIL image, requests-like response, or file-like .read().
     """
     if img is None:
         return
+
+    def _call_image(obj):
+        try:
+            st.image(obj, use_container_width=container_width)
+        except TypeError:
+            # Older Streamlit (<1.26) doesn't support use_container_width
+            st.image(obj, use_column_width=True)
+
     try:
         # URL string
         if isinstance(img, str):
             if img.strip():
-                st.image(img, use_container_width=use_container_width)
+                _call_image(img)
             return
 
         # Raw bytes
         if isinstance(img, (bytes, bytearray)):
-            st.image(img, use_container_width=use_container_width)
+            _call_image(img)
             return
 
         # PIL Image
         if _PILImage is not None and isinstance(img, _PILImage.Image):  # type: ignore[attr-defined]
-            st.image(img, use_container_width=use_container_width)
+            _call_image(img)
             return
 
         # requests.Response
         content = getattr(img, "content", None)
         if isinstance(content, (bytes, bytearray)):
-            st.image(content, use_container_width=use_container_width)
+            _call_image(content)
             return
 
         # File-like with .read()
@@ -56,7 +61,7 @@ def _st_image_safe(img: Any, *, use_container_width: bool = True) -> None:
         if callable(reader):
             data = reader()
             if isinstance(data, (bytes, bytearray)):
-                st.image(data, use_container_width=use_container_width)
+                _call_image(data)
             return
     except Exception as e:
         st.caption(f"Image unavailable ({e})")
@@ -103,7 +108,7 @@ def _first_image(entry) -> Optional[str]:
         if url:
             return url
 
-    # content:encoded / summary HTML
+    # content/summary HTML
     for key in ("content", "summary", "description"):
         blob = entry.get(key)
         if isinstance(blob, list) and blob:
@@ -130,25 +135,28 @@ def render():
         feed = feedparser.parse(FEED_URL)
 
     # Graceful empty-feed handling
-    feed_title = ""
     try:
         feed_title = feed.feed.get("title", "Manchester United - The Athletic")
     except Exception:
         feed_title = "Manchester United - The Athletic"
 
-    st.caption(
-        f"Source: {urlparse(FEED_URL).netloc} • {feed_title}"
-    )
+    st.caption(f"Source: {urlparse(FEED_URL).netloc} • {feed_title}")
+
+    # Controls
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        q = st.text_input("Search title/summary", "", placeholder="e.g. Ten Hag, transfer, injury")
+    with c2:
+        max_items = st.number_input("Max items", min_value=1, max_value=20, value=5, step=1)
 
     # Filters
     entries_raw = getattr(feed, "entries", []) or []
     authors = sorted({(e.get("author") or "").strip() for e in entries_raw if e.get("author")})
-    q = st.text_input("Search title/summary", "")
     author = st.selectbox("Filter by author", ["(All)"] + authors, index=0)
 
     # Apply filters
-    entries = []
     q_lower = q.lower().strip()
+    entries = []
     for e in entries_raw:
         title = e.get("title", "")
         summary = e.get("summary", "") or e.get("description", "")
@@ -160,11 +168,12 @@ def render():
             continue
         entries.append(e)
 
-    # Sort newest first
+    # Sort newest first and cap to max_items
     entries.sort(key=lambda x: _to_dt(x) or datetime.min, reverse=True)
+    entries = entries[: int(max_items)]
 
     if not entries:
-        st.info("No matching articles right now. Try clearing filters or check back later.")
+        st.info("No matching articles right now. Try clearing filters or increase Max items.")
         return
 
     # Render cards
@@ -190,9 +199,10 @@ def render():
 
             with cols[1]:
                 if img:
-                    _st_image_safe(img, use_container_width=True)
+                    _image_compat(img, container_width=True)
                 else:
                     st.caption("No image")
+
 
 # Local debug
 if __name__ == "__main__":
