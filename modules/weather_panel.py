@@ -2,19 +2,17 @@
 from __future__ import annotations
 import os
 import requests
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta
 import streamlit as st
 from statistics import mean
 from collections import Counter
 
 # -------------------------------------------------------------------
 # Apple-style Weather Panel for Jarvis
-# Current + adaptive Morning/Afternoon/Evening (side-by-side)
-# - Windows 06–12 / 12–18 / 18–24
-# - Today’s remaining windows first (chronological), then tomorrow’s
-# - Tiny orange "T" circle badge for tomorrow
-# - No city input above: optional expander *below* to change city
-# - Style advice card under the row
+# Current + Morning/Afternoon/Evening forecast (side-by-side)
+# Distinct windows; past windows use *tomorrow*; style advice card.
+# - No city input above the widget (uses default_city)
+# - Tiny orange "T" badge on any pill that corresponds to tomorrow
 # -------------------------------------------------------------------
 
 API_TIMEOUT = 8
@@ -57,7 +55,7 @@ def _emoji_for(desc: str) -> str:
     d = (desc or "").lower()
     if "storm" in d or "thunder" in d:
         return "⛈️"
-    if "rain" in d or "drizzle" in d or "shower" in d:
+    if "rain" in d or "drizzle" in d:
         return "🌧️"
     if "snow" in d or "sleet" in d:
         return "❄️"
@@ -67,16 +65,23 @@ def _emoji_for(desc: str) -> str:
         return "☁️"
     return "☀️"
 
-WINDOWS = [
-    ("Morning", 6, 12),
-    ("Afternoon", 12, 18),
-    ("Evening", 18, 24),
-]
+def _window_for_label(now_hour: int, label: str):
+    # hour ranges are [start, end) in local hours
+    windows = {
+        "Morning": (6, 12),
+        "Afternoon": (12, 18),
+        "Evening": (18, 24),
+    }
+    return windows[label]
 
-def _target_date_for_window(now: datetime, start_h: int, end_h: int) -> date:
-    return (now + timedelta(days=1)).date() if now.hour >= end_h else now.date()
+def _pick_day_for_window(now: datetime, start_h: int, end_h: int):
+    # If the window has already passed today, use tomorrow for that window
+    if now.hour >= end_h:
+        return (now + timedelta(days=1)).date()
+    return now.date()
 
-def _summarize_window(forecast_list, target_date: date, start_h: int, end_h: int):
+def _summarize_window(forecast_list, target_date, start_h, end_h):
+    """Summarize temps/desc/pop/wind for entries within the window."""
     if not forecast_list:
         return None
 
@@ -91,7 +96,7 @@ def _summarize_window(forecast_list, target_date: date, start_h: int, end_h: int
         if start_h <= dt.hour < end_h:
             window_items.append(x)
 
-    # Gentle widening if exact slots don't align
+    # Fallback: if no items in exact window, widen to +/- 2 hours
     if not window_items:
         for widen in (1, 2):
             widened = []
@@ -118,21 +123,27 @@ def _summarize_window(forecast_list, target_date: date, start_h: int, end_h: int
         w = i.get("weather") or []
         if w and isinstance(w, list) and w[0].get("description"):
             descs.append(w[0]["description"])
-    pops  = [i.get("pop", 0) for i in window_items]
+    pops  = [i.get("pop", 0) for i in window_items]  # probability of precipitation (0..1)
     winds = [i.get("wind", {}).get("speed", 0) for i in window_items]
 
     if not temps or not descs:
         return None
 
     avg_temp = round(mean(temps))
+    # Mode-ish description (most common)
     desc = Counter(descs).most_common(1)[0][0].capitalize()
+    # Take max precipitation chance within the window
     pop = max(pops) if pops else 0
-    wind = round(mean([w for w in winds if isinstance(w, (int, float))])) if winds else 0
+    # Average wind
+    wind_vals = [w for w in winds if isinstance(w, (int, float))]
+    wind = round(mean(wind_vals)) if wind_vals else 0
 
     return {"temp": avg_temp, "desc": desc, "pop": pop, "wind": wind}
 
 def _style_advice(current_desc: str, current_temp: int, current_wind: int, daypart_pop_max: float):
+    """Generate a short clothing/gear tip based on rain risk, temp, and wind."""
     tip = []
+    # Rain/precip logic prefers daypart risk if higher
     d = (current_desc or "").lower()
     rainish = any(k in d for k in ["rain", "drizzle", "shower", "storm"])
     pop = max(daypart_pop_max, 1.0 if rainish else 0.0)
@@ -156,73 +167,11 @@ def _style_advice(current_desc: str, current_temp: int, current_wind: int, daypa
 
     return " ".join(tip) if tip else "Dress comfortably for the day."
 
-def _inject_css_once():
-    if st.session_state.get("_wx_css_loaded"):
-        return
-    st.session_state["_wx_css_loaded"] = True
-    st.markdown(
-        """
-<style>
-/* Card + pills */
-.wx-card {
-  background: linear-gradient(135deg, #8EC5FC 0%, #3B82F6 100%);
-  padding: 1.2rem 1.6rem; border-radius: 1.2rem;
-  color: #ffffff; box-shadow: 0 8px 20px rgba(0,0,0,0.25);
-  border: 1px solid rgba(255,255,255,0.25);
-}
-.wx-main { display:flex; align-items:center; gap:12px; margin-top:.25rem; }
-.wx-temp { font-size:3rem; font-weight:800; line-height:1; }
-.wx-sub  { font-size:1rem; opacity:.95; }
-
-/* Pills row */
-.wx-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 12px; }
-.wx-pill {
-  background: rgba(255,255,255,0.60);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
-  border: 1px solid rgba(0,0,0,0.08);
-  border-radius: 1rem;
-  padding: 0.7rem 0.8rem;
-  text-align: center;
-  box-shadow: 0 4px 14px rgba(0,0,0,0.12);
-  position: relative;
-  overflow: hidden;
-}
-.wx-title { margin: 0; font-weight: 700; color: #0f172a; }
-.wx-emoji { font-size: 1.6rem; margin: .15rem 0 .1rem 0; }
-.wx-temp-sm { margin: 0; font-size: 1rem; font-weight: 700; color: #0f172a; }
-.wx-desc { margin: 0; font-size: .85rem; opacity: .85; color: #0f172a; }
-
-/* Tiny orange circle "T" badge (tomorrow) */
-.wx-badge-t {
-  position: absolute; top: 8px; right: 8px;
-  width: 18px; height: 18px; border-radius: 999px;
-  background: #f97316;
-  color: #fff; font-weight: 800; font-size: 0.7rem;
-  display:flex; align-items:center; justify-content:center;
-  box-shadow: 0 2px 6px rgba(0,0,0,0.18);
-}
-
-/* Advice card */
-.wx-advice {
-  margin-top: .8rem;
-  background: linear-gradient(135deg, #fdfbfb 0%, #ebedee 100%);
-  border: 1px solid rgba(0,0,0,0.06);
-  border-radius: 1rem;
-  padding: 0.9rem 1rem;
-  color: #0f172a;
-  box-shadow: 0 6px 16px rgba(0,0,0,0.12);
-}
-</style>
-        """,
-        unsafe_allow_html=True,
-    )
-
 def render(default_city: str = "Basingstoke"):
     st.header("🌤️ Weather Forecast")
 
-    # No city input above. We use a stored city or default.
-    city = st.session_state.get("_wx_city", default_city)
+    # No city input above; just use the default_city (or change in code if needed)
+    city = default_city
 
     data = get_weather_data(city)
     if not data:
@@ -244,105 +193,125 @@ def render(default_city: str = "Basingstoke"):
     emoji = _emoji_for(desc)
     asof = datetime.now().strftime("%I:%M %p").lstrip("0")
 
-    _inject_css_once()
-
     # ---- Current conditions card ----
     st.markdown(
         f"""
-        <div class="wx-card">
+        <div style="
+            background: linear-gradient(135deg, #8EC5FC 0%, #3B82F6 100%);
+            padding: 1.2rem 1.6rem; border-radius: 1.2rem;
+            color: #ffffff; box-shadow: 0 8px 20px rgba(0,0,0,0.25);
+            border: 1px solid rgba(255,255,255,0.25);
+        ">
             <div style="display:flex; justify-content:space-between; align-items:baseline;">
                 <h2 style="margin:0; font-weight:700; letter-spacing:.2px;">{emoji} {name}</h2>
                 <div style="opacity:.9; font-size:.95rem;">as of {asof}</div>
             </div>
-            <div class="wx-main">
-                <div class="wx-temp">{temp}°C</div>
-                <div class="wx-sub">{desc} · 💧 {humidity}% · 🌬️ {wind} m/s</div>
+            <div style="display:flex; align-items:center; gap:12px; margin-top:.25rem;">
+                <div style="font-size:3rem; font-weight:800; line-height:1;">{temp}°C</div>
+                <div style="font-size:1rem; opacity:.95;">{desc} · 💧 {humidity}% · 🌬️ {wind} m/s</div>
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    # ---- Build adaptive daypart order: today's remaining, then tomorrow ----
+    # ---- Build distinct dayparts with windowing logic ----
     f_list = forecast.get("list", []) if isinstance(forecast, dict) else []
     now = datetime.now()
+    parts = {}
+    tomorrow_flags = {}
+    daypart_order = ["Morning", "Afternoon", "Evening"]
+    for label in daypart_order:
+        start_h, end_h = _window_for_label(now.hour, label)
+        target_date = _pick_day_for_window(now, start_h, end_h)
+        parts[label] = _summarize_window(f_list, target_date, start_h, end_h)
+        tomorrow_flags[label] = (target_date != now.date())
 
-    items = []
-    for label, start_h, end_h in WINDOWS:
-        tdate = _target_date_for_window(now, start_h, end_h)
-        info = _summarize_window(f_list, tdate, start_h, end_h)
-        items.append({
-            "label": label,
-            "start": start_h,
-            "end": end_h,
-            "date": tdate,
-            "info": info,
-            "tomorrow": (tdate != now.date())
-        })
+    # ---- Show side-by-side pills (add tiny orange "T" for tomorrow slots) ----
+    st.markdown("### 🕒 Today & Next")
+    cols = st.columns(3)
+    daypart_pops = []
+    for i, label in enumerate(daypart_order):
+        info = parts.get(label)
+        is_tomorrow = tomorrow_flags.get(label, False)
+        with cols[i]:
+            if info:
+                daypart_pops.append(info.get("pop", 0))
+                badge = (
+                    '<div style="position:absolute; top:8px; right:8px; '
+                    'width:18px; height:18px; border-radius:999px; '
+                    'background:#f97316; color:#fff; font-weight:800; '
+                    'font-size:0.7rem; display:flex; align-items:center; '
+                    'justify-content:center; box-shadow:0 2px 6px rgba(0,0,0,0.18);">T</div>'
+                    if is_tomorrow else ""
+                )
+                st.markdown(
+                    f"""
+                    <div style="
+                        position: relative;
+                        background: rgba(255,255,255,0.60);
+                        backdrop-filter: blur(6px);
+                        -webkit-backdrop-filter: blur(6px);
+                        border: 1px solid rgba(0,0,0,0.08);
+                        border-radius: 1rem;
+                        padding: 0.7rem 0.8rem;
+                        text-align: center;
+                        box-shadow: 0 4px 14px rgba(0,0,0,0.12);
+                    ">
+                        {badge}
+                        <p style="margin:0; font-weight:700; color:#0f172a;">{label}</p>
+                        <p style="font-size:1.6rem; margin:.15rem 0 .1rem 0;">{_emoji_for(info['desc'])}</p>
+                        <p style="margin:0; font-size:1rem; font-weight:700; color:#0f172a;">{info['temp']}°C</p>
+                        <p style="margin:0; font-size:.85rem; opacity:.85; color:#0f172a;">{info['desc']}</p>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            else:
+                daypart_pops.append(0)
+                badge = (
+                    '<div style="position:absolute; top:8px; right:8px; '
+                    'width:18px; height:18px; border-radius:999px; '
+                    'background:#f97316; color:#fff; font-weight:800; '
+                    'font-size:0.7rem; display:flex; align-items:center; '
+                    'justify-content:center; box-shadow:0 2px 6px rgba(0,0,0,0.18);">T</div>'
+                    if is_tomorrow else ""
+                )
+                st.markdown(
+                    f"""
+                    <div style="
+                        position: relative;
+                        background: rgba(255,255,255,0.50);
+                        backdrop-filter: blur(5px);
+                        border: 1px solid rgba(0,0,0,0.06);
+                        border-radius: 1rem;
+                        padding: 0.7rem 0.8rem;
+                        text-align: center;
+                    ">
+                        {badge}
+                        <p style="margin:0; font-weight:700;">{label}</p>
+                        <p style="margin:.2rem 0 0 0; font-size:.9rem; opacity:.75;">No data</p>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
-    items.sort(key=lambda x: (x["date"] != now.date(), x["start"]))
-
-    # ---- Pills row (no caption text) ----
-    st.markdown('<div class="wx-row">', unsafe_allow_html=True)
-    for data_item in items:
-        label = data_item["label"]
-        info  = data_item["info"]
-        is_tomorrow = data_item["tomorrow"]
-
-        if info:
-            badge_html = '<div class="wx-badge-t">T</div>' if is_tomorrow else ''
-            st.markdown(
-                f"""
-                <div class="wx-pill">
-                    {badge_html}
-                    <p class="wx-title">{label}</p>
-                    <p class="wx-emoji">{_emoji_for(info['desc'])}</p>
-                    <p class="wx-temp-sm">{info['temp']}°C</p>
-                    <p class="wx-desc">{info['desc']}</p>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-        else:
-            badge_html = '<div class="wx-badge-t">T</div>' if is_tomorrow else ''
-            st.markdown(
-                f"""
-                <div class="wx-pill">
-                    {badge_html}
-                    <p class="wx-title">{label}</p>
-                    <p class="wx-desc" style="margin-top:.2rem; opacity:.75;">No data</p>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-    st.markdown('</div>', unsafe_allow_html=True)  # /wx-row
-
-    # ---- Style advice card ----
-    # Collate max precipitation from dayparts to inform advice
-    daypart_pop_max = 0.0
-    for it in items:
-        if it["info"]:
-            daypart_pop_max = max(daypart_pop_max, it["info"].get("pop", 0) or 0.0)
-
-    advice = _style_advice(desc, temp, wind, daypart_pop_max)
+    # ---- Style advice card (depends on rain/temp/wind) ----
+    advice = _style_advice(desc, temp, wind, max(daypart_pops) if daypart_pops else 0)
     st.markdown(
         f"""
-        <div class="wx-advice">
+        <div style="
+            margin-top: .8rem;
+            background: linear-gradient(135deg, #fdfbfb 0%, #ebedee 100%);
+            border: 1px solid rgba(0,0,0,0.06);
+            border-radius: 1rem;
+            padding: 0.9rem 1rem;
+            color: #0f172a;
+            box-shadow: 0 6px 16px rgba(0,0,0,0.12);
+        ">
             <div style="font-weight:700; margin-bottom:.25rem;">👕 What to wear</div>
             <div style="opacity:.95;">{advice}</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
-
-    # ---- Optional: small expander below to change city (no box above) ----
-    with st.expander("Change city", expanded=False):
-        new_city = st.text_input(
-            "City",
-            value=city,
-            key="weather_city_input_hidden",
-            placeholder="Type a city…",
-        )
-        if new_city and new_city.strip() != city:
-            st.session_state["_wx_city"] = new_city.strip()
-            st.rerun()
