@@ -6,7 +6,6 @@ from datetime import datetime, timedelta
 import streamlit as st
 from statistics import mean
 from collections import Counter
-import textwrap
 
 # -------------------------------------------------------------------
 # Apple-style Weather Panel for Jarvis
@@ -67,7 +66,6 @@ def _emoji_for(desc: str) -> str:
     return "☀️"
 
 def _window_for_label(now_hour: int, label: str):
-    # hour ranges are [start, end) in local hours
     windows = {
         "Morning": (6, 12),
         "Afternoon": (12, 18),
@@ -76,16 +74,13 @@ def _window_for_label(now_hour: int, label: str):
     return windows[label]
 
 def _pick_day_for_window(now: datetime, start_h: int, end_h: int):
-    # If the window has already passed today, use tomorrow for that window
     if now.hour >= end_h:
         return (now + timedelta(days=1)).date()
     return now.date()
 
 def _summarize_window(forecast_list, target_date, start_h, end_h):
-    """Summarize temps/desc/pop/wind for entries within the window."""
     if not forecast_list:
         return None
-
     window_items = []
     for x in forecast_list:
         try:
@@ -97,7 +92,6 @@ def _summarize_window(forecast_list, target_date, start_h, end_h):
         if start_h <= dt.hour < end_h:
             window_items.append(x)
 
-    # Fallback: if no items in exact window, widen to +/- 2 hours
     if not window_items:
         for widen in (1, 2):
             widened = []
@@ -124,27 +118,22 @@ def _summarize_window(forecast_list, target_date, start_h, end_h):
         w = i.get("weather") or []
         if w and isinstance(w, list) and w[0].get("description"):
             descs.append(w[0]["description"])
-    pops  = [i.get("pop", 0) for i in window_items]  # probability of precipitation (0..1)
+    pops  = [i.get("pop", 0) for i in window_items]
     winds = [i.get("wind", {}).get("speed", 0) for i in window_items]
 
     if not temps or not descs:
         return None
 
     avg_temp = round(mean(temps))
-    # Mode-ish description (most common)
     desc = Counter(descs).most_common(1)[0][0].capitalize()
-    # Take max precipitation chance within the window
     pop = max(pops) if pops else 0
-    # Average wind
     wind_vals = [w for w in winds if isinstance(w, (int, float))]
     wind = round(mean(wind_vals)) if wind_vals else 0
 
     return {"temp": avg_temp, "desc": desc, "pop": pop, "wind": wind}
 
 def _style_advice(current_desc: str, current_temp: int, current_wind: int, daypart_pop_max: float):
-    """Generate a short clothing/gear tip based on rain risk, temp, and wind."""
     tip = []
-    # Rain/precip logic prefers daypart risk if higher
     d = (current_desc or "").lower()
     rainish = any(k in d for k in ["rain", "drizzle", "shower", "storm"])
     pop = max(daypart_pop_max, 1.0 if rainish else 0.0)
@@ -168,16 +157,21 @@ def _style_advice(current_desc: str, current_temp: int, current_wind: int, daypa
 
     return " ".join(tip) if tip else "Dress comfortably for the day."
 
+# ---- NEW: robust HTML renderer that strips indentation on every line ----
 def _html(s: str) -> str:
-    """Remove leading indentation/newlines so Streamlit doesn't render as code."""
-    return textwrap.dedent(s).strip()
+    if not s:
+        return s
+    lines = s.splitlines()
+    # strip leading spaces/tabs on every line to avoid markdown code blocks
+    lines = [ln.lstrip() for ln in lines]
+    out = "\n".join(lines).strip()
+    # ensure the very first char is '<' so markdown doesn't treat it as text
+    return out
 
 def render(default_city: str = "Basingstoke"):
     st.header("🌤️ Weather Forecast")
 
-    # No city input above; just use the default_city (or change in code if needed)
     city = default_city
-
     data = get_weather_data(city)
     if not data:
         st.warning("Weather data unavailable.")
@@ -227,7 +221,7 @@ def render(default_city: str = "Basingstoke"):
         parts[label] = _summarize_window(f_list, target_date, start_h, end_h)
         tomorrow_flags[label] = (target_date != now.date())
 
-    # ---- Show side-by-side pills (add tiny orange "T" for tomorrow slots) ----
+    # ---- Show side-by-side pills (with tiny orange "T" for tomorrow) ----
     st.markdown("### 🕒 Today & Next")
     cols = st.columns(3)
     daypart_pops = []
