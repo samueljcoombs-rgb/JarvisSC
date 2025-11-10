@@ -18,14 +18,30 @@ def render(
     chat_module=None,
     weather_module=None,
     podcasts_module=None,
-    athletic_module=None,   # NEW
+    athletic_module=None,
 ):
+    # Page header
     st.subheader(f"Today: {datetime.now().strftime('%A, %B %d, %Y')}")
 
-    c1, c2 = st.columns([2, 1])
+    # Layout: Athletic feed LEFT (narrow), Chat + widgets RIGHT (wide)
+    # Adjust ratios if you want the Athletic list wider: e.g., [3, 5]
+    left_col, right_col = st.columns([3, 5], gap="large")
 
-    # Left: chat
-    with c1:
+    # LEFT: Athletic feed (runs down the left)
+    with left_col:
+        st.header("⚽ The Athletic Feed")
+        if athletic_module:
+            athletic_module.render()
+
+    # RIGHT: Weather at the very top, then Chat, then Podcasts
+    with right_col:
+        # Weather module first (so it appears at the top, not halfway down)
+        if weather_module:
+            st.header("🌤️ Weather")
+            weather_module.render()
+            st.divider()
+
+        # Chat
         st.header("💬 Chat with Jarvis")
         if chat_module:
             chat_module.render()
@@ -49,13 +65,8 @@ def render(
         st.session_state.chat = lst
         safe_save_json(temp_chat_file, lst)
 
-    # Right: widgets
-    with c2:
-        if weather_module:
-            weather_module.render()
+        # Podcasts (below chat)
         if podcasts_module:
             st.divider()
+            st.header("🎧 Podcasts")
             podcasts_module.render()
-        if athletic_module:
-            st.divider()
-            athletic_module.render()
