@@ -15,6 +15,10 @@ try:
 except Exception:
     _PILImage = None  # type: ignore
 
+def render(show_header: bool = True):
+    if show_header:
+        st.subheader("⚽ Man United News")
+    # ...rest of your existing rendering...
 
 def _image_compat(img: Any, *, container_width: bool = True) -> None:
     """
