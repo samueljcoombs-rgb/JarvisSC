@@ -2,18 +2,20 @@
 from __future__ import annotations
 import os
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 import streamlit as st
+from statistics import mean
+from collections import Counter
 
 # -------------------------------------------------------------------
 # Apple-style Weather Panel for Jarvis
-# Shows current weather + morning/afternoon/evening forecast (side-by-side)
+# Current + Morning/Afternoon/Evening forecast (side-by-side)
+# Distinct windows; past windows use *tomorrow*; style advice card.
 # -------------------------------------------------------------------
 
 API_TIMEOUT = 8
 
 def _api_key():
-    # Uses env or Streamlit secrets; last fallback is your previous sample’s key.
     return (
         os.getenv("OWM_API_KEY")
         or st.secrets.get("OWM_API_KEY")
@@ -21,9 +23,6 @@ def _api_key():
     )
 
 def get_weather_data(city: str = "Basingstoke"):
-    """
-    Fetch current + forecast weather data from OpenWeatherMap.
-    """
     api_key = _api_key()
     if not api_key:
         return None
@@ -42,16 +41,13 @@ def get_weather_data(city: str = "Basingstoke"):
             timeout=API_TIMEOUT,
         ).json()
 
-        # Minimal shape checks
         if not isinstance(current, dict) or "main" not in current or "weather" not in current:
             return None
-        if not isinstance(forecast, dict) or "list" not in forecast or not isinstance(forecast["list"], list):
-            return {"current": current, "forecast": {"list": []}}
-
+        if not isinstance(forecast, dict) or "list" not in forecast:
+            forecast = {"list": []}
         return {"current": current, "forecast": forecast}
     except Exception:
         return None
-
 
 def _emoji_for(desc: str) -> str:
     d = (desc or "").lower()
@@ -67,32 +63,108 @@ def _emoji_for(desc: str) -> str:
         return "☁️"
     return "☀️"
 
+def _window_for_label(now_hour: int, label: str):
+    # hour ranges are [start, end) in local hours
+    windows = {
+        "Morning": (6, 12),
+        "Afternoon": (12, 18),
+        "Evening": (18, 24),
+    }
+    return windows[label]
 
-def _closest_for_hour_today(forecast_list, target_hour: int):
-    """
-    Pick the forecast entry closest to target_hour for *today*.
-    Falls back to the nearest entry overall if none are today.
-    """
+def _pick_day_for_window(now: datetime, start_h: int, end_h: int):
+    # If the window has already passed today, use tomorrow for that window
+    if now.hour >= end_h:
+        return (now + timedelta(days=1)).date()
+    return now.date()
+
+def _summarize_window(forecast_list, target_date, start_h, end_h):
+    """Summarize temps/desc/pop/wind for entries within the window."""
     if not forecast_list:
         return None
 
-    today = datetime.now().date()
-    today_entries = [x for x in forecast_list if datetime.fromtimestamp(x["dt"]).date() == today]
-    pool = today_entries if today_entries else forecast_list
+    window_items = []
+    for x in forecast_list:
+        dt = datetime.fromtimestamp(x["dt"])
+        if dt.date() != target_date:
+            continue
+        if start_h <= dt.hour < end_h:
+            window_items.append(x)
 
-    def score(x):
-        return abs(datetime.fromtimestamp(x["dt"]).hour - target_hour)
+    # Fallback: if no items in exact window, widen to +/- 2 hours
+    if not window_items:
+        for widen in (1, 2):
+            widened = []
+            for x in forecast_list:
+                dt = datetime.fromtimestamp(x["dt"])
+                if dt.date() != target_date:
+                    continue
+                if (start_h - widen) <= dt.hour < (end_h + widen):
+                    widened.append(x)
+            if widened:
+                window_items = widened
+                break
 
-    return min(pool, key=score) if pool else None
+    if not window_items:
+        return None
 
+    temps = [i["main"]["temp"] for i in window_items if "main" in i and "temp" in i["main"]]
+    descs = [i["weather"][0]["description"] for i in window_items if "weather" in i and i["weather"]]
+    pops  = [i.get("pop", 0) for i in window_items]  # probability of precipitation (0..1)
+    winds = [i.get("wind", {}).get("speed", 0) for i in window_items]
+
+    if not temps or not descs:
+        return None
+
+    avg_temp = round(mean(temps))
+    # Mode-ish description (most common)
+    desc = Counter(descs).most_common(1)[0][0].capitalize()
+    # Take max precipitation chance within the window
+    pop = max(pops) if pops else 0
+    # Average wind
+    wind = round(mean(winds)) if winds else 0
+
+    return {"temp": avg_temp, "desc": desc, "pop": pop, "wind": wind}
+
+def _style_advice(current_desc: str, current_temp: int, current_wind: int, daypart_pop_max: float):
+    """Generate a short clothing/gear tip based on rain risk, temp, and wind."""
+    tip = []
+    # Rain/precip logic prefers daypart risk if higher
+    d = (current_desc or "").lower()
+    rainish = any(k in d for k in ["rain", "drizzle", "shower", "storm"])
+    pop = max(daypart_pop_max, 1.0 if rainish else 0.0)
+
+    if pop >= 0.6:
+        tip.append("🌂 High chance of rain — take an umbrella and a waterproof coat.")
+    elif pop >= 0.3:
+        tip.append("☔ Possible showers — a light jacket or compact umbrella is smart.")
+    else:
+        tip.append("😎 Low rain risk — dress for comfort.")
+
+    if current_temp <= 5:
+        tip.append("🧥 It’s cold — warm layers recommended.")
+    elif current_temp <= 12:
+        tip.append("🧣 Chilly — a light jacket or sweater helps.")
+    elif current_temp >= 24:
+        tip.append("🧴 Warm — consider sunscreen and breathable fabrics.")
+
+    if current_wind >= 8:
+        tip.append("💨 Windy — a windbreaker will help.")
+
+    return " ".join(tip) if tip else "Dress comfortably for the day."
 
 def render(default_city: str = "Basingstoke"):
-    """
-    Render the Apple-style weather card with side-by-side dayparts.
-    """
     st.header("🌤️ Weather Forecast")
 
-    city = st.text_input("City:", default_city, key="weather_city_input")
+    # Hidden label to remove “City: …” text above the widget
+    city = st.text_input(
+        label="",
+        value=default_city,
+        key="weather_city_input",
+        placeholder="Search city…",
+        label_visibility="collapsed",
+    )
+
     data = get_weather_data(city)
     if not data:
         st.warning("Weather data unavailable.")
@@ -101,7 +173,6 @@ def render(default_city: str = "Basingstoke"):
     current = data["current"]
     forecast = data["forecast"]
 
-    # Guard against incomplete payloads
     if "main" not in current or "weather" not in current:
         st.warning("Weather information incomplete.")
         return
@@ -114,7 +185,7 @@ def render(default_city: str = "Basingstoke"):
     emoji = _emoji_for(desc)
     asof = datetime.now().strftime("%I:%M %p").lstrip("0")
 
-    # ---- Current conditions card (bright gradient, clear contrast) ----
+    # ---- Current conditions card ----
     st.markdown(
         f"""
         <div style="
@@ -136,27 +207,25 @@ def render(default_city: str = "Basingstoke"):
         unsafe_allow_html=True,
     )
 
-    # ---- Forecast section ----
-    st.markdown("### 🕒 Today")
-
-    # Side-by-side Morning / Afternoon / Evening, aligned to typical local hours
-    slots = {"Morning": 9, "Afternoon": 15, "Evening": 21}
+    # ---- Build distinct dayparts with windowing logic ----
     f_list = forecast.get("list", []) if isinstance(forecast, dict) else []
-    items = []
-    for label, target_hour in slots.items():
-        entry = _closest_for_hour_today(f_list, target_hour)
-        if entry:
-            t = round(entry["main"]["temp"])
-            d = entry["weather"][0]["description"].capitalize()
-            items.append((label, t, d))
-        else:
-            items.append((label, None, None))
+    now = datetime.now()
+    parts = {}
+    daypart_order = ["Morning", "Afternoon", "Evening"]
+    for label in daypart_order:
+        start_h, end_h = _window_for_label(now.hour, label)
+        target_date = _pick_day_for_window(now, start_h, end_h)
+        parts[label] = _summarize_window(f_list, target_date, start_h, end_h)
 
-    cols = st.columns(len(items))
-    for i, (label, t, d) in enumerate(items):
+    # ---- Show side-by-side pills ----
+    st.markdown("### 🕒 Today & Next")
+    cols = st.columns(3)
+    daypart_pops = []
+    for i, label in enumerate(daypart_order):
+        info = parts.get(label)
         with cols[i]:
-            # Card styling: subtle glass on white/gray Streamlit background
-            if t is not None:
+            if info:
+                daypart_pops.append(info.get("pop", 0))
                 st.markdown(
                     f"""
                     <div style="
@@ -170,14 +239,15 @@ def render(default_city: str = "Basingstoke"):
                         box-shadow: 0 4px 14px rgba(0,0,0,0.12);
                     ">
                         <p style="margin:0; font-weight:700; color:#0f172a;">{label}</p>
-                        <p style="font-size:1.6rem; margin:.15rem 0 .1rem 0;">{_emoji_for(d)}</p>
-                        <p style="margin:0; font-size:1rem; font-weight:700; color:#0f172a;">{t}°C</p>
-                        <p style="margin:0; font-size:.85rem; opacity:.85; color:#0f172a;">{d}</p>
+                        <p style="font-size:1.6rem; margin:.15rem 0 .1rem 0;">{_emoji_for(info['desc'])}</p>
+                        <p style="margin:0; font-size:1rem; font-weight:700; color:#0f172a;">{info['temp']}°C</p>
+                        <p style="margin:0; font-size:.85rem; opacity:.85; color:#0f172a;">{info['desc']}</p>
                     </div>
                     """,
                     unsafe_allow_html=True,
                 )
             else:
+                daypart_pops.append(0)
                 st.markdown(
                     f"""
                     <div style="
@@ -194,3 +264,23 @@ def render(default_city: str = "Basingstoke"):
                     """,
                     unsafe_allow_html=True,
                 )
+
+    # ---- Style advice card (depends on rain/temp/wind) ----
+    advice = _style_advice(desc, temp, wind, max(daypart_pops) if daypart_pops else 0)
+    st.markdown(
+        f"""
+        <div style="
+            margin-top: .8rem;
+            background: linear-gradient(135deg, #fdfbfb 0%, #ebedee 100%);
+            border: 1px solid rgba(0,0,0,0.06);
+            border-radius: 1rem;
+            padding: 0.9rem 1rem;
+            color: #0f172a;
+            box-shadow: 0 6px 16px rgba(0,0,0,0.12);
+        ">
+            <div style="font-weight:700; margin-bottom:.25rem;">👕 What to wear</div>
+            <div style="opacity:.95;">{advice}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
