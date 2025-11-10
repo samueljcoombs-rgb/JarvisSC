@@ -1,227 +1,279 @@
 # modules/layout_manager.py
-# Jarvis Layout Manager — streamlit sidebar router for modular panels
+# Streamlit layout manager for Jarvis
+# - Preserves the classic layout: Weather + Spotify + Chat
+# - Adds Athletic Feed (code lives in modules/athletic_feed.py)
+# - Safe, lazy imports so missing modules won't crash the app
+# - Sidebar toggles are persisted in st.session_state
+# - Each panel renders inside cards with consistent spacing
+
 from __future__ import annotations
+
 import importlib
-import pkgutil
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Dict, Any, Tuple
+from typing import Callable, Dict, Optional
 
 import streamlit as st
 
-# ---- Config -----------------------------------------------------------------
-
-APP_TITLE = "Jarvis — AI Dashboard"
-SIDEBAR_TITLE = "Modules"
-SESSION_SELECTED_KEY = "layout_selected_key"
-SESSION_QUERY_PARAMS_LOCK = "layout_query_lock"
-
-# Known-first modules (loaded first if present; order matters)
-PREFERRED_MODULE_ORDER = [
-    "chat_ui",
-    "athletic_feed",
-    "weather_panel",
-]
-
-# Module package to scan
-MODULES_PACKAGE = "modules"
-
-# ---- Data model --------------------------------------------------------------
 
 @dataclass
-class Panel:
-    key: str                 # stable internal key (module name)
-    title: str               # display title in nav
-    render: Callable[[], None]  # function to render the panel
-    icon: Optional[str] = None  # optional emoji/icon prefix
+class ModuleSpec:
+    key: str
+    title: str
+    icon: str
+    module_name: str
+    # Preferred callable names in the module (checked in order)
+    callables: tuple[str, ...] = ("render",)
+    # Optional help text for tooltips
+    help: Optional[str] = None
 
-# ---- Registry ----------------------------------------------------------------
 
-def _try_import_module(mod_name: str):
+# ---- Registry: keep the “classic” panels and add Athletic Feed ----
+# If a module is missing, we skip it gracefully.
+MODULES: Dict[str, ModuleSpec] = {
+    "weather": ModuleSpec(
+        key="weather",
+        title="Weather",
+        icon=":sun_small_cloud:",
+        module_name="modules.weather_panel",
+        callables=("render_weather_panel", "render"),
+        help="Local forecast and conditions",
+    ),
+    "spotify": ModuleSpec(
+        key="spotify",
+        title="Spotify",
+        icon=":notes:",
+        module_name="modules.spotify_panel",
+        callables=("render_spotify_panel", "render_spotify_widget", "render"),
+        help="Now playing & quick controls",
+    ),
+    "athletic": ModuleSpec(
+        key="athletic",
+        title="Athletic Feed",
+        icon=":trophy:",
+        module_name="modules.athletic_feed",
+        callables=("render_athletic_feed", "render"),
+        help="Live sports headlines & fixtures",
+    ),
+    "chat": ModuleSpec(
+        key="chat",
+        title="Chat",
+        icon=":robot_face:",
+        module_name="modules.chat_ui",
+        callables=("render_chat_ui", "render"),
+        help="Your Jarvis conversation window",
+    ),
+}
+
+
+# ---- Utilities ----
+def _lazy_load_callable(module_name: str, candidates: tuple[str, ...]) -> Optional[Callable]:
+    """
+    Try to import a module and return the first available callable from candidates.
+    Returns None if neither the module nor any candidate callable exist.
+    """
     try:
-        return importlib.import_module(f"{MODULES_PACKAGE}.{mod_name}")
-    except Exception:
+        mod = importlib.import_module(module_name)
+    except Exception as e:
+        st.debug(f"[layout] Skipping '{module_name}': import failed: {e}")
         return None
 
-def _extract_panel(module, fallback_key: str) -> Optional[Panel]:
-    """Derive a Panel from a module if it exposes a render() function."""
-    if module is None:
-        return None
-    render_fn = getattr(module, "render", None)
-    if not callable(render_fn):
-        return None
+    for name in candidates:
+        fn = getattr(mod, name, None)
+        if callable(fn):
+            return fn
 
-    # Prefer module.TITLE, else Title Case from key
-    raw_title = getattr(module, "TITLE", None) or fallback_key.replace("_", " ").title()
-    icon = getattr(module, "ICON", None)  # optional; modules can set ICON = "🧠"
-    title = f"{icon} {raw_title}" if icon else raw_title
+    st.debug(f"[layout] Module '{module_name}' has no callable in {candidates}")
+    return None
 
-    # Normalize key
-    key = getattr(module, "KEY", None) or fallback_key
-    return Panel(key=key, title=title, render=render_fn, icon=icon)
 
-def _discover_modules() -> List[Panel]:
+def _card(title: str, icon: str, body_fn: Callable[[], None]):
     """
-    Discover panels by importing Python modules under the `modules` package
-    that expose a callable `render()` function. The order is:
-    1) PREFERRED_MODULE_ORDER (if found)
-    2) All other discovered modules A–Z
+    Consistent card styling wrapper for panels.
     """
-    discovered: Dict[str, Panel] = {}
-
-    # 1) Preferred order
-    for name in PREFERRED_MODULE_ORDER:
-        mod = _try_import_module(name)
-        p = _extract_panel(mod, name)
-        if p:
-            discovered[p.key] = p
-
-    # 2) Scan all submodules in /modules (lightweight)
-    package = importlib.import_module(MODULES_PACKAGE)
-    for finder, name, ispkg in pkgutil.iter_modules(package.__path__):
-        if ispkg:
-            continue
-        if name in discovered:
-            continue
-        mod = _try_import_module(name)
-        p = _extract_panel(mod, name)
-        if p:
-            discovered[p.key] = p
-
-    # Sort: keep preferred order first, then alphabetical by title
-    preferred_keys = [k for k in PREFERRED_MODULE_ORDER if k in discovered]
-    rest = sorted([k for k in discovered.keys() if k not in preferred_keys],
-                  key=lambda k: discovered[k].title.lower())
-    ordered_keys = preferred_keys + rest
-    return [discovered[k] for k in ordered_keys]
-
-def _sync_query_params(selected_key: str):
-    """
-    Keep ?panel=<key> in the URL so deep links work. We gate updates to avoid
-    Streamlit re-run storms when both sidebar and URL change at once.
-    """
-    qp = st.query_params
-    current = qp.get("panel", [None])
-    current = current[0] if isinstance(current, list) else current
-    lock = st.session_state.get(SESSION_QUERY_PARAMS_LOCK, False)
-
-    if not lock and current != selected_key:
-        st.session_state[SESSION_QUERY_PARAMS_LOCK] = True
-        st.query_params["panel"] = selected_key
-        # release lock next run
-    elif lock:
-        # One pass after we set it, unlock
-        st.session_state[SESSION_QUERY_PARAMS_LOCK] = False
-
-def _initial_selection(panels: List[Panel]) -> str:
-    """Pick initial selected panel using URL ?panel=<key> if present."""
-    if not panels:
-        return ""
-    qp = st.query_params
-    url_key = qp.get("panel", [None])
-    url_key = url_key[0] if isinstance(url_key, list) else url_key
-    keys = [p.key for p in panels]
-    if url_key in keys:
-        return url_key
-    # Fallback to first panel
-    return keys[0]
-
-# ---- Public API --------------------------------------------------------------
-
-def render_layout():
-    """
-    Render the full Jarvis layout: top header, sidebar navigation,
-    and the selected panel content area.
-    """
-    st.set_page_config(page_title=APP_TITLE, layout="wide")
-
-    # Discover panels
-    panels = _discover_modules()
-
-    # App Header
-    st.title(APP_TITLE)
-    st.caption("Modular, resilient, and memory-aware. ⚙️")
-
-    # Early exit if nothing to show
-    if not panels:
-        st.info("No modules with a `render()` function were found under `/modules`.")
-        return
-
-    # ---- Sidebar Nav ----
-    with st.sidebar:
-        st.header(SIDEBAR_TITLE)
-
-        # Build options for radio
-        titles_by_key = {p.key: p.title for p in panels}
-        keys = [p.key for p in panels]
-        titles = [titles_by_key[k] for k in keys]
-
-        # Seed selection from state or URL
-        if SESSION_SELECTED_KEY not in st.session_state:
-            st.session_state[SESSION_SELECTED_KEY] = _initial_selection(panels)
-
-        # Optional quick filter
-        filter_text = st.text_input("Filter", placeholder="Type to filter modules…").strip().lower()
-        if filter_text:
-            filtered_pairs = [(k, t) for k, t in zip(keys, titles) if filter_text in t.lower()]
-            if filtered_pairs:
-                keys, titles = zip(*filtered_pairs)  # type: ignore[assignment]
-                keys, titles = list(keys), list(titles)
-            else:
-                st.warning("No matches.")
-                keys, titles = [], []
-
-        # Radio for panel selection
-        if keys:
-            default_index = 0
-            if st.session_state[SESSION_SELECTED_KEY] in keys:
-                default_index = keys.index(st.session_state[SESSION_SELECTED_KEY])
-
-            choice_title = st.radio(
-                "Choose a panel",
-                titles,
-                index=default_index,
-                label_visibility="collapsed",
-            )
-            # Map back to key
-            selected_key = keys[titles.index(choice_title)]
-        else:
-            selected_key = ""
-
-        # Persist selection
-        st.session_state[SESSION_SELECTED_KEY] = selected_key
-
-        # Keep URL param in sync
-        if selected_key:
-            _sync_query_params(selected_key)
-
+    with st.container(border=True):
+        st.markdown(
+            f"<div style='display:flex;align-items:center;gap:.5rem'>"
+            f"<span style='font-size:1.1rem'>{icon}</span>"
+            f"<h3 style='margin:0'>{title}</h3>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
         st.divider()
-        st.caption("Tip: Use the filter to quickly jump between modules.")
+        body_fn()
 
-    # ---- Main Content ----
-    selected_panel: Optional[Panel] = next((p for p in panels if p.key == st.session_state[SESSION_SELECTED_KEY]), None)
 
-    if not selected_panel:
-        st.info("Select a module from the sidebar to get started.")
+def _init_state():
+    """
+    Initialize persistent toggle state for module visibility & layout.
+    """
+    if "lm_initialized" in st.session_state:
         return
 
-    # Render the chosen panel inside an error boundary
-    with st.container():
-        st.subheader(selected_panel.title)
-        try:
-            selected_panel.render()
-        except Exception as e:
-            st.error(f"Module `{selected_panel.key}` failed to render:\n\n{e}")
-            with st.expander("Traceback / Debug"):
-                st.exception(e)
+    # Default visibility: keep the classic feel on first run
+    defaults = {
+        "weather": True,
+        "spotify": True,
+        "athletic": True,   # new panel on by default
+        "chat": True,
+    }
+    for k, v in defaults.items():
+        st.session_state.setdefault(f"show_{k}", v)
 
-    # Footer
+    # Default layout mode
+    st.session_state.setdefault("layout_mode", "Dashboard")  # "Dashboard" | "Focus"
+
+    st.session_state["lm_initialized"] = True
+
+
+# ---- Public API ----
+def render_header(app_title: str = "Jarvis"):
+    """
+    Renders the top header with a compact identity bar.
+    Call this once near the top of app.py.
+    """
+    _init_state()
+    st.markdown(
+        f"""
+        <div style="
+            display:flex;
+            align-items:center;
+            justify-content:space-between;
+            padding:.6rem 0 .2rem 0;">
+            <div style="display:flex;align-items:center;gap:.6rem">
+                <span style="font-size:1.6rem">🤖</span>
+                <h1 style="margin:0;font-size:1.6rem">{app_title}</h1>
+            </div>
+            <div style="opacity:.7;font-size:.9rem">
+                Modular AI dashboard
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     st.divider()
-    st.caption("Jarvis layout manager • modules are auto-discovered from `/modules` that expose `render()`.")
 
-# For convenience if someone imports as a module and calls main()
-def main():
-    render_layout()
 
-# If run directly (optional), render layout.
-if __name__ == "__main__":
-    main()
+def render_sidebar():
+    """
+    Renders the global controls on the sidebar:
+    - Layout mode
+    - Module visibility toggles
+    - Helpful links/notes
+    """
+    _init_state()
+    with st.sidebar:
+        st.subheader("Layout")
+        st.radio(
+            "Mode",
+            options=["Dashboard", "Focus"],
+            index=0 if st.session_state.get("layout_mode") == "Dashboard" else 1,
+            key="layout_mode",
+            help="Dashboard shows multiple panels. Focus shows a single panel of your choice.",
+        )
+
+        st.subheader("Panels")
+        for spec in MODULES.values():
+            st.checkbox(
+                f"{spec.title} {spec.icon}",
+                value=st.session_state.get(f"show_{spec.key}", True),
+                key=f"show_{spec.key}",
+                help=spec.help,
+            )
+
+        if st.session_state.get("layout_mode") == "Focus":
+            visible_keys = [k for k, s in MODULES.items() if st.session_state.get(f"show_{k}")]
+            if not visible_keys:
+                visible_keys = ["chat"]  # fallback
+            default_focus = visible_keys[0]
+            st.selectbox(
+                "Focus panel",
+                options=visible_keys,
+                index=visible_keys.index(st.session_state.get("focus_key", default_focus))
+                if st.session_state.get("focus_key") in visible_keys
+                else 0,
+                key="focus_key",
+                format_func=lambda k: MODULES[k].title,
+                help="Choose which single panel to show in Focus mode.",
+            )
+
+        st.markdown("---")
+        st.caption(
+            "Tip: Toggle panels on/off here. Missing a module? "
+            "Make sure its file exists under `modules/`."
+        )
+
+
+def render_main():
+    """
+    Renders the main page according to the selected layout mode and toggles.
+    - Dashboard: Weather + Athletic across top, Spotify + Chat below
+    - Focus: Only the selected panel fills the page
+    """
+    _init_state()
+
+    # Resolve available renderers (soft import)
+    renderers: Dict[str, Callable] = {}
+    for key, spec in MODULES.items():
+        if st.session_state.get(f"show_{key}", True):
+            fn = _lazy_load_callable(spec.module_name, spec.callables)
+            if fn is not None:
+                renderers[key] = fn
+
+    # Nothing to show?
+    if not renderers:
+        st.info("No panels are enabled or available. Turn some on in the sidebar.")
+        return
+
+    # Focus mode: render only one chosen panel
+    if st.session_state.get("layout_mode") == "Focus":
+        focus_key = st.session_state.get("focus_key")
+        if focus_key not in renderers:
+            # Pick the first available as fallback
+            focus_key = next(iter(renderers.keys()))
+            st.session_state["focus_key"] = focus_key
+        spec = MODULES[focus_key]
+        fn = renderers[focus_key]
+        _card(spec.title, spec.icon, lambda: _safe_call(fn, spec))
+        return
+
+    # Dashboard mode:
+    # Row 1: Weather | Athletic
+    # Row 2: Spotify | Chat
+    # (Panels render only if enabled & available. Empty columns compact gracefully.)
+    row1_keys = [k for k in ("weather", "athletic") if k in renderers]
+    row2_keys = [k for k in ("spotify", "chat") if k in renderers]
+
+    # If some expected panels are missing, still try to display what we have
+    rows = [row1_keys, row2_keys]
+    for row_keys in rows:
+        if not row_keys:
+            continue
+        cols = st.columns(len(row_keys))
+        for i, k in enumerate(row_keys):
+            spec = MODULES[k]
+            fn = renderers[k]
+            with cols[i]:
+                _card(spec.title, spec.icon, lambda fn=fn, spec=spec: _safe_call(fn, spec))
+
+
+def _safe_call(fn: Callable, spec: ModuleSpec):
+    """
+    Execute a panel's render function safely so one panel cannot crash the page.
+    """
+    try:
+        fn()
+    except Exception as e:
+        with st.expander(f"⚠️ {spec.title} failed to render (click for details)", expanded=False):
+            st.exception(e)
+
+
+# ---- Convenience: single entry to render full page ----
+def render(app_title: str = "Jarvis"):
+    """
+    Call this from app.py:
+        from modules import layout_manager as lm
+        lm.render("Jarvis")
+    """
+    render_header(app_title)
+    render_sidebar()
+    render_main()
