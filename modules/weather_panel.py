@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import streamlit as st
 from statistics import mean
 from collections import Counter
+import textwrap
 
 # -------------------------------------------------------------------
 # Apple-style Weather Panel for Jarvis
@@ -167,6 +168,10 @@ def _style_advice(current_desc: str, current_temp: int, current_wind: int, daypa
 
     return " ".join(tip) if tip else "Dress comfortably for the day."
 
+def _html(s: str) -> str:
+    """Remove leading indentation/newlines so Streamlit doesn't render as code."""
+    return textwrap.dedent(s).strip()
+
 def render(default_city: str = "Basingstoke"):
     st.header("🌤️ Weather Forecast")
 
@@ -194,26 +199,21 @@ def render(default_city: str = "Basingstoke"):
     asof = datetime.now().strftime("%I:%M %p").lstrip("0")
 
     # ---- Current conditions card ----
-    st.markdown(
-        f"""
-        <div style="
-            background: linear-gradient(135deg, #8EC5FC 0%, #3B82F6 100%);
-            padding: 1.2rem 1.6rem; border-radius: 1.2rem;
-            color: #ffffff; box-shadow: 0 8px 20px rgba(0,0,0,0.25);
-            border: 1px solid rgba(255,255,255,0.25);
-        ">
-            <div style="display:flex; justify-content:space-between; align-items:baseline;">
-                <h2 style="margin:0; font-weight:700; letter-spacing:.2px;">{emoji} {name}</h2>
-                <div style="opacity:.9; font-size:.95rem;">as of {asof}</div>
-            </div>
-            <div style="display:flex; align-items:center; gap:12px; margin-top:.25rem;">
-                <div style="font-size:3rem; font-weight:800; line-height:1;">{temp}°C</div>
-                <div style="font-size:1rem; opacity:.95;">{desc} · 💧 {humidity}% · 🌬️ {wind} m/s</div>
-            </div>
+    st.markdown(_html(f"""
+    <div style="background: linear-gradient(135deg, #8EC5FC 0%, #3B82F6 100%);
+                padding: 1.2rem 1.6rem; border-radius: 1.2rem;
+                color: #ffffff; box-shadow: 0 8px 20px rgba(0,0,0,0.25);
+                border: 1px solid rgba(255,255,255,0.25);">
+        <div style="display:flex; justify-content:space-between; align-items:baseline;">
+            <h2 style="margin:0; font-weight:700; letter-spacing:.2px;">{emoji} {name}</h2>
+            <div style="opacity:.9; font-size:.95rem;">as of {asof}</div>
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
+        <div style="display:flex; align-items:center; gap:12px; margin-top:.25rem;">
+            <div style="font-size:3rem; font-weight:800; line-height:1;">{temp}°C</div>
+            <div style="font-size:1rem; opacity:.95;">{desc} · 💧 {humidity}% · 🌬️ {wind} m/s</div>
+        </div>
+    </div>
+    """), unsafe_allow_html=True)
 
     # ---- Build distinct dayparts with windowing logic ----
     f_list = forecast.get("list", []) if isinstance(forecast, dict) else []
@@ -237,81 +237,64 @@ def render(default_city: str = "Basingstoke"):
         with cols[i]:
             if info:
                 daypart_pops.append(info.get("pop", 0))
-                badge = (
-                    '<div style="position:absolute; top:8px; right:8px; '
-                    'width:18px; height:18px; border-radius:999px; '
-                    'background:#f97316; color:#fff; font-weight:800; '
-                    'font-size:0.7rem; display:flex; align-items:center; '
-                    'justify-content:center; box-shadow:0 2px 6px rgba(0,0,0,0.18);">T</div>'
-                    if is_tomorrow else ""
-                )
-                st.markdown(
-                    f"""
-                    <div style="
-                        position: relative;
-                        background: rgba(255,255,255,0.60);
-                        backdrop-filter: blur(6px);
-                        -webkit-backdrop-filter: blur(6px);
-                        border: 1px solid rgba(0,0,0,0.08);
-                        border-radius: 1rem;
-                        padding: 0.7rem 0.8rem;
-                        text-align: center;
-                        box-shadow: 0 4px 14px rgba(0,0,0,0.12);
-                    ">
-                        {badge}
-                        <p style="margin:0; font-weight:700; color:#0f172a;">{label}</p>
-                        <p style="font-size:1.6rem; margin:.15rem 0 .1rem 0;">{_emoji_for(info['desc'])}</p>
-                        <p style="margin:0; font-size:1rem; font-weight:700; color:#0f172a;">{info['temp']}°C</p>
-                        <p style="margin:0; font-size:.85rem; opacity:.85; color:#0f172a;">{info['desc']}</p>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+                badge = ("""
+                <div style="position:absolute; top:8px; right:8px;
+                            width:18px; height:18px; border-radius:999px;
+                            background:#f97316; color:#fff; font-weight:800;
+                            font-size:0.7rem; display:flex; align-items:center;
+                            justify-content:center; box-shadow:0 2px 6px rgba(0,0,0,0.18);">T</div>
+                """ if is_tomorrow else "")
+                st.markdown(_html(f"""
+                <div style="position: relative;
+                            background: rgba(255,255,255,0.60);
+                            backdrop-filter: blur(6px);
+                            -webkit-backdrop-filter: blur(6px);
+                            border: 1px solid rgba(0,0,0,0.08);
+                            border-radius: 1rem;
+                            padding: 0.7rem 0.8rem;
+                            text-align: center;
+                            box-shadow: 0 4px 14px rgba(0,0,0,0.12);">
+                    {badge}
+                    <p style="margin:0; font-weight:700; color:#0f172a;">{label}</p>
+                    <p style="font-size:1.6rem; margin:.15rem 0 .1rem 0;">{_emoji_for(info['desc'])}</p>
+                    <p style="margin:0; font-size:1rem; font-weight:700; color:#0f172a;">{info['temp']}°C</p>
+                    <p style="margin:0; font-size:.85rem; opacity:.85; color:#0f172a;">{info['desc']}</p>
+                </div>
+                """), unsafe_allow_html=True)
             else:
                 daypart_pops.append(0)
-                badge = (
-                    '<div style="position:absolute; top:8px; right:8px; '
-                    'width:18px; height:18px; border-radius:999px; '
-                    'background:#f97316; color:#fff; font-weight:800; '
-                    'font-size:0.7rem; display:flex; align-items:center; '
-                    'justify-content:center; box-shadow:0 2px 6px rgba(0,0,0,0.18);">T</div>'
-                    if is_tomorrow else ""
-                )
-                st.markdown(
-                    f"""
-                    <div style="
-                        position: relative;
-                        background: rgba(255,255,255,0.50);
-                        backdrop-filter: blur(5px);
-                        border: 1px solid rgba(0,0,0,0.06);
-                        border-radius: 1rem;
-                        padding: 0.7rem 0.8rem;
-                        text-align: center;
-                    ">
-                        {badge}
-                        <p style="margin:0; font-weight:700;">{label}</p>
-                        <p style="margin:.2rem 0 0 0; font-size:.9rem; opacity:.75;">No data</p>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+                badge = ("""
+                <div style="position:absolute; top:8px; right:8px;
+                            width:18px; height:18px; border-radius:999px;
+                            background:#f97316; color:#fff; font-weight:800;
+                            font-size:0.7rem; display:flex; align-items:center;
+                            justify-content:center; box-shadow: 0 2px 6px rgba(0,0,0,0.18);">T</div>
+                """ if is_tomorrow else "")
+                st.markdown(_html(f"""
+                <div style="position: relative;
+                            background: rgba(255,255,255,0.50);
+                            backdrop-filter: blur(5px);
+                            border: 1px solid rgba(0,0,0,0.06);
+                            border-radius: 1rem;
+                            padding: 0.7rem 0.8rem;
+                            text-align: center;">
+                    {badge}
+                    <p style="margin:0; font-weight:700;">{label}</p>
+                    <p style="margin:.2rem 0 0 0; font-size:.9rem; opacity:.75;">No data</p>
+                </div>
+                """), unsafe_allow_html=True)
 
     # ---- Style advice card (depends on rain/temp/wind) ----
     advice = _style_advice(desc, temp, wind, max(daypart_pops) if daypart_pops else 0)
-    st.markdown(
-        f"""
-        <div style="
-            margin-top: .8rem;
-            background: linear-gradient(135deg, #fdfbfb 0%, #ebedee 100%);
-            border: 1px solid rgba(0,0,0,0.06);
-            border-radius: 1rem;
-            padding: 0.9rem 1rem;
-            color: #0f172a;
-            box-shadow: 0 6px 16px rgba(0,0,0,0.12);
-        ">
-            <div style="font-weight:700; margin-bottom:.25rem;">👕 What to wear</div>
-            <div style="opacity:.95;">{advice}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    st.markdown(_html(f"""
+    <div style="margin-top: .8rem;
+                background: linear-gradient(135deg, #fdfbfb 0%, #ebedee 100%);
+                border: 1px solid rgba(0,0,0,0.06);
+                border-radius: 1rem;
+                padding: 0.9rem 1rem;
+                color: #0f172a;
+                box-shadow: 0 6px 16px rgba(0,0,0,0.12);">
+        <div style="font-weight:700; margin-bottom:.25rem;">👕 What to wear</div>
+        <div style="opacity:.95;">{advice}</div>
+    </div>
+    """), unsafe_allow_html=True)
