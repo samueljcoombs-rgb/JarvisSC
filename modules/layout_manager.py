@@ -7,6 +7,20 @@ def _find_last_user_index(messages):
             return i
     return -1
 
+def _top_bar():
+    # Slim top bar with small app name (left) and subtle date (right)
+    today_str = datetime.now().strftime("%A, %B %d, %Y")
+    st.markdown(
+        f"""
+        <div style="display:flex;justify-content:space-between;align-items:center;margin:0 0 0.35rem 0;">
+            <div style="font-weight:600;font-size:1.05rem;">🤖 Jarvis</div>
+            <div style="color:#6b7280;font-size:0.92rem;">{today_str}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown("<hr style='margin-top:0.35rem;margin-bottom:0.75rem;'>", unsafe_allow_html=True)
+
 def render(
     chat,
     mem_text,
@@ -20,21 +34,25 @@ def render(
     podcasts_module=None,
     athletic_module=None,
 ):
-    # Top date header
-    st.subheader(f"Today: {datetime.now().strftime('%A, %B %d, %Y')}")
+    # Compact top bar (replaces big title/date)
+    _top_bar()
 
-    # Three fixed columns: LEFT (Athletic), MIDDLE (Chat), RIGHT (Weather/Podcasts)
-    c_left, c_mid, c_right = st.columns([1.2, 1.8, 1.2], gap="large")
+    # 3-column layout: Athletic (left) | Chat (middle) | Weather+Podcasts (right)
+    left_col, mid_col, right_col = st.columns([3, 4, 3], gap="large")
 
-    # --- LEFT: Athletic feed only ---
-    with c_left:
-        st.header("⚽ The Athletic Feed")
+    # LEFT: Athletic feed (title only here; suppress internal headers if possible)
+    with left_col:
+        st.subheader("⚽ Man United News")
         if athletic_module:
-            athletic_module.render()
+            # Try to call render(show_header=False, title="...") if your module supports it.
+            try:
+                athletic_module.render(show_header=False)
+            except TypeError:
+                # Fallback: call without args (module may still show its own header)
+                athletic_module.render()
 
-    # --- MIDDLE: Chat only ---
-    with c_mid:
-        st.header("💬 Chat with Jarvis")
+    # MIDDLE: Chat (no huge header to keep compact)
+    with mid_col:
         if chat_module:
             chat_module.render()
 
@@ -54,17 +72,14 @@ def render(
             except Exception as e:
                 st.error(f"Jarvis error: {e}")
 
-        # Persist chat history
         st.session_state.chat = lst
         safe_save_json(temp_chat_file, lst)
 
-    # --- RIGHT: Weather at the top, then Podcasts ---
-    with c_right:
+    # RIGHT: Weather (keep the module's internal "Weather Forecast" title),
+    # then Podcasts (keep its "New Podcast Episodes (Today)" title)
+    with right_col:
         if weather_module:
-            st.header("🌤️ Weather")
             weather_module.render()
-
-        if podcasts_module:
             st.divider()
-            st.header("🎧 Podcasts")
+        if podcasts_module:
             podcasts_module.render()
