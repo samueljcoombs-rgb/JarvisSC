@@ -33,7 +33,7 @@ def _select_best_model(client: OpenAI) -> str:
     Picks the best available chat model without hardcoding to 4o-mini.
     Preference order:
     1) PREFERRED_OPENAI_MODEL (env)
-    2) gpt-5 (if available)
+    2) gpt-5
     3) gpt-latest
     4) gpt-4.1, gpt-4o, gpt-4.1-mini
     5) gpt-4o-mini (last resort)
@@ -42,9 +42,7 @@ def _select_best_model(client: OpenAI) -> str:
         return PREFERRED_ENV
 
     try:
-        # List models once and pick by preference.
-        # If listing fails (permissions), fall back to a safe default.
-        names = {m.id for m in client.models.list().data}  # type: ignore[attr-defined]
+        names = {m.id for m in client.models.list().data}  # may fail if perms disabled
         for candidate in [
             "gpt-5",
             "gpt-latest",
@@ -57,7 +55,7 @@ def _select_best_model(client: OpenAI) -> str:
                 return candidate
     except Exception:
         pass
-    return "gpt-4o"  # sensible default if listing not permitted
+    return "gpt-4o"
 
 JARVIS_MODEL = _select_best_model(client)
 
@@ -98,7 +96,6 @@ def safe_write_module(name: str, code: str) -> bool:
         st.error(f"❌ Syntax error in {name}.py: {e}")
         return False
     backup_module(name)
-    # atomic write
     tmp = path.with_suffix(".py.tmp")
     tmp.write_text(code, encoding="utf-8")
     tmp.replace(path)
@@ -177,9 +174,12 @@ with st.sidebar:
         st.rerun()
 
 st.title("🤖 Jarvis Modular Dashboard")
-layout_mod = load_module("layout_manager")
-chat_mod = load_module("chat_ui")
-weather_mod = load_module("weather_panel")
+
+# Load modules
+layout_mod   = load_module("layout_manager")
+chat_mod     = load_module("chat_ui")
+weather_mod  = load_module("weather_panel")
+podcasts_mod = load_module("podcasts_panel")  # <-- NEW
 
 if layout_mod:
     layout_mod.render(
@@ -192,4 +192,5 @@ if layout_mod:
         memory_module=memory,
         chat_module=chat_mod,
         weather_module=weather_mod,
+        podcasts_module=podcasts_mod,  # <-- NEW
     )
