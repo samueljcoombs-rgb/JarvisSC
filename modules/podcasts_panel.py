@@ -11,23 +11,31 @@ import streamlit as st
 
 # ------------------------------------------------------------
 # Podcasts Panel (Spotify)
-# - Gets direct Spotify episode links released TODAY (Europe/London)
+# - Direct Spotify episode links released TODAY (Europe/London)
 # - Works with show names (auto-search) or explicit Spotify Show IDs
 # - Requires SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET in env or st.secrets
 # ------------------------------------------------------------
 
-# ✏️ Configure your shows here.
-# You can list names, or tuples of (display_name, spotify_show_id).
+# ✅ Your favourites (name, optional Spotify Show ID)
 FAVOURITE_SHOWS: List[Tuple[str, Optional[str]]] = [
     ("JaackMaates Happy Hour", None),
-    # ("The Diary Of A CEO", None),
-    # ("The Rest Is Politics", None),
+    ("Wolf & Owl with Romesh Ranganathan and Tom Davis", None),
+    ("Wafflin'", None),
+    ("That Peter Crouch Podcast", None),
+    ("Soccer Cards United", None),
+    ("Pitch Side", None),
+    ("The Club", None),
+    ("Talk of the Devils", None),
+    ("Manchester United Podcast by Stretford Paddock", None),
+    ("Talk of the Devils: The Athletics FC's Manchester United show", None),
+    ("The Rest is Entertainment", None),
+    ("Lets Talk FPL", None),
+    ("Chatabix", None),
 ]
 
-MARKET = "GB"                 # For search & episodes
-TZ = ZoneInfo("Europe/London")  # Your local day boundary
-MAX_SHOW_EPISODES = 20        # How many to fetch per show before filtering "today"
-
+MARKET = "GB"                    # Market for availability
+TZ = ZoneInfo("Europe/London")   # Your local day boundary
+MAX_SHOW_EPISODES = 20           # Fetch before filtering to "today"
 
 # ---------------- Spotify auth helpers ----------------
 
@@ -37,9 +45,7 @@ def _spotify_creds() -> Tuple[Optional[str], Optional[str]]:
     return cid, cs
 
 def _get_token() -> Optional[str]:
-    """
-    Client Credentials flow. Cache token in session_state until expiry.
-    """
+    """Client Credentials flow with simple in-session cache."""
     if "_sp_token" in st.session_state and "_sp_token_exp" in st.session_state:
         if time.time() < st.session_state["_sp_token_exp"]:
             return st.session_state["_sp_token"]
@@ -84,7 +90,6 @@ def _sp_get(url: str, params: Dict) -> Optional[dict]:
     except Exception:
         return None
 
-
 # ---------------- Spotify search/fetch ----------------
 
 def _search_show_id(show_name: str) -> Optional[str]:
@@ -110,7 +115,6 @@ def _get_show_episodes(show_id: str, limit: int = MAX_SHOW_EPISODES) -> List[dic
     except Exception:
         return []
 
-
 # ---------------- UI helpers ----------------
 
 def _today_str() -> str:
@@ -120,13 +124,6 @@ def _episode_card(show_display: str, ep: dict):
     title = ep.get("name", "Untitled")
     url = ep.get("external_urls", {}).get("spotify", "")
     date = ep.get("release_date", "")
-    time_str = ""
-    # Some episodes have release_date_precision = 'day' only
-    if ep.get("release_date_precision") == "day":
-        time_str = ""
-    else:
-        # If we ever had time precision, format it. Currently Spotify returns day for podcasts.
-        time_str = ""
 
     st.markdown(
         f"""
@@ -151,7 +148,6 @@ def _episode_card(show_display: str, ep: dict):
         unsafe_allow_html=True,
     )
 
-
 # ---------------- Public render ----------------
 
 def render():
@@ -165,21 +161,19 @@ def render():
     today = _today_str()
     total_found = 0
 
-    for show_display, show_id in FAVOURITE_SHOWS:
-        # Resolve ID if not provided
-        sid = show_id or _search_show_id(show_display)
+    for show_display, maybe_id in FAVOURITE_SHOWS:
+        # Resolve show ID if not provided
+        sid = maybe_id or _search_show_id(show_display)
         if not sid:
             continue
 
         episodes = _get_show_episodes(sid, limit=MAX_SHOW_EPISODES)
-        # Filter to today's Europe/London date
         todays = [ep for ep in episodes if ep.get("release_date") == today]
 
-        if todays:
-            st.subheader(show_display)
-            for ep in todays:
-                _episode_card(show_display, ep)
-            total_found += len(todays)
+        # Removed the per-show subheader line as requested
+        for ep in todays:
+            _episode_card(show_display, ep)
+        total_found += len(todays)
 
     if total_found == 0:
         st.write("No new episodes today for your selected shows.")
