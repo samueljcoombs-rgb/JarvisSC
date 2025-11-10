@@ -127,7 +127,7 @@ def call_jarvis(chat_history, mem_text):
 st.set_page_config(
     page_title="Jarvis Modular AI",
     layout="wide",
-    initial_sidebar_state="collapsed",   # 👈 auto-collapse the sidebar on load
+    initial_sidebar_state="collapsed",   # auto-collapse the sidebar on load
 )
 
 if "chat" not in st.session_state:
@@ -136,7 +136,7 @@ if "last_processed_index" not in st.session_state:
     st.session_state.last_processed_index = -1
 
 with st.sidebar:
-    # Collapsed expander for Memory & Sessions (sidebar is collapsed by default)
+    # Collapsed expander for Memory & Sessions
     with st.expander("🧠 Memory & Sessions", expanded=False):
         long_term = memory._load()
         mem_text = memory.recent_summary()
@@ -176,7 +176,7 @@ with st.sidebar:
             st.success("Cleared.")
             st.rerun()
 
-st.title("🤖 Jarvis Modular Dashboard")
+# No big title — keep the UI compact; the layout_manager draws a slim top bar.
 
 # Load modules
 layout_mod     = load_module("layout_manager")
