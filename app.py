@@ -11,7 +11,7 @@ MODULES_DIR = BASE_DIR / "modules"
 TEMP_CHAT_FILE = BASE_DIR / "temp_chat.json"
 CHAT_SESSIONS_FILE = BASE_DIR / "chat_sessions.json"
 
-# ----- Model selection: always try to use the best available GPT automatically -----
+# ----- Model selection: prefer best available automatically -----
 PREFERRED_ENV = os.getenv("PREFERRED_OPENAI_MODEL", "").strip()
 
 def _init_client() -> OpenAI:
@@ -32,24 +32,22 @@ def _select_best_model(client: OpenAI) -> str:
     """
     Picks the best available chat model without hardcoding to 4o-mini.
     Preference order:
-    1) PREFERRED_OPENAI_MODEL (env)
-    2) gpt-5
-    3) gpt-latest
-    4) gpt-4.1, gpt-4o, gpt-4.1-mini
-    5) gpt-4o-mini (last resort)
+      1) PREFERRED_OPENAI_MODEL (env)
+      2) gpt-5
+      3) gpt-latest
+      4) gpt-4.1, gpt-4o, gpt-4.1-mini
+      5) gpt-4o (fallback)
     """
     if PREFERRED_ENV:
         return PREFERRED_ENV
-
     try:
-        names = {m.id for m in client.models.list().data}  # may fail if perms disabled
+        names = {m.id for m in client.models.list().data}  # may fail depending on perms
         for candidate in [
             "gpt-5",
             "gpt-latest",
             "gpt-4.1",
             "gpt-4o",
             "gpt-4.1-mini",
-            "gpt-4o-mini",
         ]:
             if candidate in names:
                 return candidate
@@ -59,7 +57,7 @@ def _select_best_model(client: OpenAI) -> str:
 
 JARVIS_MODEL = _select_best_model(client)
 
-# ----- JSON helpers (with atomic saves) -----
+# ----- JSON helpers (atomic saves) -----
 def safe_load_json(path: Path, default):
     if path.exists():
         try:
@@ -176,10 +174,11 @@ with st.sidebar:
 st.title("🤖 Jarvis Modular Dashboard")
 
 # Load modules
-layout_mod   = load_module("layout_manager")
-chat_mod     = load_module("chat_ui")
-weather_mod  = load_module("weather_panel")
-podcasts_mod = load_module("podcasts_panel")  # <-- NEW
+layout_mod     = load_module("layout_manager")
+chat_mod       = load_module("chat_ui")
+weather_mod    = load_module("weather_panel")
+podcasts_mod   = load_module("podcasts_panel")
+athletic_mod   = load_module("athletic_feed")  # NEW
 
 if layout_mod:
     layout_mod.render(
@@ -192,5 +191,6 @@ if layout_mod:
         memory_module=memory,
         chat_module=chat_mod,
         weather_module=weather_mod,
-        podcasts_module=podcasts_mod,  # <-- NEW
+        podcasts_module=podcasts_mod,
+        athletic_module=athletic_mod,  # NEW
     )
