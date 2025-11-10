@@ -124,7 +124,11 @@ def call_jarvis(chat_history, mem_text):
     return resp.choices[0].message.content
 
 # ----- App -----
-st.set_page_config(page_title="Jarvis Modular AI", layout="wide")
+st.set_page_config(
+    page_title="Jarvis Modular AI",
+    layout="wide",
+    initial_sidebar_state="collapsed",   # 👈 auto-collapse the sidebar on load
+)
 
 if "chat" not in st.session_state:
     st.session_state.chat = safe_load_json(TEMP_CHAT_FILE, [])
@@ -132,7 +136,7 @@ if "last_processed_index" not in st.session_state:
     st.session_state.last_processed_index = -1
 
 with st.sidebar:
-    # Collapsed expander for Memory & Sessions (remains in sidebar, not on-page)
+    # Collapsed expander for Memory & Sessions (sidebar is collapsed by default)
     with st.expander("🧠 Memory & Sessions", expanded=False):
         long_term = memory._load()
         mem_text = memory.recent_summary()
