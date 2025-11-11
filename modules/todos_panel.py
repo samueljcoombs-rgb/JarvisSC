@@ -55,7 +55,6 @@ def _fetch_columns(sheet_url: str) -> Tuple[List[str], List[str], List[str]]:
     creds = _creds()
     if not creds:
         return [], [], []
-
     gc = gspread.authorize(creds)
     sh = gc.open_by_url(sheet_url)
 
@@ -98,44 +97,29 @@ def _save_logs(logs: List[Dict[str, Any]]) -> None:
 
 # ---------------- Styling ----------------
 def _inject_css_once():
-    if st.session_state.get("_todo_css_loaded_v3"):
+    if st.session_state.get("_todo_css_loaded_v4"):
         return
-    st.session_state["_todo_css_loaded_v3"] = True
+    st.session_state["_todo_css_loaded_v4"] = True
     st.markdown(
         """
 <style>
-.panel-title {
-  display:flex; align-items:center; gap:.5rem;
-  font-weight:900; letter-spacing:.2px;
-  color: rgba(255,255,255,0.94); font-size:1.05rem; margin: 0 0 .3rem 0;
+.panel-title{
+  display:flex;align-items:center;gap:.5rem;font-weight:900;letter-spacing:.2px;
+  color:rgba(255,255,255,0.94);font-size:1.05rem;margin:0 0 .3rem 0;
 }
-.section-title {
-  font-weight:800; letter-spacing:.2px;
-  color: rgba(255,255,255,0.92); font-size:1rem; margin:.25rem 0 .35rem 0;
+.section-title{
+  font-weight:800;letter-spacing:.2px;color:rgba(255,255,255,0.92);
+  font-size:1rem;margin:.25rem 0 .35rem 0;
 }
-.subtle-div {
-  height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(148,163,184,0.25), transparent);
-  margin: .35rem 0 .35rem 0;
+.subtle-div{
+  height:1px;background:linear-gradient(90deg,transparent,rgba(148,163,184,0.25),transparent);
+  margin:.35rem 0 .35rem 0;
 }
-/* Improve readability of labels on dark theme */
+/* Improve readability of all labels on dark theme */
 .stCheckbox label, .stNumberInput label, .gym-label {
   color: rgba(255,255,255,0.94) !important;
   font-weight: 600 !important;
 }
-/* Health goal 'chip' style using real checkboxes */
-.health-chip > div > label {
-  background: linear-gradient(180deg, #111827, #0b1220);
-  border: 1px solid rgba(148,163,184,0.28);
-  color: rgba(255,255,255,0.92) !important;
-  font-weight: 800 !important;
-  font-size: 0.9rem !important;
-  padding: 6px 11px !important;
-  border-radius: 999px !important;
-  box-shadow: 0 8px 22px rgba(2,6,23,0.35);
-}
-.health-grid { display:flex; flex-wrap: wrap; gap: 8px; }
-.health-chip { min-width: max-content; }
 </style>
         """,
         unsafe_allow_html=True,
@@ -191,28 +175,21 @@ def render(
                     with c1:
                         st.markdown(f"<div class='gym-label'>{label}</div>", unsafe_allow_html=True)
                     with c2:
-                        st.number_input(
-                            "Weight (kg)", min_value=0.0, step=0.5,
-                            key=f"_gym_w_{idx}", label_visibility="collapsed"
-                        )
+                        st.number_input("Weight (kg)", min_value=0.0, step=0.5,
+                                        key=f"_gym_w_{idx}", label_visibility="collapsed")
                     with c3:
-                        st.number_input(
-                            "Reps", min_value=0, step=1,
-                            key=f"_gym_r_{idx}", label_visibility="collapsed"
-                        )
+                        st.number_input("Reps", min_value=0, step=1,
+                                        key=f"_gym_r_{idx}", label_visibility="collapsed")
 
-        # Only show Save if there is at least one lift row
         if has_lifts:
             if st.button("Save today’s workout"):
                 today = datetime.now(TZ).date().isoformat()
                 payload = {"date": today, "entries": []}
 
-                # run completion flags
                 for _, key_run in run_keys:
                     if st.session_state.get(key_run, False):
                         payload["entries"].append({"name": "Run via Runna", "type": "run", "completed": True})
 
-                # gather lifts
                 for k, v in list(st.session_state.items()):
                     if k.startswith("_gym_w_"):
                         idx = k.split("_")[-1]
@@ -235,20 +212,13 @@ def render(
 
         st.markdown('<div class="subtle-div"></div>', unsafe_allow_html=True)
 
-        # --- Health Goals (Column D) as selectable chip-checkboxes ---
+        # --- Health Goals (Column D) — SAME FORMAT AS TO-DO (stacked checkboxes) ---
         if show_health_title:
             st.markdown('<div class="section-title">Health Goals</div>', unsafe_allow_html=True)
 
         if not health:
             st.caption("No health goals found.")
         else:
-            # Render as a flexible grid of checkboxes styled as chips.
-            st.markdown('<div class="health-grid">', unsafe_allow_html=True)
             for i, goal in enumerate(health, start=1):
                 key = f"_health_{i}_{hash(goal)}"
-                # Each “chip” lives in its own container so the CSS can target it.
-                with st.container():
-                    st.markdown('<div class="health-chip">', unsafe_allow_html=True)
-                    st.checkbox(goal, key=key, value=st.session_state.get(key, False))
-                    st.markdown('</div>', unsafe_allow_html=True)
-            st.markdown('</div>', unsafe_allow_html=True)
+                st.checkbox(goal, key=key, value=st.session_state.get(key, False))
