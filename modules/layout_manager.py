@@ -37,16 +37,15 @@ def render(
 ):
     _top_bar()
 
-    # 3-column layout: (Left) To-Do/Gym/Health + Man United  |  (Mid) Chat  |  (Right) Weather + Podcasts
+    # 3-column layout: Left (To-Do/Gym/Health + Man Utd) | Mid (Chat) | Right (Weather + Podcasts)
     left_col, mid_col, right_col = st.columns([3, 4, 3], gap="large")
 
-    # LEFT: To-Do/Gym/Health FIRST (so it sits above the Athletic feed), then Athletic news
     with left_col:
         if todos_module:
             try:
                 todos_module.render(
-                    show_header=True,          # single visible title on the card
-                    show_tasks_title=False,    # no duplicate "To-Do" heading
+                    show_header=True,
+                    show_tasks_title=False,
                     show_gym_title=True,
                     show_health_title=True,
                 )
@@ -60,7 +59,6 @@ def render(
             except TypeError:
                 athletic_module.render()
 
-    # MIDDLE: Chat
     with mid_col:
         if chat_module:
             chat_module.render()
@@ -83,7 +81,6 @@ def render(
         st.session_state.chat = lst
         safe_save_json(temp_chat_file, lst)
 
-    # RIGHT: Weather then Podcasts
     with right_col:
         if weather_module:
             weather_module.render()
