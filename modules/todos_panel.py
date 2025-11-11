@@ -1,7 +1,6 @@
 # modules/todos_panel.py
 from __future__ import annotations
-import os
-import json
+import os, json
 from urllib.parse import urlparse, parse_qs
 from typing import List, Tuple, Optional, Dict, Any
 from pathlib import Path
@@ -34,14 +33,9 @@ def _creds() -> Optional[Credentials]:
     if not raw:
         return None
     try:
-        data = json.loads(raw)
+        data = json.loads(raw) if isinstance(raw, str) else raw
         return Credentials.from_service_account_info(data, scopes=SCOPES)
     except Exception:
-        if isinstance(raw, dict):
-            try:
-                return Credentials.from_service_account_info(raw, scopes=SCOPES)
-            except Exception:
-                return None
         return None
 
 def _parse_gid(sheet_url: str) -> Optional[int]:
@@ -52,11 +46,11 @@ def _parse_gid(sheet_url: str) -> Optional[int]:
     except Exception:
         return None
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=300)
 def _fetch_columns(sheet_url: str) -> Tuple[List[str], List[str], List[str]]:
     """
-    Returns (todos_colB, health_colD, gym_colF), each list includes non-empty
-    strings starting from ROW 1.
+    Returns (todos_colB, health_colD, gym_colF), including non-empty strings
+    from ROW 1 downward.
     """
     creds = _creds()
     if not creds:
@@ -77,7 +71,8 @@ def _fetch_columns(sheet_url: str) -> Tuple[List[str], List[str], List[str]]:
 
     def _col(n: int) -> List[str]:
         try:
-            return [v.strip() for v in ws.col_values(n) if isinstance(v, str) and v.strip()]
+            vals = ws.col_values(n)
+            return [v.strip() for v in vals if isinstance(v, str) and v.strip()]
         except Exception:
             return []
 
@@ -103,13 +98,12 @@ def _save_logs(logs: List[Dict[str, Any]]) -> None:
 
 # ---------------- Styling ----------------
 def _inject_css_once():
-    if st.session_state.get("_todo_css_loaded_v2"):
+    if st.session_state.get("_todo_css_loaded_v3"):
         return
-    st.session_state["_todo_css_loaded_v2"] = True
+    st.session_state["_todo_css_loaded_v3"] = True
     st.markdown(
         """
 <style>
-/* Titles + labels – tuned for dark theme */
 .panel-title {
   display:flex; align-items:center; gap:.5rem;
   font-weight:900; letter-spacing:.2px;
@@ -117,34 +111,31 @@ def _inject_css_once():
 }
 .section-title {
   font-weight:800; letter-spacing:.2px;
-  color: rgba(255,255,255,0.9); font-size:1rem; margin:.25rem 0 .35rem 0;
+  color: rgba(255,255,255,0.92); font-size:1rem; margin:.25rem 0 .35rem 0;
 }
-.light-caption { color: rgba(255,255,255,0.6); }
-
-/* Make all labels readable on dark theme */
-.stCheckbox label, .stNumberInput label, .gym-label,
-[data-testid="stMarkdownContainer"] label {
-  color: rgba(255,255,255,0.9) !important;
-  font-weight: 600 !important;
-}
-
-/* Health chips */
-.goal-chips { display:flex; flex-wrap:wrap; gap:8px; margin-top: 2px; }
-.goal-chip {
-  background: linear-gradient(180deg, #111827, #0b1220);
-  border: 1px solid rgba(148,163,184,0.25);
-  color: rgba(255,255,255,0.92);
-  font-weight: 800; font-size: 0.9rem;
-  padding: 6px 11px; border-radius: 999px;
-  box-shadow: 0 8px 22px rgba(2,6,23,0.35);
-}
-
-/* Subtle divider */
 .subtle-div {
   height: 1px;
   background: linear-gradient(90deg, transparent, rgba(148,163,184,0.25), transparent);
   margin: .35rem 0 .35rem 0;
 }
+/* Improve readability of labels on dark theme */
+.stCheckbox label, .stNumberInput label, .gym-label {
+  color: rgba(255,255,255,0.94) !important;
+  font-weight: 600 !important;
+}
+/* Health goal 'chip' style using real checkboxes */
+.health-chip > div > label {
+  background: linear-gradient(180deg, #111827, #0b1220);
+  border: 1px solid rgba(148,163,184,0.28);
+  color: rgba(255,255,255,0.92) !important;
+  font-weight: 800 !important;
+  font-size: 0.9rem !important;
+  padding: 6px 11px !important;
+  border-radius: 999px !important;
+  box-shadow: 0 8px 22px rgba(2,6,23,0.35);
+}
+.health-grid { display:flex; flex-wrap: wrap; gap: 8px; }
+.health-chip { min-width: max-content; }
 </style>
         """,
         unsafe_allow_html=True,
@@ -153,7 +144,7 @@ def _inject_css_once():
 # ---------------- UI ----------------
 def render(
     show_header: bool = True,
-    show_tasks_title: bool = False,   # avoid duplicate "To-Do"
+    show_tasks_title: bool = False,
     show_gym_title: bool = True,
     show_health_title: bool = True,
 ):
@@ -170,12 +161,11 @@ def render(
         if show_tasks_title:
             st.markdown('<div class="section-title">To-Do</div>', unsafe_allow_html=True)
         if not todos:
-            st.caption("No tasks found.", help=None)
+            st.caption("No tasks found.")
         else:
             for i, item in enumerate(todos, start=1):
                 key = f"_todo_local_{i}_{hash(item)}"
-                default = st.session_state.get(key, False)
-                st.checkbox(item, key=key, value=default)
+                st.checkbox(item, key=key, value=st.session_state.get(key, False))
 
         st.markdown('<div class="subtle-div"></div>', unsafe_allow_html=True)
 
@@ -187,7 +177,7 @@ def render(
         run_keys: List[Tuple[str, str]] = []
 
         if not gym:
-            st.caption("No gym items found.", help=None)
+            st.caption("No gym items found.")
         else:
             for idx, name in enumerate(gym, start=1):
                 label = (name or "").strip()
@@ -245,11 +235,20 @@ def render(
 
         st.markdown('<div class="subtle-div"></div>', unsafe_allow_html=True)
 
-        # --- Health Goals (Column D) ---
+        # --- Health Goals (Column D) as selectable chip-checkboxes ---
         if show_health_title:
             st.markdown('<div class="section-title">Health Goals</div>', unsafe_allow_html=True)
+
         if not health:
-            st.caption("No health goals found.", help=None)
+            st.caption("No health goals found.")
         else:
-            chips = "".join(f'<span class="goal-chip">{h}</span>' for h in health)
-            st.markdown(f'<div class="goal-chips">{chips}</div>', unsafe_allow_html=True)
+            # Render as a flexible grid of checkboxes styled as chips.
+            st.markdown('<div class="health-grid">', unsafe_allow_html=True)
+            for i, goal in enumerate(health, start=1):
+                key = f"_health_{i}_{hash(goal)}"
+                # Each “chip” lives in its own container so the CSS can target it.
+                with st.container():
+                    st.markdown('<div class="health-chip">', unsafe_allow_html=True)
+                    st.checkbox(goal, key=key, value=st.session_state.get(key, False))
+                    st.markdown('</div>', unsafe_allow_html=True)
+            st.markdown('</div>', unsafe_allow_html=True)
