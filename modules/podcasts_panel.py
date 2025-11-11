@@ -1,7 +1,7 @@
 # modules/podcasts_panel.py
 from __future__ import annotations
-import os
-import time
+import os, time, json
+from functools import lru_cache
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Dict, List, Optional, Tuple
@@ -19,7 +19,6 @@ import streamlit as st
 # - Adds a bottom-right rounded artwork thumbnail (episode > show)
 # ------------------------------------------------------------
 
-# ✅ Your favourites (name, optional Spotify Show ID)
 FAVOURITE_SHOWS: List[Tuple[str, Optional[str]]] = [
     ("JaackMaates Happy Hour", None),
     ("Wolf & Owl with Romesh Ranganathan and Tom Davis", None),
@@ -40,11 +39,11 @@ MARKET = "GB"
 TZ = ZoneInfo("Europe/London")
 MAX_SHOW_EPISODES = 20
 TIMEOUT = 15
+RETRIES = 2   # small retry for sturdier loads
 
 # ---------------- Date helpers (filter UI) ----------------
-
 def _today_ymd() -> str:
-    return datetime.now(TZ).date().isoformat()  # 'YYYY-MM-DD'
+    return datetime.now(TZ).date().isoformat()
 
 def _label_for_day(dt: datetime, today: datetime) -> str:
     d = dt.date()
@@ -55,16 +54,14 @@ def _label_for_day(dt: datetime, today: datetime) -> str:
     return dt.strftime("%a %d %b")
 
 def _day_choices(n: int = 7) -> List[Tuple[str, str]]:
-    """Return list of (label, 'YYYY-MM-DD') for Today + previous n-1 days."""
     now = datetime.now(TZ)
     out: List[Tuple[str, str]] = []
     for i in range(n):
         dt = now - timedelta(days=i)
         out.append((_label_for_day(dt, now), dt.date().isoformat()))
-    return out  # newest first
+    return out
 
 # ---------------- Spotify auth helpers ----------------
-
 def _secrets_get(key: str) -> Optional[str]:
     try:
         return st.secrets.get(key)  # type: ignore[attr-defined]
@@ -77,7 +74,6 @@ def _spotify_creds() -> Tuple[Optional[str], Optional[str]]:
     return cid, cs
 
 def _get_token() -> Optional[str]:
-    """Client Credentials flow with simple in-session cache."""
     if "_sp_token" in st.session_state and "_sp_token_exp" in st.session_state:
         if time.time() < st.session_state["_sp_token_exp"]:
             return st.session_state["_sp_token"]
@@ -105,29 +101,38 @@ def _get_token() -> Optional[str]:
         st.session_state.pop("_sp_token_exp", None)
         return None
 
-def _sp_get(url: str, params: Dict | None = None) -> Optional[dict]:
+# ------ cached+retry fetcher ------
+@lru_cache(maxsize=256)
+def _sp_get_cached(url: str, params_key: str) -> Optional[dict]:
     token = _get_token()
     if not token:
         return None
-    try:
-        headers = {"Authorization": f"Bearer {token}"}
-        r = requests.get(url, headers=headers, params=params or {}, timeout=TIMEOUT)
-        if r.status_code == 401:
-            # refresh once
-            st.session_state.pop("_sp_token", None)
-            st.session_state.pop("_sp_token_exp", None)
-            token = _get_token()
-            if not token:
+    headers = {"Authorization": f"Bearer {token}"}
+    params = json.loads(params_key) if params_key else {}
+
+    for attempt in range(RETRIES + 1):
+        try:
+            r = requests.get(url, headers=headers, params=params, timeout=TIMEOUT)
+            if r.status_code == 401 and attempt == 0:
+                st.session_state.pop("_sp_token", None)
+                st.session_state.pop("_sp_token_exp", None)
+                token = _get_token()
+                if not token:
+                    return None
+                headers = {"Authorization": f"Bearer {token}"}
+                continue
+            r.raise_for_status()
+            return r.json()
+        except Exception:
+            if attempt < RETRIES:
+                time.sleep(0.4 * (attempt + 1))
+            else:
                 return None
-            headers = {"Authorization": f"Bearer {token}"}
-            r = requests.get(url, headers=headers, params=params or {}, timeout=TIMEOUT)
-        r.raise_for_status()
-        return r.json()
-    except Exception:
-        return None
+
+def _sp_get(url: str, params: Dict | None = None) -> Optional[dict]:
+    return _sp_get_cached(url, json.dumps(params or {}, sort_keys=True))
 
 # ---------------- Spotify search/fetch ----------------
-
 def _search_show_id(show_name: str) -> Optional[str]:
     cache: Dict[str, str] = st.session_state.setdefault("_show_id_cache", {})
     if show_name in cache:
@@ -163,7 +168,6 @@ def _get_show_image(show_id: str) -> Optional[str]:
     cache = st.session_state.setdefault("_show_img_cache", {})
     if show_id in cache:
         return cache[show_id]
-
     data = _sp_get(f"https://api.spotify.com/v1/shows/{show_id}")
     url = None
     try:
@@ -176,12 +180,10 @@ def _get_show_image(show_id: str) -> Optional[str]:
             url = imgs_sorted[0]["url"] if imgs_sorted else None
     except Exception:
         url = None
-
     cache[show_id] = url
     return url
 
 # ---------------- UI helpers ----------------
-
 def _inject_css_once():
     if st.session_state.get("_pod_css_loaded"):
         return
@@ -242,7 +244,6 @@ _SPOTIFY_SVG = """
 """.strip()
 
 def _episode_image_url(ep: dict, fallback_show_img: Optional[str]) -> Optional[str]:
-    """Prefer an episode image if present; otherwise fallback to the show's image."""
     try:
         imgs = ep.get("images", []) or []
         if imgs and isinstance(imgs, list):
@@ -260,11 +261,8 @@ def _episode_card(show_display: str, ep: dict, thumb_url: Optional[str], is_sele
     title = ep.get("name", "Untitled")
     url = ep.get("external_urls", {}).get("spotify", "")
     date = (ep.get("release_date") or "")[:10]
-
-    # Only show the "NEW" badge when viewing Today
     badge_html = '<div class="pod-badge">NEW</div>' if is_selected_day else ""
     thumb_html = f'<img class="pod-thumb" src="{thumb_url}" alt="artwork"/>' if thumb_url else ""
-
     st.markdown(
         f"""
 <div class="pod-card">
@@ -284,7 +282,6 @@ def _episode_card(show_display: str, ep: dict, thumb_url: Optional[str], is_sele
     )
 
 def _filter_by_day(episodes: List[dict], day_ymd: str) -> List[dict]:
-    """Select episodes whose release_date matches the chosen YYYY-MM-DD."""
     out = []
     for ep in episodes:
         try:
@@ -296,14 +293,10 @@ def _filter_by_day(episodes: List[dict], day_ymd: str) -> List[dict]:
     return out
 
 # ---------------- Public render ----------------
-
 def render():
-    # Title per your request
     st.header("🎧 New Podcast Episodes")
-
     _inject_css_once()
 
-    # Day filter (Today + previous 6 days)
     choices = _day_choices(7)
     labels = [c[0] for c in choices]
     values = [c[1] for c in choices]
@@ -318,24 +311,20 @@ def render():
 
     cid, cs = _spotify_creds()
     if not cid or not cs:
-        st.info("Add **SPOTIFY_CLIENT_ID** and **SPOTIFY_CLIENT_SECRET** to your environment or `st.secrets` to enable direct Spotify links.")
+        st.info("Add **SPOTIFY_CLIENT_ID** and **SPOTIFY_CLIENT_SECRET** to enable direct Spotify links.")
         return
 
     total_found = 0
-
     for show_display, maybe_id in FAVOURITE_SHOWS:
         sid = maybe_id or _search_show_id(show_display)
         if not sid:
             continue
 
-        # Fetch show image once per show (cached)
         show_img = _get_show_image(sid)
 
-        # 1) Try GB-region episodes
         episodes_gb = _get_show_episodes(sid, limit=MAX_SHOW_EPISODES, use_market=True)
         eps_that_day = _filter_by_day(episodes_gb, selected_ymd)
 
-        # 2) If "Today" is empty in GB (common metadata/region lag), retry globally
         if is_today and not eps_that_day:
             episodes_global = _get_show_episodes(sid, limit=MAX_SHOW_EPISODES, use_market=False)
             eps_that_day = _filter_by_day(episodes_global, selected_ymd)
@@ -343,7 +332,6 @@ def render():
         for ep in eps_that_day:
             thumb = _episode_image_url(ep, show_img)
             _episode_card(show_display, ep, thumb, is_selected_day=is_today)
-
         total_found += len(eps_that_day)
 
     if total_found == 0:
