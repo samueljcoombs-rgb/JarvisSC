@@ -176,14 +176,15 @@ with st.sidebar:
             st.success("Cleared.")
             st.rerun()
 
-# No big title — keep the UI compact; the layout_manager draws a slim top bar.
+# No big title — layout_manager draws a slim top bar.
 
 # Load modules
-layout_mod     = load_module("layout_manager")
-chat_mod       = load_module("chat_ui")
-weather_mod    = load_module("weather_panel")
-podcasts_mod   = load_module("podcasts_panel")
-athletic_mod   = load_module("athletic_feed")  # Athletic module
+layout_mod   = load_module("layout_manager")
+chat_mod     = load_module("chat_ui")
+weather_mod  = load_module("weather_panel")
+podcasts_mod = load_module("podcasts_panel")
+athletic_mod = load_module("athletic_feed")    # Man Utd news
+todos_mod    = load_module("todos_panel")      # NEW: Google Sheets To-Do
 
 if layout_mod:
     layout_mod.render(
@@ -198,4 +199,5 @@ if layout_mod:
         weather_module=weather_mod,
         podcasts_module=podcasts_mod,
         athletic_module=athletic_mod,
+        todos_module=todos_mod,   # pass To-Do module into layout
     )
