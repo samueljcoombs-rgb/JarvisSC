@@ -19,12 +19,9 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
 ]
 TZ = ZoneInfo("Europe/London")
-
-# Local persistent log file (so Jarvis can analyse later)
 _STORAGE_PATH = (Path(__file__).resolve().parent.parent / "workout_logs.json")
 
 # ---------------- Secrets / Sheet helpers ----------------
-
 def _get_sheet_url() -> str:
     return (
         st.secrets.get("TODO_SHEET_URL")
@@ -58,8 +55,8 @@ def _parse_gid(sheet_url: str) -> Optional[int]:
 @st.cache_data(ttl=300, show_spinner=False)
 def _fetch_columns(sheet_url: str) -> Tuple[List[str], List[str], List[str]]:
     """
-    Returns (todos_colB, health_colD, gym_colF), each a list of non-empty strings
-    starting from ROW 1.
+    Returns (todos_colB, health_colD, gym_colF), each list includes non-empty
+    strings starting from ROW 1.
     """
     creds = _creds()
     if not creds:
@@ -90,7 +87,6 @@ def _fetch_columns(sheet_url: str) -> Tuple[List[str], List[str], List[str]]:
     return col_b, col_d, col_f
 
 # ---------------- Local log helpers ----------------
-
 def _load_logs() -> List[Dict[str, Any]]:
     if _STORAGE_PATH.exists():
         try:
@@ -106,7 +102,6 @@ def _save_logs(logs: List[Dict[str, Any]]) -> None:
         pass
 
 # ---------------- Styling ----------------
-
 def _inject_css_once():
     if st.session_state.get("_todo_css_loaded"):
         return
@@ -114,47 +109,57 @@ def _inject_css_once():
     st.markdown(
         """
 <style>
-/* Crisp white card */
+/* Force light cards on any theme */
 .todo-card {
-  background: #ffffff;
-  border: 1px solid rgba(15,23,42,0.06);
+  background: #ffffff !important;
+  border: 1px solid rgba(15,23,42,0.08);
   border-radius: 16px;
   padding: 14px 16px;
   box-shadow: 0 10px 26px rgba(2,6,23,0.08);
-  margin-bottom: 12px;
+  margin-bottom: 14px;
 }
 
-/* Section titles: bold & high contrast */
+/* One clear panel title */
+.panel-title {
+  display:flex; align-items:center; gap:.5rem;
+  font-weight: 900; letter-spacing: .2px;
+  color: #0f172a; font-size: 1.05rem; margin: 0 0 8px 0;
+}
+
+/* Section titles inside the card */
 .todo-title {
-  font-weight: 900;
-  letter-spacing: .2px;
-  margin: 0 0 8px 0;
-  color: #0f172a; /* slate-900 */
-  font-size: 1.05rem;
+  font-weight: 800; letter-spacing: .2px;
+  color: #0f172a; font-size: 1rem; margin: 8px 0 8px 0;
 }
 
 /* Slim divider */
 .subtle-div {
   height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(2,6,23,0.06), transparent);
-  margin: 12px 0 12px 0;
+  background: linear-gradient(90deg, transparent, rgba(2,6,23,0.08), transparent);
+  margin: 10px 0 10px 0;
 }
 
-/* Health goal chips */
-.goal-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 6px;
+/* Checkbox label contrast (multiple selectors to beat theme styles) */
+.stCheckbox label,
+.stCheckbox div[data-testid="stMarkdownContainer"] label,
+.todo-card label {
+  color: #0f172a !important;
+  font-weight: 600 !important;
 }
+
+/* Number input label & text contrast */
+.todo-card [data-baseweb="input"] input,
+.todo-card .stNumberInput label {
+  color: #0f172a !important;
+}
+
+/* Health chips */
+.goal-chips { display:flex; flex-wrap:wrap; gap:8px; margin-top: 4px; }
 .goal-chip {
   background: linear-gradient(180deg, #f8fafc, #eef2ff);
   border: 1px solid rgba(99,102,241,0.22);
-  color: #0f172a;
-  font-weight: 800;
-  font-size: 0.9rem;
-  padding: 7px 12px;
-  border-radius: 999px;
+  color: #0f172a; font-weight: 800; font-size: 0.9rem;
+  padding: 7px 12px; border-radius: 999px;
   box-shadow: 0 4px 12px rgba(99,102,241,0.12);
 }
 
@@ -162,41 +167,22 @@ def _inject_css_once():
 .gym-row {
   display: grid;
   grid-template-columns: 1fr 120px 120px;
-  gap: 10px;
-  align-items: center;
-  margin-bottom: 10px;
+  gap: 10px; align-items: center; margin-bottom: 8px;
 }
-.gym-label {
-  font-weight: 800;
-  color: #0f172a;
-}
-
-/* Checkbox label contrast */
-.stCheckbox label {
-  font-weight: 600 !important;
-  color: #0f172a !important;
-}
-
-/* Hide any stray grey bars */
-hr, .stDivider { opacity: 0.5; }
+.gym-label { font-weight: 800; color: #0f172a; }
 </style>
         """,
         unsafe_allow_html=True,
     )
 
 # ---------------- UI ----------------
-
 def render(
-    show_header: bool = False,
-    show_tasks_title: bool = False,   # set False to remove the secondary To-Do title
+    show_header: bool = True,          # we want a single visible title
+    show_tasks_title: bool = False,    # keep internal "To-Do" heading hidden to avoid duplicates
     show_gym_title: bool = True,
     show_health_title: bool = True,
 ):
     _inject_css_once()
-
-    # Outer header intentionally off by default (to avoid duplicates in the layout)
-    # if show_header:
-    #     st.subheader("📝 To-Do, Gym & Health")
 
     sheet_url = _get_sheet_url()
     todos, health, gym = _fetch_columns(sheet_url)
@@ -204,12 +190,14 @@ def render(
     with st.container():
         st.markdown('<div class="todo-card">', unsafe_allow_html=True)
 
+        if show_header:
+            st.markdown('<div class="panel-title">✅ Today — Tasks, Gym & Health</div>', unsafe_allow_html=True)
+
         # --- Tasks (Column B) ---
         if show_tasks_title:
             st.markdown('<div class="todo-title">To-Do</div>', unsafe_allow_html=True)
-
         if not todos:
-            st.caption("No tasks found (Column B).")
+            st.caption("No tasks found.")
         else:
             for i, item in enumerate(todos, start=1):
                 key = f"_todo_local_{i}_{hash(item)}"
@@ -222,13 +210,13 @@ def render(
         if show_gym_title:
             st.markdown('<div class="todo-title">🏋️ Gym Routine</div>', unsafe_allow_html=True)
 
-        if not gym:
-            st.caption("No gym items found (Column F).")
-            has_lifts = False
-        else:
-            run_keys = []
-            lift_keys = []
+        has_lifts = False
+        run_keys = []
+        lift_keys = []
 
+        if not gym:
+            st.caption("No gym items found.")
+        else:
             for idx, name in enumerate(gym, start=1):
                 norm = (name or "").strip().lower()
                 if norm == "run via runna":
@@ -239,43 +227,39 @@ def render(
                 else:
                     weight_key = f"_gym_w_{idx}"
                     reps_key   = f"_gym_r_{idx}"
-                    with st.container():
-                        st.markdown(
-                            f"""
-                            <div class="gym-row">
-                                <div class="gym-label">{name}</div>
-                                <div>""", unsafe_allow_html=True)
-                        st.number_input("Weight (kg)", min_value=0.0, step=0.5, key=weight_key, label_visibility="collapsed")
-                        st.markdown("</div><div>", unsafe_allow_html=True)
-                        st.number_input("Reps", min_value=0, step=1, key=reps_key, label_visibility="collapsed")
-                        st.markdown("</div></div>", unsafe_allow_html=True)
-                    lift_keys.append((name, weight_key, reps_key))
+                    has_lifts = True
+                    st.markdown('<div class="gym-row">', unsafe_allow_html=True)
+                    st.markdown(f'<div class="gym-label">{name}</div>', unsafe_allow_html=True)
+                    st.number_input("Weight (kg)", min_value=0.0, step=0.5, key=weight_key, label_visibility="collapsed")
+                    st.number_input("Reps", min_value=0, step=1, key=reps_key, label_visibility="collapsed")
+                    st.markdown('</div>', unsafe_allow_html=True)
 
-            has_lifts = len(lift_keys) > 0
-
-            # Show the save button only if there's at least one lift input row.
-            if has_lifts and st.button("Save today’s workout"):
+        # Only show Save if there is at least one lift row
+        if has_lifts:
+            if st.button("Save today’s workout"):
                 today = datetime.now(TZ).date().isoformat()
                 payload = {"date": today, "entries": []}
 
-                for name, key_run in run_keys:
+                for _, key_run in run_keys:
                     if st.session_state.get(key_run, False):
-                        payload["entries"].append({
-                            "name": "Run via Runna",
-                            "type": "run",
-                            "completed": True
-                        })
+                        payload["entries"].append({"name": "Run via Runna", "type": "run", "completed": True})
 
                 for name, w_key, r_key in lift_keys:
-                    w = st.session_state.get(w_key, 0.0)
-                    r = st.session_state.get(r_key, 0)
-                    if (isinstance(w, (int, float)) and w > 0) and (isinstance(r, int) and r > 0):
-                        payload["entries"].append({
-                            "name": name,
-                            "type": "lift",
-                            "weight": float(w),
-                            "reps": int(r)
-                        })
+                    pass  # kept for backward-compat; lift rows are handled inline now
+
+                # collect lifts from current state (by pattern)
+                for k, v in st.session_state.items():
+                    if k.startswith("_gym_w_"):
+                        idx = k.split("_")[-1]
+                        w = float(v or 0.0)
+                        r = int(st.session_state.get(f"_gym_r_{idx}", 0) or 0)
+                        # Find name by scanning gym list in order
+                        try:
+                            name = gym[int(idx)-1]
+                        except Exception:
+                            name = "Exercise"
+                        if w > 0 and r > 0 and name.strip().lower() != "run via runna":
+                            payload["entries"].append({"name": name, "type": "lift", "weight": w, "reps": r})
 
                 if payload["entries"]:
                     logs = _load_logs()
@@ -291,7 +275,7 @@ def render(
         if show_health_title:
             st.markdown('<div class="todo-title">Health Goals</div>', unsafe_allow_html=True)
         if not health:
-            st.caption("No health goals found (Column D).")
+            st.caption("No health goals found.")
         else:
             chips = "".join(f'<span class="goal-chip">{h}</span>' for h in health)
             st.markdown(f'<div class="goal-chips">{chips}</div>', unsafe_allow_html=True)
