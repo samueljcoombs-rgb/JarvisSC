@@ -67,7 +67,6 @@ def _day_choices(n: int = 7) -> List[Tuple[str, str]]:
 
 def _secrets_get(key: str) -> Optional[str]:
     try:
-        # st.secrets behaves dict-like but be safe in local envs without secrets
         return st.secrets.get(key)  # type: ignore[attr-defined]
     except Exception:
         return None
@@ -79,7 +78,6 @@ def _spotify_creds() -> Tuple[Optional[str], Optional[str]]:
 
 def _get_token() -> Optional[str]:
     """Client Credentials flow with simple in-session cache."""
-    # Refresh if expired/missing
     if "_sp_token" in st.session_state and "_sp_token_exp" in st.session_state:
         if time.time() < st.session_state["_sp_token_exp"]:
             return st.session_state["_sp_token"]
@@ -103,7 +101,6 @@ def _get_token() -> Optional[str]:
         st.session_state["_sp_token_exp"] = time.time() + int(expires_in * 0.9)
         return token
     except Exception:
-        # Clear cache on failure to force retry next render
         st.session_state.pop("_sp_token", None)
         st.session_state.pop("_sp_token_exp", None)
         return None
@@ -132,7 +129,6 @@ def _sp_get(url: str, params: Dict | None = None) -> Optional[dict]:
 # ---------------- Spotify search/fetch ----------------
 
 def _search_show_id(show_name: str) -> Optional[str]:
-    # cache ids so we don’t re-search every render
     cache: Dict[str, str] = st.session_state.setdefault("_show_id_cache", {})
     if show_name in cache:
         return cache[show_name]
@@ -152,11 +148,11 @@ def _search_show_id(show_name: str) -> Optional[str]:
         pass
     return None
 
-def _get_show_episodes(show_id: str, limit: int = MAX_SHOW_EPISODES) -> List[dict]:
-    data = _sp_get(
-        f"https://api.spotify.com/v1/shows/{show_id}/episodes",
-        {"market": MARKET, "limit": limit},
-    )
+def _get_show_episodes(show_id: str, limit: int = MAX_SHOW_EPISODES, use_market: bool = True) -> List[dict]:
+    params = {"limit": limit}
+    if use_market:
+        params["market"] = MARKET
+    data = _sp_get(f"https://api.spotify.com/v1/shows/{show_id}/episodes", params)
     try:
         items = (data or {}).get("items", []) or []
         return [it for it in items if isinstance(it, dict)]
@@ -164,9 +160,6 @@ def _get_show_episodes(show_id: str, limit: int = MAX_SHOW_EPISODES) -> List[dic
         return []
 
 def _get_show_image(show_id: str) -> Optional[str]:
-    """
-    Fetch and cache a show's primary image (medium/small).
-    """
     cache = st.session_state.setdefault("_show_img_cache", {})
     if show_id in cache:
         return cache[show_id]
@@ -229,7 +222,6 @@ def _inject_css_once():
   box-shadow: 0 2px 6px rgba(0,0,0,0.18);
 }
 .pod-spot { width: 14px; height: 14px; display: inline-block; vertical-align: middle; }
-/* Thumbnail in bottom-right */
 .pod-thumb {
   position: absolute; right: 10px; bottom: 10px;
   width: 44px; height: 44px; object-fit: cover;
@@ -250,9 +242,7 @@ _SPOTIFY_SVG = """
 """.strip()
 
 def _episode_image_url(ep: dict, fallback_show_img: Optional[str]) -> Optional[str]:
-    """
-    Prefer an episode image if present; otherwise fallback to the show's image.
-    """
+    """Prefer an episode image if present; otherwise fallback to the show's image."""
     try:
         imgs = ep.get("images", []) or []
         if imgs and isinstance(imgs, list):
@@ -269,11 +259,10 @@ def _episode_image_url(ep: dict, fallback_show_img: Optional[str]) -> Optional[s
 def _episode_card(show_display: str, ep: dict, thumb_url: Optional[str], is_selected_day: bool):
     title = ep.get("name", "Untitled")
     url = ep.get("external_urls", {}).get("spotify", "")
-    date = ep.get("release_date", "")
+    date = (ep.get("release_date") or "")[:10]
 
     # Only show the "NEW" badge when viewing Today
     badge_html = '<div class="pod-badge">NEW</div>' if is_selected_day else ""
-
     thumb_html = f'<img class="pod-thumb" src="{thumb_url}" alt="artwork"/>' if thumb_url else ""
 
     st.markdown(
@@ -294,6 +283,18 @@ def _episode_card(show_display: str, ep: dict, thumb_url: Optional[str], is_sele
         unsafe_allow_html=True,
     )
 
+def _filter_by_day(episodes: List[dict], day_ymd: str) -> List[dict]:
+    """Select episodes whose release_date matches the chosen YYYY-MM-DD."""
+    out = []
+    for ep in episodes:
+        try:
+            ymd = (ep.get("release_date") or "")[:10]
+            if ymd == day_ymd:
+                out.append(ep)
+        except Exception:
+            pass
+    return out
+
 # ---------------- Public render ----------------
 
 def render():
@@ -306,7 +307,12 @@ def render():
     choices = _day_choices(7)
     labels = [c[0] for c in choices]
     values = [c[1] for c in choices]
-    sel_label = st.selectbox("Show episodes released on:", labels, index=0, key="podcasts_day_selector")
+    sel_label = st.selectbox(
+        "Show episodes released on:",
+        labels,
+        index=0,
+        key="podcasts_day_selector"
+    )
     selected_ymd = values[labels.index(sel_label)]
     is_today = selected_ymd == _today_ymd()
 
@@ -318,36 +324,27 @@ def render():
     total_found = 0
 
     for show_display, maybe_id in FAVOURITE_SHOWS:
-        sid = maybe_id
-        if not sid:
-            sid = _search_show_id(show_display)
+        sid = maybe_id or _search_show_id(show_display)
         if not sid:
             continue
 
         # Fetch show image once per show (cached)
         show_img = _get_show_image(sid)
 
-        episodes = _get_show_episodes(sid, limit=MAX_SHOW_EPISODES)
+        # 1) Try GB-region episodes
+        episodes_gb = _get_show_episodes(sid, limit=MAX_SHOW_EPISODES, use_market=True)
+        eps_that_day = _filter_by_day(episodes_gb, selected_ymd)
 
-        # Filter by selected day (YYYY-MM-DD exact match)
-        eps_that_day = [
-            ep for ep in episodes
-            if isinstance(ep, dict)
-            and (ep.get("release_date") or "").startswith(selected_ymd)
-        ]
+        # 2) If "Today" is empty in GB (common metadata/region lag), retry globally
+        if is_today and not eps_that_day:
+            episodes_global = _get_show_episodes(sid, limit=MAX_SHOW_EPISODES, use_market=False)
+            eps_that_day = _filter_by_day(episodes_global, selected_ymd)
 
         for ep in eps_that_day:
             thumb = _episode_image_url(ep, show_img)
             _episode_card(show_display, ep, thumb, is_selected_day=is_today)
+
         total_found += len(eps_that_day)
 
     if total_found == 0:
         st.write("No episodes found for this day.")
-
-        # Optional tiny hint if Today looks empty in the evening
-        with st.expander("Why might Today be empty?"):
-            st.markdown(
-                "- Some shows release on specific days or at irregular times.\n"
-                "- Spotify sometimes sets `release_date` to the calendar date (no time). If it’s late, try **Yesterday**.\n"
-                "- Token hiccup? The app auto-refreshes the Spotify token. If you still see nothing across days, your favourites may simply not have released recently."
-            )
