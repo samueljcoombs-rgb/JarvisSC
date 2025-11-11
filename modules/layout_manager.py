@@ -9,7 +9,6 @@ def _find_last_user_index(messages):
     return -1
 
 def _top_bar():
-    # Slim top bar with small app name (left) and subtle date (right)
     today_str = datetime.now().strftime("%A, %B %d, %Y")
     st.markdown(
         f"""
@@ -34,34 +33,32 @@ def render(
     weather_module=None,
     podcasts_module=None,
     athletic_module=None,
-    todos_module=None,   # To-Do / Gym / Health
+    todos_module=None,   # To-Do / Gym / Health panel
 ):
     _top_bar()
 
-    # 3-column layout: Athletic + To-Do (left) | Chat (middle) | Weather+Podcasts (right)
+    # 3-column layout: (Left) To-Do/Gym/Health + Man United  |  (Mid) Chat  |  (Right) Weather + Podcasts
     left_col, mid_col, right_col = st.columns([3, 4, 3], gap="large")
 
-    # LEFT: Man United news, then To-Do/Gym/Health
+    # LEFT: To-Do/Gym/Health FIRST (so it sits above the Athletic feed), then Athletic news
     with left_col:
+        if todos_module:
+            try:
+                todos_module.render(
+                    show_header=True,          # single visible title on the card
+                    show_tasks_title=False,    # no duplicate "To-Do" heading
+                    show_gym_title=True,
+                    show_health_title=True,
+                )
+            except TypeError:
+                todos_module.render()
+
         st.subheader("⚽ Man United News")
         if athletic_module:
             try:
                 athletic_module.render(show_header=False)
             except TypeError:
                 athletic_module.render()
-
-        if todos_module:
-            # Remove the secondary To-Do title: show_tasks_title=False
-            try:
-                todos_module.render(
-                    show_header=False,
-                    show_tasks_title=False,
-                    show_gym_title=True,
-                    show_health_title=True,
-                )
-            except TypeError:
-                # Backward compatibility
-                todos_module.render(show_header=False)
 
     # MIDDLE: Chat
     with mid_col:
@@ -86,7 +83,7 @@ def render(
         st.session_state.chat = lst
         safe_save_json(temp_chat_file, lst)
 
-    # RIGHT: Weather then Podcasts (each keeps its own internal title)
+    # RIGHT: Weather then Podcasts
     with right_col:
         if weather_module:
             weather_module.render()
