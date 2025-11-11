@@ -33,25 +33,35 @@ def render(
     weather_module=None,
     podcasts_module=None,
     athletic_module=None,
+    todos_module=None,          # NEW: To-Do panel
 ):
-    # Compact top bar (replaces big title/date)
+    # Compact top bar
     _top_bar()
 
-    # 3-column layout: Athletic (left) | Chat (middle) | Weather+Podcasts (right)
+    # 3-column layout: To-Do + Athletic (left) | Chat (middle) | Weather + Podcasts (right)
     left_col, mid_col, right_col = st.columns([3, 4, 3], gap="large")
 
-    # LEFT: Athletic feed (title only here; suppress internal headers if possible)
+    # LEFT: To-Do (top), then Man United news
     with left_col:
+        if todos_module:
+            try:
+                st.subheader("📝 To-Do")
+                todos_module.render()
+            except Exception as e:
+                st.warning(f"To-Do module error: {e}")
+            st.divider()
+
         st.subheader("⚽ Man United News")
         if athletic_module:
-            # Try to call render(show_header=False, title="...") if your module supports it.
+            # Prefer the module's ability to suppress its own header if available
             try:
                 athletic_module.render(show_header=False)
             except TypeError:
-                # Fallback: call without args (module may still show its own header)
                 athletic_module.render()
+            except Exception as e:
+                st.warning(f"Athletic module error: {e}")
 
-    # MIDDLE: Chat (no huge header to keep compact)
+    # MIDDLE: Chat
     with mid_col:
         if chat_module:
             chat_module.render()
@@ -75,11 +85,16 @@ def render(
         st.session_state.chat = lst
         safe_save_json(temp_chat_file, lst)
 
-    # RIGHT: Weather (keep the module's internal "Weather Forecast" title),
-    # then Podcasts (keep its "New Podcast Episodes (Today)" title)
+    # RIGHT: Weather (keep its own internal "Weather Forecast" title), then Podcasts
     with right_col:
         if weather_module:
-            weather_module.render()
+            try:
+                weather_module.render()
+            except Exception as e:
+                st.warning(f"Weather module error: {e}")
             st.divider()
         if podcasts_module:
-            podcasts_module.render()
+            try:
+                podcasts_module.render()
+            except Exception as e:
+                st.warning(f"Podcasts module error: {e}")
