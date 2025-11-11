@@ -21,7 +21,6 @@ SCOPES = [
 TZ = ZoneInfo("Europe/London")
 
 # Local persistent log file (so Jarvis can analyse later)
-# Saved in the app root as workout_logs.json
 _STORAGE_PATH = (Path(__file__).resolve().parent.parent / "workout_logs.json")
 
 # ---------------- Secrets / Sheet helpers ----------------
@@ -60,7 +59,7 @@ def _parse_gid(sheet_url: str) -> Optional[int]:
 def _fetch_columns(sheet_url: str) -> Tuple[List[str], List[str], List[str]]:
     """
     Returns (todos_colB, health_colD, gym_colF), each a list of non-empty strings
-    starting from row 2.
+    starting from ROW 1 (no header skip).
     """
     creds = _creds()
     if not creds:
@@ -81,7 +80,8 @@ def _fetch_columns(sheet_url: str) -> Tuple[List[str], List[str], List[str]]:
 
     def _col(n: int) -> List[str]:
         try:
-            return [v.strip() for v in ws.col_values(n)[1:] if isinstance(v, str) and v.strip()]
+            # Row 1 onward, keep non-empty strings
+            return [v.strip() for v in ws.col_values(n) if isinstance(v, str) and v.strip()]
         except Exception:
             return []
 
@@ -115,25 +115,33 @@ def _inject_css_once():
     st.markdown(
         """
 <style>
-/* Card wrapper */
+/* Sleek card */
 .todo-card {
-  background: rgba(255,255,255,0.72);
-  border: 1px solid rgba(0,0,0,0.06);
+  background: #ffffff;
+  border: 1px solid rgba(15,23,42,0.06);
   border-radius: 14px;
-  padding: 12px 14px;
-  box-shadow: 0 8px 22px rgba(0,0,0,0.08);
-  margin-bottom: 10px;
+  padding: 14px 16px;
+  box-shadow: 0 10px 26px rgba(2,6,23,0.08);
+  margin-bottom: 12px;
 }
 
-/* Section headers */
+/* Section headers (high contrast) */
 .todo-title {
-  font-weight: 800;
+  font-weight: 900;
   letter-spacing: .2px;
-  margin: 0 0 6px 0;
-  color: #0f172a;
+  margin: 0 0 8px 0;
+  color: #0f172a; /* slate-900 */
+  font-size: 1.05rem;
 }
 
-/* Health goal "chips" */
+/* Subtle divider (lighter, thinner) */
+.subtle-div {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(2,6,23,0.06), transparent);
+  margin: 12px 0 12px 0;
+}
+
+/* Health goal chips */
 .goal-chips {
   display: flex;
   flex-wrap: wrap;
@@ -142,37 +150,37 @@ def _inject_css_once():
 }
 .goal-chip {
   background: linear-gradient(180deg, #f8fafc, #eef2ff);
-  border: 1px solid rgba(99,102,241,0.25);
-  color: #111827;
-  font-weight: 700;
-  font-size: 0.88rem;
-  padding: 6px 10px;
+  border: 1px solid rgba(99,102,241,0.22);
+  color: #0f172a;
+  font-weight: 800;
+  font-size: 0.9rem;
+  padding: 7px 12px;
   border-radius: 999px;
   box-shadow: 0 4px 12px rgba(99,102,241,0.12);
 }
 
-/* Subtle divider */
-.subtle-div {
-  height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(0,0,0,0.08), transparent);
-  margin: 8px 0 10px 0;
-}
-
-/* Gym row layout */
+/* Gym rows */
 .gym-row {
   display: grid;
   grid-template-columns: 1fr 120px 120px;
-  gap: 8px;
+  gap: 10px;
   align-items: center;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
 }
 .gym-label {
-  font-weight: 700;
+  font-weight: 800;
+  color: #0f172a;
 }
 .gym-note {
   font-size: 0.85rem;
   color: #6b7280;
   margin-top: 4px;
+}
+
+/* Compact checkbox labels */
+.css-1y4p8pa, .stCheckbox label {  /* Streamlit class may differ; keep robust */
+  font-weight: 600 !important;
+  color: #0f172a !important;
 }
 </style>
         """,
@@ -184,8 +192,9 @@ def _inject_css_once():
 def render(show_header: bool = True):
     _inject_css_once()
 
+    # Optional outer header (disabled from layout_manager to avoid duplicates)
     if show_header:
-        st.subheader("📝 To-Do")
+        st.subheader("📝 To-Do, Gym & Health")
 
     sheet_url = _get_sheet_url()
     todos, health, gym = _fetch_columns(sheet_url)
@@ -193,10 +202,10 @@ def render(show_header: bool = True):
     with st.container():
         st.markdown('<div class="todo-card">', unsafe_allow_html=True)
 
-        # --- Tasks ---
+        # --- Tasks (Column B) ---
         st.markdown('<div class="todo-title">Tasks</div>', unsafe_allow_html=True)
         if not todos:
-            st.caption("No tasks found (Column B is empty).")
+            st.caption("No tasks found (Column B).")
         else:
             for i, item in enumerate(todos, start=1):
                 key = f"_todo_local_{i}_{hash(item)}"
@@ -207,25 +216,20 @@ def render(show_header: bool = True):
 
         # --- Gym Routine (Column F) ---
         st.markdown('<div class="todo-title">🏋️ Gym Routine</div>', unsafe_allow_html=True)
-
         if not gym:
-            st.caption("No gym items found (Column F is empty).")
+            st.caption("No gym items found (Column F).")
         else:
-            # Build dynamic inputs
-            # Use deterministic keys so values persist if you switch tabs/re-run
             run_keys = []
-            lift_keys = []  # (name, weight_key, reps_key)
+            lift_keys = []
 
             for idx, name in enumerate(gym, start=1):
                 norm = name.strip().lower()
-                # "Run via Runna" special case (checkbox only)
                 if norm == "run via runna":
                     key_run = f"_gym_run_{idx}"
                     run_keys.append((name, key_run))
                     checked = st.session_state.get(key_run, False)
                     st.checkbox("Run via Runna", key=key_run, value=checked)
                 else:
-                    # Weight + Reps inputs
                     weight_key = f"_gym_w_{idx}"
                     reps_key   = f"_gym_r_{idx}"
                     col1, col2, col3 = st.columns([3, 1.2, 1.2])
@@ -237,15 +241,10 @@ def render(show_header: bool = True):
                         st.number_input("Reps", min_value=0, step=1, key=reps_key, label_visibility="collapsed")
                     lift_keys.append((name, weight_key, reps_key))
 
-            # Save button
             if st.button("Save today’s workout"):
                 today = datetime.now(TZ).date().isoformat()
-                payload = {
-                    "date": today,
-                    "entries": []
-                }
+                payload = {"date": today, "entries": []}
 
-                # Collect runs (store only if checked)
                 for name, key_run in run_keys:
                     if st.session_state.get(key_run, False):
                         payload["entries"].append({
@@ -254,7 +253,6 @@ def render(show_header: bool = True):
                             "completed": True
                         })
 
-                # Collect lifts (store only if both values meaningful)
                 for name, w_key, r_key in lift_keys:
                     w = st.session_state.get(w_key, 0.0)
                     r = st.session_state.get(r_key, 0)
@@ -279,12 +277,11 @@ def render(show_header: bool = True):
         # --- Health Goals (Column D) ---
         st.markdown('<div class="todo-title">Health Goals</div>', unsafe_allow_html=True)
         if not health:
-            st.caption("No health goals found (Column D is empty).")
+            st.caption("No health goals found (Column D).")
         else:
             chips = "".join(f'<span class="goal-chip">{h}</span>' for h in health)
             st.markdown(f'<div class="goal-chips">{chips}</div>', unsafe_allow_html=True)
 
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # Optional tiny hint
     st.caption("Your workout history is saved locally to `workout_logs.json`.")
