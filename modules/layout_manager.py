@@ -1,3 +1,4 @@
+# modules/layout_manager.py
 import streamlit as st
 from datetime import datetime
 
@@ -33,33 +34,34 @@ def render(
     weather_module=None,
     podcasts_module=None,
     athletic_module=None,
-    todos_module=None,          # NEW: To-Do panel
+    todos_module=None,   # To-Do / Gym / Health
 ):
-    # Compact top bar
     _top_bar()
 
-    # 3-column layout: To-Do + Athletic (left) | Chat (middle) | Weather + Podcasts (right)
+    # 3-column layout: Athletic + To-Do (left) | Chat (middle) | Weather+Podcasts (right)
     left_col, mid_col, right_col = st.columns([3, 4, 3], gap="large")
 
-    # LEFT: To-Do (top), then Man United news
+    # LEFT: Man United news, then To-Do/Gym/Health
     with left_col:
-        if todos_module:
-            try:
-                st.subheader("📝 To-Do")
-                todos_module.render()
-            except Exception as e:
-                st.warning(f"To-Do module error: {e}")
-            st.divider()
-
         st.subheader("⚽ Man United News")
         if athletic_module:
-            # Prefer the module's ability to suppress its own header if available
             try:
                 athletic_module.render(show_header=False)
             except TypeError:
                 athletic_module.render()
-            except Exception as e:
-                st.warning(f"Athletic module error: {e}")
+
+        if todos_module:
+            # Remove the secondary To-Do title: show_tasks_title=False
+            try:
+                todos_module.render(
+                    show_header=False,
+                    show_tasks_title=False,
+                    show_gym_title=True,
+                    show_health_title=True,
+                )
+            except TypeError:
+                # Backward compatibility
+                todos_module.render(show_header=False)
 
     # MIDDLE: Chat
     with mid_col:
@@ -70,7 +72,6 @@ def render(
         last_processed = st.session_state.get("last_processed_index", -1)
         last_user_idx = _find_last_user_index(lst)
 
-        # Process only new user messages
         if last_user_idx > last_processed:
             try:
                 reply = call_jarvis(lst, mem_text)
@@ -85,16 +86,10 @@ def render(
         st.session_state.chat = lst
         safe_save_json(temp_chat_file, lst)
 
-    # RIGHT: Weather (keep its own internal "Weather Forecast" title), then Podcasts
+    # RIGHT: Weather then Podcasts (each keeps its own internal title)
     with right_col:
         if weather_module:
-            try:
-                weather_module.render()
-            except Exception as e:
-                st.warning(f"Weather module error: {e}")
+            weather_module.render()
             st.divider()
         if podcasts_module:
-            try:
-                podcasts_module.render()
-            except Exception as e:
-                st.warning(f"Podcasts module error: {e}")
+            podcasts_module.render()
