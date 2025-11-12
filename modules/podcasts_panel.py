@@ -1,7 +1,6 @@
 # modules/podcasts_panel.py
 from __future__ import annotations
 import os, time, json
-from functools import lru_cache
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Dict, List, Optional, Tuple
@@ -37,9 +36,12 @@ FAVOURITE_SHOWS: List[Tuple[str, Optional[str]]] = [
 
 MARKET = "GB"
 TZ = ZoneInfo("Europe/London")
-MAX_SHOW_EPISODES = 20
+MAX_SHOW_EPISODES = 20          # per page
+MAX_PAGES = 3                    # paginate up to 60 items per show
 TIMEOUT = 15
-RETRIES = 2   # small retry for sturdier loads
+RETRIES = 3                      # retries for transient errors
+TODAY_TTL_SEC = 120              # cache refresh cadence for Today
+DEFAULT_TTL_SEC = 600            # cache refresh cadence for older days
 
 # ---------------- Date helpers (filter UI) ----------------
 def _today_ymd() -> str:
@@ -74,6 +76,7 @@ def _spotify_creds() -> Tuple[Optional[str], Optional[str]]:
     return cid, cs
 
 def _get_token() -> Optional[str]:
+    # in-session token cache with expiry
     if "_sp_token" in st.session_state and "_sp_token_exp" in st.session_state:
         if time.time() < st.session_state["_sp_token_exp"]:
             return st.session_state["_sp_token"]
@@ -101,39 +104,66 @@ def _get_token() -> Optional[str]:
         st.session_state.pop("_sp_token_exp", None)
         return None
 
-# ------ cached+retry fetcher ------
-@lru_cache(maxsize=256)
-def _sp_get_cached(url: str, params_key: str) -> Optional[dict]:
+# -------- cached+retry fetchers (use st.cache_data with TTLs) --------
+def _cache_ttl(is_today: bool) -> int:
+    # today refreshes more often; older days can be cached longer
+    return TODAY_TTL_SEC if is_today else DEFAULT_TTL_SEC
+
+@st.cache_data(show_spinner=False)
+def _cached_sp_get(url: str, params_json: str, cache_buster: int) -> Optional[dict]:
+    """
+    Cached HTTP GET to Spotify with manual retry & token refresh.
+    cache_buster allows us to refresh 'Today' periodically.
+    """
     token = _get_token()
     if not token:
         return None
-    headers = {"Authorization": f"Bearer {token}"}
-    params = json.loads(params_key) if params_key else {}
 
-    for attempt in range(RETRIES + 1):
+    params = json.loads(params_json) if params_json else {}
+    headers = {"Authorization": f"Bearer {token}"}
+
+    for attempt in range(RETRIES):
         try:
             r = requests.get(url, headers=headers, params=params, timeout=TIMEOUT)
-            if r.status_code == 401 and attempt == 0:
+            # Handle auth + transient errors with backoff
+            if r.status_code == 401:
                 st.session_state.pop("_sp_token", None)
                 st.session_state.pop("_sp_token_exp", None)
                 token = _get_token()
                 if not token:
                     return None
                 headers = {"Authorization": f"Bearer {token}"}
+                # retry the same attempt index (we refreshed token)
                 continue
+            if r.status_code in (429, 500, 502, 503, 504):
+                # Backoff based on Retry-After if present, else linear/expo
+                wait = 0.5 * (attempt + 1)
+                try:
+                    if r.status_code == 429:
+                        wait = float(r.headers.get("Retry-After", wait))
+                except Exception:
+                    pass
+                time.sleep(wait)
+                continue
+
             r.raise_for_status()
             return r.json()
         except Exception:
-            if attempt < RETRIES:
-                time.sleep(0.4 * (attempt + 1))
-            else:
-                return None
+            time.sleep(0.4 * (attempt + 1))
+    return None
 
-def _sp_get(url: str, params: Dict | None = None) -> Optional[dict]:
-    return _sp_get_cached(url, json.dumps(params or {}, sort_keys=True))
+def _sp_get(url: str, params: Dict | None, is_today: bool) -> Optional[dict]:
+    """
+    Thin wrapper that sets an appropriate TTL via cache_buster.
+    For Today we change cache_buster every ~TTL seconds, forcing a fresh call.
+    """
+    ttl = _cache_ttl(is_today)
+    bucket = int(time.time() // max(1, ttl)) if ttl > 0 else 0
+    params_json = json.dumps(params or {}, sort_keys=True)
+    return _cached_sp_get(url, params_json, cache_buster=bucket)
 
 # ---------------- Spotify search/fetch ----------------
-def _search_show_id(show_name: str) -> Optional[str]:
+def _search_show_id(show_name: str, is_today: bool) -> Optional[str]:
     cache: Dict[str, str] = st.session_state.setdefault("_show_id_cache", {})
     if show_name in cache:
         return cache[show_name]
@@ -141,6 +171,7 @@ def _search_show_id(show_name: str) -> Optional[str]:
     data = _sp_get(
         "https://api.spotify.com/v1/search",
         {"q": show_name, "type": "show", "limit": 1, "market": MARKET},
+        is_today=is_today,
     )
     try:
         items = (data or {}).get("shows", {}).get("items", []) or []
@@ -153,22 +184,29 @@ def _search_show_id(show_name: str) -> Optional[str]:
         pass
     return None
 
-def _get_show_episodes(show_id: str, limit: int = MAX_SHOW_EPISODES, use_market: bool = True) -> List[dict]:
-    params = {"limit": limit}
-    if use_market:
-        params["market"] = MARKET
-    data = _sp_get(f"https://api.spotify.com/v1/shows/{show_id}/episodes", params)
-    try:
+def _get_show_episodes_paged(show_id: str, use_market: bool, is_today: bool) -> List[dict]:
+    """
+    Pull up to MAX_PAGES * MAX_SHOW_EPISODES episodes with pagination.
+    """
+    out: List[dict] = []
+    offset = 0
+    for _ in range(MAX_PAGES):
+        params: Dict[str, object] = {"limit": MAX_SHOW_EPISODES, "offset": offset}
+        if use_market:
+            params["market"] = MARKET
+        data = _sp_get(f"https://api.spotify.com/v1/shows/{show_id}/episodes", params, is_today=is_today)
         items = (data or {}).get("items", []) or []
-        return [it for it in items if isinstance(it, dict)]
-    except Exception:
-        return []
+        out.extend([it for it in items if isinstance(it, dict)])
+        if not items or len(items) < MAX_SHOW_EPISODES:
+            break
+        offset += MAX_SHOW_EPISODES
+    return out
 
-def _get_show_image(show_id: str) -> Optional[str]:
+def _get_show_image(show_id: str, is_today: bool) -> Optional[str]:
     cache = st.session_state.setdefault("_show_img_cache", {})
     if show_id in cache:
         return cache[show_id]
-    data = _sp_get(f"https://api.spotify.com/v1/shows/{show_id}")
+    data = _sp_get(f"https://api.spotify.com/v1/shows/{show_id}", None, is_today=is_today)
     url = None
     try:
         imgs = (data or {}).get("images", []) or []
@@ -316,18 +354,23 @@ def render():
 
     total_found = 0
     for show_display, maybe_id in FAVOURITE_SHOWS:
-        sid = maybe_id or _search_show_id(show_display)
+        sid = maybe_id or _search_show_id(show_display, is_today=is_today)
         if not sid:
             continue
 
-        show_img = _get_show_image(sid)
+        show_img = _get_show_image(sid, is_today=is_today)
 
-        episodes_gb = _get_show_episodes(sid, limit=MAX_SHOW_EPISODES, use_market=True)
-        eps_that_day = _filter_by_day(episodes_gb, selected_ymd)
+        # 1) GB pages
+        episodes_gb: List[dict] = _get_show_episodes_paged(sid, use_market=True, is_today=is_today)
+        eps_that_day: List[dict] = _filter_by_day(episodes_gb, selected_ymd)
 
-        if is_today and not eps_that_day:
-            episodes_global = _get_show_episodes(sid, limit=MAX_SHOW_EPISODES, use_market=False)
+        # 2) If empty (region lag), fetch GLOBAL pages and filter
+        if not eps_that_day:
+            episodes_global: List[dict] = _get_show_episodes_paged(sid, use_market=False, is_today=is_today)
             eps_that_day = _filter_by_day(episodes_global, selected_ymd)
+
+        # Deterministic order
+        eps_that_day.sort(key=lambda e: ((e.get("release_date") or "")[:10], e.get("name","")), reverse=False)
 
         for ep in eps_that_day:
             thumb = _episode_image_url(ep, show_img)
