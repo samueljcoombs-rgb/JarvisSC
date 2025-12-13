@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 import pandas as pd
+import requests
+from io import StringIO
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 MODULES_DIR = BASE_DIR / "modules"
@@ -25,9 +27,15 @@ PROTECTED_FILES = {
     "__init__.py",
 }
 
-# ⚽ Data path – you can override with env var FOOTBALL_DATA_PATH
-DEFAULT_DATA_PATH = "/Users/SamECee/football_ai/data/raw/football_ai_NNIA.csv"
-DATA_PATH = Path(os.getenv("FOOTBALL_DATA_PATH", DEFAULT_DATA_PATH))
+# ⚽ Data URL – Google Drive CSV
+# This is your file ID from the link you gave:
+# https://drive.google.com/file/d/1aYMC7YJ1qim-132aDc50hhNMdDm20WbC/view
+GDRIVE_FILE_ID = "1aYMC7YJ1qim-132aDc50hhNMdDm20WbC"
+
+# Direct download URL
+DEFAULT_DATA_URL = f"https://drive.google.com/uc?export=download&id={GDRIVE_FILE_ID}"
+DATA_URL_ENV = os.getenv("FOOTBALL_DATA_URL", "").strip()
+DATA_URL = DATA_URL_ENV or DEFAULT_DATA_URL
 
 
 # ---------- Registry helpers ----------
@@ -60,6 +68,29 @@ def _add_owned(file_name: str) -> None:
     if file_name not in reg["owned"]:
         reg["owned"].append(file_name)
         _save_registry(reg)
+
+
+# ---------- Data loading helper ----------
+
+def _load_full_df() -> pd.DataFrame:
+    """
+    Download the full football dataset from DATA_URL (Google Drive) and return as a DataFrame.
+
+    - Works on Streamlit Cloud and locally.
+    - Assumes a CSV file with headers.
+    """
+    if not DATA_URL:
+        raise RuntimeError("DATA_URL is not set. Set FOOTBALL_DATA_URL or update DEFAULT_DATA_URL.")
+
+    resp = requests.get(DATA_URL)
+    resp.raise_for_status()
+
+    csv_bytes = resp.content
+    csv_str = csv_bytes.decode("utf-8", errors="ignore")
+
+    df = pd.read_csv(StringIO(csv_str))
+    df.columns = [c.strip() for c in df.columns]
+    return df
 
 
 # ---------- Module management tools ----------
@@ -193,13 +224,12 @@ def load_data_basic(limit: int = 200) -> Dict[str, Any]:
     Load a preview of the football dataset for the bot:
       - rows (up to `limit`)
       - columns
-      - basic info
+      - sample rows
     """
-    if not DATA_PATH.exists():
-        return {"error": f"Data file not found at {DATA_PATH}. Set FOOTBALL_DATA_PATH env variable or update DEFAULT_DATA_PATH."}
-
-    df = pd.read_csv(DATA_PATH)
-    df.columns = [c.strip() for c in df.columns]
+    try:
+        df = _load_full_df()
+    except Exception as e:
+        return {"error": f"Failed to load data: {e}"}
 
     sample = df.head(limit).to_dict(orient="records")
     return {
@@ -213,10 +243,10 @@ def list_columns() -> Dict[str, Any]:
     """
     Return just the column names for quick inspection.
     """
-    if not DATA_PATH.exists():
-        return {"error": f"Data file not found at {DATA_PATH}."}
-    df = pd.read_csv(DATA_PATH, nrows=5)
-    df.columns = [c.strip() for c in df.columns]
+    try:
+        df = _load_full_df()
+    except Exception as e:
+        return {"error": f"Failed to load data: {e}"}
     return {"columns": list(df.columns)}
 
 
@@ -225,11 +255,10 @@ def basic_roi_for_pl_column(pl_column: str) -> Dict[str, Any]:
     Compute a simple PL / ROI summary for a given PL column (e.g. 'BO 2.5 PL').
     Uses NO GAMES if present to normalise.
     """
-    if not DATA_PATH.exists():
-        return {"error": f"Data file not found at {DATA_PATH}."}
-
-    df = pd.read_csv(DATA_PATH)
-    df.columns = [c.strip() for c in df.columns]
+    try:
+        df = _load_full_df()
+    except Exception as e:
+        return {"error": f"Failed to load data: {e}"}
 
     if pl_column not in df.columns:
         return {"error": f"Column {pl_column} not found."}
