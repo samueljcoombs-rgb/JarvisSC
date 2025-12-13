@@ -41,6 +41,16 @@ def render(
     left_col, mid_col, right_col = st.columns([3, 4, 3], gap="large")
 
     with left_col:
+
+        # ⭐⭐⭐ ADDED: Football Research Page Link ⭐⭐⭐
+        st.markdown("### ⚽ Football Research")
+        try:
+            st.page_link("pages/football_researcher.py", label="Open Football Researcher")
+        except Exception:
+            st.markdown("[Open Football Researcher](/football_researcher)")
+        st.divider()
+        # ⭐⭐⭐ END OF INSERT ⭐⭐⭐
+
         if todos_module:
             try:
                 todos_module.render(
