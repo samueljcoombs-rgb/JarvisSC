@@ -1,4 +1,3 @@
-# modules/football_tools.py
 from __future__ import annotations
 
 import os
@@ -9,11 +8,11 @@ from io import StringIO
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
-import numpy as np
 import requests
 import streamlit as st
 
 import gspread
+from gspread.exceptions import APIError, WorksheetNotFound
 from google.oauth2.service_account import Credentials
 from supabase import create_client
 
@@ -29,7 +28,6 @@ SCOPES = [
 
 SHEET_URL_DEFAULT = os.getenv("FOOTBALL_MEMORY_SHEET_URL") or st.secrets.get("FOOTBALL_MEMORY_SHEET_URL", "")
 
-# Your agreed tabs:
 TAB_RESEARCH_MEMORY = "research_memory"
 TAB_DATASET_OVERVIEW = "dataset_overview"
 TAB_RESEARCH_RULES = "research_rules"
@@ -42,36 +40,36 @@ def _now_iso() -> str:
     return datetime.utcnow().isoformat()
 
 
-def _gs_creds() -> Optional[Credentials]:
+def _gs_creds() -> Credentials:
     raw = st.secrets.get("GOOGLE_SERVICE_ACCOUNT_JSON") or os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
     if not raw:
-        return None
+        raise RuntimeError("Missing GOOGLE_SERVICE_ACCOUNT_JSON in Streamlit secrets/env.")
     try:
         data = json.loads(raw) if isinstance(raw, str) else raw
         return Credentials.from_service_account_info(data, scopes=SCOPES)
-    except Exception:
-        return None
+    except Exception as e:
+        raise RuntimeError(f"Invalid GOOGLE_SERVICE_ACCOUNT_JSON: {e}")
 
 
 def _sheet_url() -> str:
     url = st.secrets.get("FOOTBALL_MEMORY_SHEET_URL") or os.getenv("FOOTBALL_MEMORY_SHEET_URL") or SHEET_URL_DEFAULT
-    return (url or "").strip()
+    url = (url or "").strip()
+    if not url:
+        raise RuntimeError("Missing FOOTBALL_MEMORY_SHEET_URL in Streamlit secrets/env.")
+    return url
 
 
 def _sh():
-    url = _sheet_url()
-    if not url:
-        raise RuntimeError("Missing FOOTBALL_MEMORY_SHEET_URL in Streamlit secrets/env.")
-    creds = _gs_creds()
-    if not creds:
-        raise RuntimeError("Missing GOOGLE_SERVICE_ACCOUNT_JSON in Streamlit secrets/env.")
-    gc = gspread.authorize(creds)
-    return gc.open_by_url(url)
+    gc = gspread.authorize(_gs_creds())
+    return gc.open_by_url(_sheet_url())
 
 
 def _ws(name: str):
     sh = _sh()
-    return sh.worksheet(name)
+    try:
+        return sh.worksheet(name)
+    except WorksheetNotFound:
+        raise RuntimeError(f"WorksheetNotFound: '{name}'. Create this tab in the Google Sheet.")
 
 
 def _read_kv_tab(tab_name: str) -> Dict[str, str]:
@@ -80,13 +78,11 @@ def _read_kv_tab(tab_name: str) -> Dict[str, str]:
     out: Dict[str, str] = {}
     if not vals or len(vals) < 2:
         return out
-    header = [h.strip().lower() for h in vals[0]]
-    # expect ["key","value"] but be tolerant
     for row in vals[1:]:
         if len(row) < 2:
             continue
-        k = row[0].strip()
-        v = row[1].strip()
+        k = (row[0] or "").strip()
+        v = (row[1] or "").strip()
         if k:
             out[k] = v
     return out
@@ -109,13 +105,13 @@ def _read_table_tab(tab_name: str) -> List[Dict[str, str]]:
     return rows
 
 
-# Public getters used by the agent
+# ---------------- Public getters ----------------
+
 def get_dataset_overview() -> Dict[str, Any]:
     return {"tab": TAB_DATASET_OVERVIEW, "data": _read_kv_tab(TAB_DATASET_OVERVIEW)}
 
 
 def get_research_rules() -> Dict[str, Any]:
-    # research_rules is a 1-column "rule" table in your spec
     return {"tab": TAB_RESEARCH_RULES, "data": _read_table_tab(TAB_RESEARCH_RULES)}
 
 
@@ -146,8 +142,11 @@ def get_recent_research_notes(limit: int = 20) -> Dict[str, Any]:
 
 def append_research_note(note: str, tags: str = "") -> Dict[str, Any]:
     ws = _ws(TAB_RESEARCH_MEMORY)
-    ws.append_row([_now_iso(), note, tags or ""], value_input_option="RAW")
-    return {"ok": True, "tab": TAB_RESEARCH_MEMORY}
+    try:
+        ws.append_row([_now_iso(), note, tags or ""], value_input_option="RAW")
+        return {"ok": True, "tab": TAB_RESEARCH_MEMORY}
+    except APIError as e:
+        return {"ok": False, "error": f"gspread APIError append_research_note: {e}"}
 
 
 def get_research_state() -> Dict[str, Any]:
@@ -155,21 +154,55 @@ def get_research_state() -> Dict[str, Any]:
 
 
 def set_research_state(key: str, value: str) -> Dict[str, Any]:
-    ws = _ws(TAB_RESEARCH_STATE)
-    vals = ws.get_all_values()
-    if not vals:
-        ws.append_row(["key", "value"])
-        ws.append_row([key, value])
-        return {"ok": True, "key": key, "value": value}
+    """
+    Fault-tolerant:
+    - ensures header exists
+    - tries to update existing row
+    - if update fails (protected range / perms / transient), appends a new row instead
+    - never raises (returns ok False with error details)
+    """
+    try:
+        ws = _ws(TAB_RESEARCH_STATE)
+        vals = ws.get_all_values()
 
-    # find existing key in col A
-    for idx, row in enumerate(vals[1:], start=2):  # 1-based, skip header
-        if len(row) >= 1 and (row[0] or "").strip() == key:
-            ws.update(f"B{idx}", value)
-            return {"ok": True, "key": key, "value": value, "updated": True}
+        if not vals:
+            ws.append_row(["key", "value"], value_input_option="RAW")
+            ws.append_row([key, value], value_input_option="RAW")
+            return {"ok": True, "key": key, "value": value, "created_sheet": True}
 
-    ws.append_row([key, value])
-    return {"ok": True, "key": key, "value": value, "created": True}
+        # Ensure header
+        header = [c.strip().lower() for c in (vals[0] if vals else [])]
+        if len(header) < 2 or header[0] != "key" or header[1] != "value":
+            # Don’t try to rewrite header if protected; just append safely.
+            try:
+                ws.insert_row(["key", "value"], index=1)
+            except Exception:
+                pass  # ok
+
+        # Find key
+        for idx, row in enumerate(vals[1:], start=2):
+            if len(row) >= 1 and (row[0] or "").strip() == key:
+                try:
+                    # update_cell is less error-prone than A1 range strings
+                    ws.update_cell(idx, 2, value)
+                    return {"ok": True, "key": key, "value": value, "updated": True}
+                except APIError as e:
+                    # fallback: append
+                    try:
+                        ws.append_row([key, value], value_input_option="RAW")
+                        return {"ok": True, "key": key, "value": value, "appended_fallback": True, "update_error": str(e)}
+                    except APIError as e2:
+                        return {"ok": False, "error": f"update failed ({e}); append fallback failed ({e2})"}
+
+        # Not found -> append
+        try:
+            ws.append_row([key, value], value_input_option="RAW")
+            return {"ok": True, "key": key, "value": value, "created": True}
+        except APIError as e:
+            return {"ok": False, "error": f"append failed: {e}"}
+
+    except Exception as e:
+        return {"ok": False, "error": f"set_research_state failed: {e}"}
 
 
 # =========================
@@ -190,12 +223,7 @@ def _sb():
 
 def _download_from_storage(bucket: str, path: str) -> bytes:
     sb = _sb()
-    b = (bucket or "").strip()
-    p = (path or "").strip()
-    if not b or not p:
-        raise ValueError("storage_bucket and storage_path are required for storage download.")
-    data = sb.storage.from_(b).download(p)
-    return data
+    return sb.storage.from_(bucket).download(path)
 
 
 def _download_from_url(csv_url: str) -> bytes:
@@ -205,7 +233,6 @@ def _download_from_url(csv_url: str) -> bytes:
 
 
 def _load_csv(storage_bucket: Optional[str] = None, storage_path: Optional[str] = None, csv_url: Optional[str] = None) -> pd.DataFrame:
-    raw: bytes
     if storage_bucket and storage_path:
         raw = _download_from_storage(storage_bucket, storage_path)
     elif csv_url:
@@ -218,14 +245,12 @@ def _load_csv(storage_bucket: Optional[str] = None, storage_path: Optional[str] 
     except Exception:
         text = raw.decode("latin-1", errors="replace")
 
-    df = pd.read_csv(StringIO(text), low_memory=False)
-    return df
+    return pd.read_csv(StringIO(text), low_memory=False)
 
 
 def load_data_basic(storage_bucket: str = "", storage_path: str = "", csv_url: str = "") -> Dict[str, Any]:
     df = _load_csv(storage_bucket or None, storage_path or None, csv_url or None)
-    head = df.head(5).to_dict(orient="records")
-    return {"rows": int(df.shape[0]), "cols": int(df.shape[1]), "head": head}
+    return {"rows": int(df.shape[0]), "cols": int(df.shape[1]), "head": df.head(5).to_dict(orient="records")}
 
 
 def list_columns(storage_bucket: str = "", storage_path: str = "", csv_url: str = "") -> Dict[str, Any]:
@@ -238,7 +263,6 @@ def list_columns(storage_bucket: str = "", storage_path: str = "", csv_url: str 
 # =========================
 
 def _mapping() -> Dict[str, Tuple[str, str]]:
-    # (side, odds_col)
     return {
         "SHG PL": ("lay", "HT CS Price"),
         "SHG 2+ PL": ("lay", "HT 2 Ahead Odds"),
@@ -252,12 +276,10 @@ def _mapping() -> Dict[str, Tuple[str, str]]:
 
 def basic_roi_for_pl_column(pl_column: str, storage_bucket: str = "", storage_path: str = "", csv_url: str = "") -> Dict[str, Any]:
     df = _load_csv(storage_bucket or None, storage_path or None, csv_url or None)
-
     if pl_column not in df.columns:
         return {"error": f"Missing PL column: {pl_column}"}
 
     side, odds_col = _mapping().get(pl_column, ("back", ""))
-
     d = df[df[pl_column].notna()].copy()
     d[pl_column] = pd.to_numeric(d[pl_column], errors="coerce")
     d = d[d[pl_column].notna()]
@@ -269,34 +291,17 @@ def basic_roi_for_pl_column(pl_column: str, storage_bucket: str = "", storage_pa
 
     if side == "lay":
         if odds_col not in d.columns:
-            return {"error": f"Lay ROI requires mapped odds col '{odds_col}' but it is missing."}
+            return {"error": f"Lay ROI requires odds col '{odds_col}' but it is missing."}
         odds = pd.to_numeric(d[odds_col], errors="coerce").fillna(0.0)
         liability = (odds - 1.0).clip(lower=0.0)
         denom = float(liability.sum())
         roi = (total_pl / denom) if denom > 0 else 0.0
-        return {
-            "pl_column": pl_column,
-            "side": "lay",
-            "odds_col": odds_col,
-            "bets": n,
-            "total_pl": total_pl,
-            "denom_liability": denom,
-            "roi": float(roi),
-            "avg_pl_per_bet": float(total_pl / n),
-        }
+        return {"pl_column": pl_column, "side": "lay", "odds_col": odds_col, "bets": n, "total_pl": total_pl,
+                "denom_liability": denom, "roi": float(roi), "avg_pl_per_bet": float(total_pl / n)}
 
-    # back 1pt per bet
     denom = float(n)
-    return {
-        "pl_column": pl_column,
-        "side": "back",
-        "odds_col": odds_col or None,
-        "bets": n,
-        "total_pl": total_pl,
-        "denom_stake": denom,
-        "roi": float(total_pl / denom),
-        "avg_pl_per_bet": float(total_pl / denom),
-    }
+    return {"pl_column": pl_column, "side": "back", "odds_col": odds_col or None, "bets": n, "total_pl": total_pl,
+            "denom_stake": denom, "roi": float(total_pl / denom), "avg_pl_per_bet": float(total_pl / denom)}
 
 
 # =========================
@@ -305,19 +310,11 @@ def basic_roi_for_pl_column(pl_column: str, storage_bucket: str = "", storage_pa
 
 def submit_job(task_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
     sb = _sb()
-    # jobs table expected columns:
-    # job_id (uuid default), status, task_type, params (jsonb), result_path, error, created_at, updated_at
-    row = {
-        "status": "queued",
-        "task_type": task_type,
-        "params": params or {},
-        "created_at": _now_iso(),
-        "updated_at": _now_iso(),
-    }
+    row = {"status": "queued", "task_type": task_type, "params": params or {}, "created_at": _now_iso(), "updated_at": _now_iso()}
     res = sb.table("jobs").insert(row).execute()
     data = (res.data or [])
     if not data:
-        return {"error": "Insert returned no rows. Check Supabase table schema/RLS.", "raw": str(res)}
+        return {"error": "Insert returned no rows. Check table schema/RLS.", "raw": str(res)}
     return data[0]
 
 
@@ -335,37 +332,26 @@ def download_result(result_path: str, bucket: str = "") -> Dict[str, Any]:
     b = (bucket or st.secrets.get("RESULTS_BUCKET") or os.getenv("RESULTS_BUCKET") or "football-results").strip()
     raw = sb.storage.from_(b).download(result_path)
     try:
-        text = raw.decode("utf-8")
-        return {"ok": True, "bucket": b, "result_path": result_path, "result": json.loads(text)}
+        return {"ok": True, "bucket": b, "result_path": result_path, "result": json.loads(raw.decode("utf-8"))}
     except Exception:
-        # last resort return raw text
-        try:
-            text = raw.decode("latin-1", errors="replace")
-        except Exception:
-            text = str(raw)
-        return {"ok": True, "bucket": b, "result_path": result_path, "raw_text": text}
+        return {"ok": True, "bucket": b, "result_path": result_path, "raw_text": raw.decode("latin-1", errors="replace")}
 
 
 def wait_for_job(job_id: str, timeout_s: int = 300, poll_s: int = 5, auto_download: bool = True) -> Dict[str, Any]:
     deadline = time.time() + int(timeout_s or 300)
     poll = max(1, int(poll_s or 5))
-
     last_job: Dict[str, Any] = {}
+
     while time.time() < deadline:
         last_job = get_job(job_id)
-
-        # If get_job itself failed
         if last_job.get("error"):
             return {"status": "error", "error": last_job.get("error"), "job": last_job}
 
         status = (last_job.get("status") or "").lower()
         if status in ("done", "error"):
             out = {"status": status, "job": last_job}
-            if status == "done" and auto_download:
-                rp = last_job.get("result_path")
-                if rp:
-                    dl = download_result(rp)
-                    out["result"] = dl.get("result") or dl
+            if status == "done" and auto_download and last_job.get("result_path"):
+                out["result"] = download_result(last_job["result_path"]).get("result")
             return out
 
         time.sleep(poll)
@@ -387,11 +373,7 @@ def save_chat(session_id: str, messages: List[Dict[str, Any]]) -> Dict[str, Any]
     path = f"sessions/{session_id}.json"
     payload = json.dumps({"session_id": session_id, "messages": messages, "saved_at": _now_iso()}, ensure_ascii=False, indent=2).encode("utf-8")
 
-    sb.storage.from_(bucket).upload(
-        path=path,
-        file=payload,
-        file_options={"content-type": "application/json", "upsert": "true"},
-    )
+    sb.storage.from_(bucket).upload(path=path, file=payload, file_options={"content-type": "application/json", "upsert": "true"})
     return {"ok": True, "bucket": bucket, "path": path}
 
 
@@ -401,7 +383,6 @@ def load_chat(session_id: str) -> Dict[str, Any]:
     path = f"sessions/{session_id}.json"
     try:
         raw = sb.storage.from_(bucket).download(path)
-        text = raw.decode("utf-8")
-        return {"ok": True, "bucket": bucket, "path": path, "data": json.loads(text)}
+        return {"ok": True, "bucket": bucket, "path": path, "data": json.loads(raw.decode("utf-8"))}
     except Exception:
         return {"ok": False, "bucket": bucket, "path": path, "data": {}}
