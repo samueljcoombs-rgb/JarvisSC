@@ -45,8 +45,20 @@ def _now_iso() -> str:
     return datetime.utcnow().isoformat()
 
 
+def _coerce_params_to_dict(params: Any) -> Dict[str, Any]:
+    if isinstance(params, dict):
+        return params
+    if isinstance(params, str):
+        try:
+            parsed = json.loads(params)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
 # ============================================================
-# Google Sheets helpers (fault tolerant)
+# Google Sheets helpers
 # ============================================================
 
 def _gs_creds() -> Credentials:
@@ -138,8 +150,6 @@ def _read_table_tab(tab_name: str) -> List[Dict[str, str]]:
     return rows
 
 
-# ---------------- Public getters ----------------
-
 def get_dataset_overview() -> Dict[str, Any]:
     return {"tab": TAB_DATASET_OVERVIEW, "data": _read_kv_tab(TAB_DATASET_OVERVIEW)}
 
@@ -193,7 +203,6 @@ def set_research_state(key: str, value: str) -> Dict[str, Any]:
     try:
         ws = _ws(TAB_RESEARCH_STATE)
         vals = ws.get_all_values() or []
-
         for idx, row in enumerate(vals[1:], start=2):
             if len(row) >= 1 and (row[0] or "").strip() == key:
                 try:
@@ -208,7 +217,6 @@ def set_research_state(key: str, value: str) -> Dict[str, Any]:
 
         ws.append_row([key, value], value_input_option="RAW")
         return {"ok": True, "key": key, "value": value, "created": True}
-
     except APIError as e:
         return {"ok": False, "error": f"set_research_state APIError: {e}"}
     except Exception as e:
@@ -233,7 +241,7 @@ def _sb():
 
 
 # ============================================================
-# CSV loading (Supabase Storage preferred)
+# CSV loading
 # ============================================================
 
 def _download_from_storage(bucket: str, path: str) -> bytes:
@@ -241,7 +249,6 @@ def _download_from_storage(bucket: str, path: str) -> bytes:
     try:
         return sb.storage.from_(bucket).download(path)
     except StorageException as e:
-        # storage3 exceptions usually include a dict with statusCode
         raise RuntimeError(f"Storage download failed for bucket='{bucket}', path='{path}'. Details: {e}") from e
     except Exception as e:
         raise RuntimeError(f"Storage download failed for bucket='{bucket}', path='{path}'. Error: {e}") from e
@@ -280,7 +287,7 @@ def list_columns(storage_bucket: str = "", storage_path: str = "", csv_url: str 
 
 
 # ============================================================
-# ROI (row-level)
+# ROI
 # ============================================================
 
 def _mapping() -> Dict[str, Tuple[str, str]]:
@@ -317,45 +324,34 @@ def basic_roi_for_pl_column(pl_column: str, storage_bucket: str = "", storage_pa
         liability = (odds - 1.0).clip(lower=0.0)
         denom = float(liability.sum())
         roi = (total_pl / denom) if denom > 0 else 0.0
-        return {
-            "ok": True,
-            "pl_column": pl_column,
-            "side": "lay",
-            "odds_col": odds_col,
-            "bets": n,
-            "total_pl": total_pl,
-            "denom_liability": denom,
-            "roi": float(roi),
-            "avg_pl_per_bet": float(total_pl / n),
-        }
-
-    denom = float(n)
-    return {
-        "ok": True,
-        "pl_column": pl_column,
-        "side": "back",
-        "odds_col": odds_col or None,
-        "bets": n,
-        "total_pl": total_pl,
-        "denom_stake": denom,
-        "roi": float(total_pl / denom),
-        "avg_pl_per_bet": float(total_pl / denom),
-    }
+        return {"ok": True, "pl_column": pl_column, "side": "lay", "odds_col": odds_col, "bets": n, "total_pl": total_pl, "denom_liability": denom, "roi": float(roi)}
+    return {"ok": True, "pl_column": pl_column, "side": "back", "bets": n, "total_pl": total_pl, "denom_stake": float(n), "roi": float(total_pl / float(n))}
 
 
 # ============================================================
-# Background jobs (Supabase table + Storage results)
+# Background jobs
 # ============================================================
 
 def submit_job(task_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
     sb = _sb()
-    row = {"status": "queued", "task_type": task_type, "params": params or {}, "created_at": _now_iso(), "updated_at": _now_iso()}
+    params_dict = _coerce_params_to_dict(params)
+
+    row = {
+        "status": "queued",
+        "task_type": task_type,
+        "params": params_dict,  # ✅ always a dict
+        "created_at": _now_iso(),
+        "updated_at": _now_iso(),
+    }
+
     try:
         res = sb.table("jobs").insert(row).execute()
         data = (res.data or [])
         if not data:
             return {"ok": False, "error": "Insert returned no rows. Check table schema/RLS.", "raw": str(res)}
-        return data[0]
+        job = data[0]
+        job["params"] = _coerce_params_to_dict(job.get("params"))
+        return job
     except Exception as e:
         return {"ok": False, "error": f"submit_job failed: {e}"}
 
@@ -367,7 +363,9 @@ def get_job(job_id: str) -> Dict[str, Any]:
         data = (res.data or [])
         if not data:
             return {"ok": False, "error": "job not found", "job_id": job_id}
-        return data[0]
+        job = data[0]
+        job["params"] = _coerce_params_to_dict(job.get("params"))
+        return job
     except Exception as e:
         return {"ok": False, "error": f"get_job failed: {e}", "job_id": job_id}
 
@@ -411,7 +409,7 @@ def wait_for_job(job_id: str, timeout_s: int = 300, poll_s: int = 5, auto_downlo
 
 
 # ============================================================
-# Chat sessions (Supabase Storage)
+# Chat sessions (unchanged)
 # ============================================================
 
 def _chat_bucket() -> str:
@@ -434,11 +432,7 @@ def _load_chat_index(sb) -> Dict[str, Any]:
 def _save_chat_index(sb, index: Dict[str, Any]) -> None:
     bucket = _chat_bucket()
     payload = json.dumps(index, ensure_ascii=False, indent=2).encode("utf-8")
-    sb.storage.from_(bucket).upload(
-        path=_chat_index_path(),
-        file=payload,
-        file_options={"content-type": "application/json", "upsert": "true"},
-    )
+    sb.storage.from_(bucket).upload(path=_chat_index_path(), file=payload, file_options={"content-type": "application/json", "upsert": "true"})
 
 
 def list_chats(limit: int = 200) -> Dict[str, Any]:
@@ -455,21 +449,12 @@ def save_chat(session_id: str, messages: List[Dict[str, Any]], title: str = "") 
     bucket = _chat_bucket()
     path = f"sessions/{session_id}.json"
 
-    payload = json.dumps(
-        {"session_id": session_id, "title": title or "", "messages": messages, "saved_at": _now_iso()},
-        ensure_ascii=False,
-        indent=2,
-    ).encode("utf-8")
+    payload = json.dumps({"session_id": session_id, "title": title or "", "messages": messages, "saved_at": _now_iso()}, ensure_ascii=False, indent=2).encode("utf-8")
 
     try:
         sb.storage.from_(bucket).upload(path=path, file=payload, file_options={"content-type": "application/json", "upsert": "true"})
     except StorageException as e:
-        return {
-            "ok": False,
-            "error": f"Storage upload failed. Create bucket '{bucket}' and ensure the service role key has access. Details: {e}",
-            "bucket": bucket,
-            "path": path,
-        }
+        return {"ok": False, "error": f"Storage upload failed. Create bucket '{bucket}' and ensure the service role key has access. Details: {e}", "bucket": bucket, "path": path}
     except Exception as e:
         return {"ok": False, "error": f"save_chat failed: {e}", "bucket": bucket, "path": path}
 
