@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import os
-import time
 import inspect
 from typing import Any, Dict, List
 
@@ -29,7 +28,7 @@ client = _init_client()
 def _select_best_model(c: OpenAI) -> str:
     """
     Prefer GPT-5 if available, otherwise fall back.
-    Note: exact '5.2 Thinking' name isn't always listed; prefer gpt-5 / gpt-latest.
+    Exact '5.2 Thinking' string may not be exposed; we prefer gpt-5 / gpt-latest.
     """
     preferred = (os.getenv("PREFERRED_OPENAI_MODEL", "").strip()
                  or st.secrets.get("PREFERRED_OPENAI_MODEL", ""))
@@ -74,36 +73,109 @@ TOOL_FUNCS: Dict[str, Any] = {
     "strategy_performance_summary": functions.strategy_performance_summary,
     "strategy_performance_batch": functions.strategy_performance_batch,
 
-    # Offloaded compute (Supabase job queue + results)
+    # Offloaded compute (Supabase queue + results)
     "submit_job": functions.submit_job,
     "get_job": functions.get_job,
     "download_result": functions.download_result,
 }
 
+def _tool_schema(name: str, description: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": parameters,
+        },
+    }
+
 TOOLS_SCHEMA: List[Dict[str, Any]] = [
     # ---- KB ----
-    {"type": "function", "function": {"name": "get_dataset_overview", "description": "Load dataset_overview sheet.", "parameters": {"type": "object", "properties": {}, "required": []}}},
-    {"type": "function", "function": {"name": "get_column_definitions", "description": "Load column_definitions sheet.", "parameters": {"type": "object", "properties": {}, "required": []}}},
-    {"type": "function", "function": {"name": "get_research_rules", "description": "Load research_rules sheet.", "parameters": {"type": "object", "properties": {}, "required": []}}},
-    {"type": "function", "function": {"name": "get_evaluation_framework", "description": "Load evaluation_framework sheet.", "parameters": {"type": "object", "properties": {}, "required": []}}},
+    _tool_schema(
+        "get_dataset_overview",
+        "Load dataset_overview sheet (key/value style rows).",
+        {"type": "object", "properties": {}, "required": []},
+    ),
+    _tool_schema(
+        "get_column_definitions",
+        "Load column_definitions sheet.",
+        {"type": "object", "properties": {}, "required": []},
+    ),
+    _tool_schema(
+        "get_research_rules",
+        "Load research_rules sheet.",
+        {"type": "object", "properties": {}, "required": []},
+    ),
+    _tool_schema(
+        "get_evaluation_framework",
+        "Load evaluation_framework sheet.",
+        {"type": "object", "properties": {}, "required": []},
+    ),
 
     # ---- memory/state ----
-    {"type": "function", "function": {"name": "append_research_note", "description": "Append a research note (note + optional tags).",
-        "parameters": {"type": "object", "properties": {"note": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}}, "required": ["note"]}}},
-    {"type": "function", "function": {"name": "get_recent_research_notes", "description": "Fetch last N research notes.",
-        "parameters": {"type": "object", "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 200}}, "required": []}}},
-    {"type": "function", "function": {"name": "get_research_state", "description": "Fetch key/value state from research_state.", "parameters": {"type": "object", "properties": {}, "required": []}}},
-    {"type": "function", "function": {"name": "set_research_state", "description": "Upsert key/value into research_state.",
-        "parameters": {"type": "object", "properties": {"key": {"type": "string"}, "value": {"type": "string"}}, "required": ["key", "value"]}}},
+    _tool_schema(
+        "append_research_note",
+        "Append a research note into research_memory sheet. Provide note and optional tags.",
+        {
+            "type": "object",
+            "properties": {
+                "note": {"type": "string"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["note"],
+        },
+    ),
+    _tool_schema(
+        "get_recent_research_notes",
+        "Fetch last N research notes from research_memory.",
+        {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+            },
+            "required": [],
+        },
+    ),
+    _tool_schema(
+        "get_research_state",
+        "Fetch key/value state dictionary from research_state sheet.",
+        {"type": "object", "properties": {}, "required": []},
+    ),
+    _tool_schema(
+        "set_research_state",
+        "Upsert a key/value into research_state.",
+        {
+            "type": "object",
+            "properties": {
+                "key": {"type": "string"},
+                "value": {"type": "string"},
+            },
+            "required": ["key", "value"],
+        },
+    ),
 
     # ---- data ----
-    {"type": "function", "function": {"name": "load_data_basic", "description": "Load dataset preview.",
-        "parameters": {"type": "object", "properties": {"limit": {"type": "integer", "minimum": 10, "maximum": 2000}}, "required": []}}},
-    {"type": "function", "function": {"name": "list_columns", "description": "List all columns in the dataset.", "parameters": {"type": "object", "properties": {}, "required": []}}},
+    _tool_schema(
+        "load_data_basic",
+        "Load dataset preview + column list.",
+        {
+            "type": "object",
+            "properties": {"limit": {"type": "integer", "minimum": 10, "maximum": 2000}},
+            "required": [],
+        },
+    ),
+    _tool_schema(
+        "list_columns",
+        "List all columns in the dataset.",
+        {"type": "object", "properties": {}, "required": []},
+    ),
 
     # ---- evaluation ----
-    {"type": "function", "function": {"name": "strategy_performance_summary", "description": "Compute ROI + streaks/drawdown for a PL column.",
-        "parameters": {"type": "object",
+    _tool_schema(
+        "strategy_performance_summary",
+        "Compute bet-level ROI and ID-aggregated streak/drawdown for a PL column.",
+        {
+            "type": "object",
             "properties": {
                 "pl_column": {"type": "string"},
                 "side": {"type": "string", "enum": ["back", "lay"]},
@@ -111,28 +183,54 @@ TOOLS_SCHEMA: List[Dict[str, Any]] = [
                 "time_split_ratio": {"type": "number", "minimum": 0.5, "maximum": 0.95},
                 "compute_streaks": {"type": "boolean"},
             },
-            "required": ["pl_column"]
-        }}}},
-    {"type": "function", "function": {"name": "strategy_performance_batch", "description": "Batch performance summaries.",
-        "parameters": {"type": "object",
+            "required": ["pl_column"],
+        },
+    ),
+    _tool_schema(
+        "strategy_performance_batch",
+        "Compute performance summaries for multiple PL columns.",
+        {
+            "type": "object",
             "properties": {
                 "pl_columns": {"type": "array", "items": {"type": "string"}},
                 "time_split_ratio": {"type": "number", "minimum": 0.5, "maximum": 0.95},
                 "compute_streaks": {"type": "boolean"},
             },
-            "required": ["pl_columns"]
-        }}}},
+            "required": ["pl_columns"],
+        },
+    ),
 
     # ---- offloaded compute ----
-    {"type": "function", "function": {"name": "submit_job", "description": "Submit heavy job to Supabase queue.",
-        "parameters": {"type": "object",
-            "properties": {"task_type": {"type": "string"}, "params": {"type": "object"}},
-            "required": ["task_type", "params"]
-        }}}},
-    {"type": "function", "function": {"name": "get_job", "description": "Get status for a Supabase job_id.",
-        "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]}}},
-    {"type": "function", "function": {"name": "download_result", "description": "Download JSON result from Supabase Storage path.",
-        "parameters": {"type": "object", "properties": {"result_path": {"type": "string"}}, "required": ["result_path"]}}},
+    _tool_schema(
+        "submit_job",
+        "Submit a heavy compute job to Supabase queue (processed by Modal worker).",
+        {
+            "type": "object",
+            "properties": {
+                "task_type": {"type": "string"},
+                "params": {"type": "object"},
+            },
+            "required": ["task_type", "params"],
+        },
+    ),
+    _tool_schema(
+        "get_job",
+        "Get status + fields for a Supabase job_id.",
+        {
+            "type": "object",
+            "properties": {"job_id": {"type": "string"}},
+            "required": ["job_id"],
+        },
+    ),
+    _tool_schema(
+        "download_result",
+        "Download a JSON result from Supabase Storage path.",
+        {
+            "type": "object",
+            "properties": {"result_path": {"type": "string"}},
+            "required": ["result_path"],
+        },
+    ),
 ]
 
 
@@ -189,7 +287,6 @@ def _run_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
 
         accepted = {k: v for k, v in args.items() if k in params}
 
-        # Identify required params not provided
         missing_required = []
         for p_name, p in params.items():
             if p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
