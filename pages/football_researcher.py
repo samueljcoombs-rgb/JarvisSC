@@ -4,11 +4,10 @@ import os
 import json
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Set, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import streamlit as st
-from openai import OpenAI
-from openai import BadRequestError
+from openai import OpenAI, BadRequestError
 
 from modules import football_tools as functions
 
@@ -32,7 +31,7 @@ MODEL = PREFERRED or "gpt-5.1"
 
 
 # ============================================================
-# Defaults (Supabase Storage dataset location)
+# Defaults
 # ============================================================
 
 DEFAULT_STORAGE_BUCKET = os.getenv("DATA_STORAGE_BUCKET") or st.secrets.get("DATA_STORAGE_BUCKET", "football-data")
@@ -42,22 +41,19 @@ DEFAULT_RESULTS_BUCKET = os.getenv("RESULTS_BUCKET") or st.secrets.get("RESULTS_
 MAX_MESSAGES_TO_KEEP = int(os.getenv("MAX_CHAT_MESSAGES") or st.secrets.get("MAX_CHAT_MESSAGES", 220))
 
 
-DATA_TOOLS = {"load_data_basic", "list_columns", "basic_roi_for_pl_column"}
-
-
 # ============================================================
-# Tool runner (APP INTERNAL)
+# Tool runner
 # ============================================================
 
 def _run_tool(name: str, args: Dict[str, Any]) -> Any:
     fn = getattr(functions, name, None)
     if not fn:
         raise RuntimeError(f"Unknown tool: {name}")
-    return fn(**args)
+    return fn(**(args or {}))
 
 
 # ============================================================
-# Tools schema for OpenAI function calling
+# Tools exposed to the LLM (SAFE SET ONLY)
 # ============================================================
 
 LLM_TOOLS = [
@@ -70,13 +66,12 @@ LLM_TOOLS = [
     {"type": "function", "function": {"name": "get_research_state", "description": "Get research_state KV.", "parameters": {"type": "object", "properties": {}, "required": []}}},
     {"type": "function", "function": {"name": "set_research_state", "description": "Set research_state KV.", "parameters": {"type": "object", "properties": {"key": {"type": "string"}, "value": {"type": "string"}}, "required": ["key", "value"]}}},
 
-    # Dataset (Supabase Storage only)
-    {"type": "function", "function": {"name": "load_data_basic", "description": "Load CSV preview from Supabase Storage.", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}}, "required": []}}},
-    {"type": "function", "function": {"name": "list_columns", "description": "List CSV columns from Supabase Storage.", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}}, "required": []}}},
-    {"type": "function", "function": {"name": "basic_roi_for_pl_column", "description": "Row-level ROI for PL column (outcome only).", "parameters": {"type": "object", "properties": {"pl_column": {"type": "string"}, "storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}}, "required": ["pl_column"]}}},
+    {"type": "function", "function": {"name": "load_data_basic", "description": "Load CSV preview (Supabase Storage).", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}}, "required": []}}},
+    {"type": "function", "function": {"name": "list_columns", "description": "List CSV columns (Supabase Storage).", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}}, "required": []}}},
+    {"type": "function", "function": {"name": "basic_roi_for_pl_column", "description": "ROI for a PL column (outcome only).", "parameters": {"type": "object", "properties": {"pl_column": {"type": "string"}, "storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}}, "required": ["pl_column"]}}},
 
-    # Jobs
-    {"type": "function", "function": {"name": "submit_job", "description": "Submit Modal worker job.", "parameters": {"type": "object", "properties": {"task_type": {"type": "string"}, "params": {"type": "object"}}, "required": ["task_type", "params"]}}},
+    # ✅ SAFE job tools
+    {"type": "function", "function": {"name": "submit_strategy_search", "description": "Submit a strategy_search job safely. Optional target_pl_column; otherwise worker picks best market.", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "results_bucket": {"type": "string"}, "time_split_ratio": {"type": "number"}, "target_pl_column": {"type": "string"}}, "required": []}}},
     {"type": "function", "function": {"name": "get_job", "description": "Get job status by job_id.", "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]}}},
     {"type": "function", "function": {"name": "wait_for_job", "description": "Wait for completion; optionally downloads results.", "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}, "timeout_s": {"type": "integer"}, "poll_s": {"type": "integer"}, "auto_download": {"type": "boolean"}}, "required": ["job_id"]}}},
     {"type": "function", "function": {"name": "download_result", "description": "Download a result JSON from storage by path.", "parameters": {"type": "object", "properties": {"result_path": {"type": "string"}, "bucket": {"type": "string"}}, "required": ["result_path"]}}},
@@ -89,23 +84,25 @@ LLM_TOOLS = [
 
 SYSTEM_PROMPT = f"""You are FootballResearcher — an autonomous research agent that discovers profitable, robust football trading strategy criteria.
 
-Source of truth:
-- Use Google Sheet tabs: dataset_overview, research_rules, column_definitions, evaluation_framework, research_state, research_memory.
-
 Hard constraints:
 - PL columns are outcomes only and MUST NOT be used as predictive features.
 - Avoid overfitting: time-based splits; never tune thresholds on final test.
-- Always report sample sizes and stability (train vs test gap) and drawdown/losing streak in POINTS.
+- Always report sample sizes, train vs test gap, and drawdown/losing streak in POINTS.
 - Prefer simple rules that generalise; penalise fragile, tiny samples.
 
+Source of truth:
+- Use Google Sheet tabs: dataset_overview, research_rules, column_definitions, evaluation_framework, research_state, research_memory.
+
 Data access:
-- Dataset MUST be loaded from Supabase Storage ONLY.
-- Default dataset is: bucket="{DEFAULT_STORAGE_BUCKET}", path="{DEFAULT_STORAGE_PATH}".
-- Do NOT invent bucket/path like "dataset/master.csv". If user doesn’t specify bucket/path, always use the default dataset.
+- Default dataset is bucket="{DEFAULT_STORAGE_BUCKET}", path="{DEFAULT_STORAGE_PATH}".
+- Do NOT invent bucket/path.
+
+Jobs:
+- Only submit worker jobs using submit_strategy_search (do NOT invent task types).
 
 Mode rules:
-- In CHAT mode: conversational; do not call tools unless explicitly asked.
-- In AUTOPILOT mode: tools enabled; still explain briefly.
+- CHAT mode: conversational (no tools).
+- AUTOPILOT mode: tools enabled; keep explanations short.
 """
 
 
@@ -154,11 +151,6 @@ def _trim_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         return messages
     system = messages[0:1]
     tail = messages[-(MAX_MESSAGES_TO_KEEP - 1):]
-    while tail and tail[0].get("role") == "tool":
-        idx_start = len(messages) - len(tail) - 1
-        if idx_start <= 0:
-            break
-        tail = [messages[idx_start]] + tail
     return system + tail
 
 
@@ -194,101 +186,15 @@ if "agent_mode" not in st.session_state:
 
 
 # ============================================================
-# History repair (prevents dangling tool_calls)
-# ============================================================
-
-def _repair_tool_call_chains(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    if not messages:
-        return [{"role": "system", "content": SYSTEM_PROMPT}]
-
-    repaired: List[Dict[str, Any]] = []
-    repaired.append(messages[0] if messages[0].get("role") == "system" else {"role": "system", "content": SYSTEM_PROMPT})
-
-    pending_ids: Set[str] = set()
-    pending_assistant_index: Optional[int] = None
-    pending_tool_indices: List[int] = []
-
-    def _drop_pending_chain():
-        nonlocal pending_ids, pending_assistant_index, pending_tool_indices
-        if pending_assistant_index is not None and 0 <= pending_assistant_index < len(repaired):
-            repaired[pending_assistant_index].pop("tool_calls", None)
-        for idx in sorted(pending_tool_indices, reverse=True):
-            if 0 <= idx < len(repaired) and repaired[idx].get("role") == "tool":
-                repaired.pop(idx)
-        pending_ids = set()
-        pending_assistant_index = None
-        pending_tool_indices = []
-
-    for m in messages[1:]:
-        role = (m.get("role") or "").strip()
-
-        if role == "assistant":
-            if pending_ids:
-                _drop_pending_chain()
-
-            clean = {"role": "assistant", "content": m.get("content", "") or ""}
-            tc = m.get("tool_calls")
-            if isinstance(tc, list) and tc:
-                cleaned = []
-                ids: Set[str] = set()
-                for call in tc:
-                    try:
-                        cid = call.get("id")
-                        fn = call.get("function") or {}
-                        name = fn.get("name")
-                        args = fn.get("arguments", "{}")
-                        if cid and name:
-                            cleaned.append({"id": cid, "type": "function", "function": {"name": name, "arguments": args}})
-                            ids.add(cid)
-                    except Exception:
-                        continue
-                if cleaned:
-                    clean["tool_calls"] = cleaned
-                    pending_ids = set(ids)
-                    pending_assistant_index = len(repaired)
-                    pending_tool_indices = []
-            repaired.append(clean)
-            continue
-
-        if role == "tool":
-            tcid = (m.get("tool_call_id") or "").strip()
-            if pending_ids and tcid in pending_ids:
-                repaired.append({"role": "tool", "tool_call_id": tcid, "content": m.get("content", "") or ""})
-                pending_tool_indices.append(len(repaired) - 1)
-                pending_ids.remove(tcid)
-                if not pending_ids:
-                    pending_assistant_index = None
-                    pending_tool_indices = []
-            continue
-
-        if role == "user":
-            if pending_ids:
-                _drop_pending_chain()
-            repaired.append({"role": "user", "content": m.get("content", "") or ""})
-            continue
-
-    if pending_ids:
-        _drop_pending_chain()
-
-    return repaired
-
-
-def _sanitize_history_for_llm(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    return _repair_tool_call_chains(messages)
-
-
-# ============================================================
-# LLM call
+# LLM call (chat mode has no tools)
 # ============================================================
 
 def _call_llm(messages: List[Dict[str, Any]]):
-    st.session_state.messages = _repair_tool_call_chains(st.session_state.messages)
     mode = st.session_state.agent_mode
-    safe_messages = _sanitize_history_for_llm(st.session_state.messages)
 
     if mode == "chat":
-        chat_only: List[Dict[str, Any]] = []
-        for m in safe_messages:
+        chat_only = []
+        for m in messages:
             if m.get("role") == "tool":
                 continue
             if m.get("role") == "assistant" and "tool_calls" in m:
@@ -297,47 +203,26 @@ def _call_llm(messages: List[Dict[str, Any]]):
                 chat_only.append(mm)
             else:
                 chat_only.append(m)
+
         return client.chat.completions.create(model=MODEL, messages=chat_only)
 
-    return client.chat.completions.create(model=MODEL, messages=safe_messages, tools=LLM_TOOLS, tool_choice="auto")
+    return client.chat.completions.create(model=MODEL, messages=messages, tools=LLM_TOOLS, tool_choice="auto")
 
 
-# ============================================================
-# Tool argument guard: force correct dataset location
-# ============================================================
-
-def _apply_default_dataset_args(tool_name: str, args: Dict[str, Any], user_text: str) -> Dict[str, Any]:
-    """
-    If the model calls dataset tools with missing/incorrect bucket/path,
-    force the configured DEFAULT_STORAGE_BUCKET/DEFAULT_STORAGE_PATH.
-    Only allow override if the user explicitly mentions a bucket/path in the message.
-    """
-    if tool_name not in DATA_TOOLS:
-        return args
-
-    user_lower = (user_text or "").lower()
-    user_specified = ("storage_bucket" in user_lower) or ("storage_path" in user_lower) or (DEFAULT_STORAGE_BUCKET.lower() in user_lower) or (DEFAULT_STORAGE_PATH.lower() in user_lower)
-
-    sb = (args.get("storage_bucket") or "").strip()
-    sp = (args.get("storage_path") or "").strip()
-
-    if user_specified:
-        # user is intentionally controlling location; just fill blanks if missing
-        if not sb:
+def _apply_default_dataset_args(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    args = dict(args or {})
+    # Default dataset for data tools + strategy submission
+    if tool_name in {"load_data_basic", "list_columns", "basic_roi_for_pl_column", "submit_strategy_search"}:
+        if not (args.get("storage_bucket") and args.get("storage_path")):
             args["storage_bucket"] = DEFAULT_STORAGE_BUCKET
-        if not sp:
             args["storage_path"] = DEFAULT_STORAGE_PATH
-        return args
-
-    # otherwise: force defaults (prevents dataset/master.csv mistakes)
-    args["storage_bucket"] = DEFAULT_STORAGE_BUCKET
-    args["storage_path"] = DEFAULT_STORAGE_PATH
+    if tool_name == "submit_strategy_search":
+        if not args.get("results_bucket"):
+            args["results_bucket"] = DEFAULT_RESULTS_BUCKET
+        if args.get("time_split_ratio") is None:
+            args["time_split_ratio"] = 0.7
     return args
 
-
-# ============================================================
-# Chat loop
-# ============================================================
 
 def _chat_with_tools(user_text: str, max_rounds: int = 6):
     st.session_state.messages.append({"role": "user", "content": user_text})
@@ -363,6 +248,7 @@ def _chat_with_tools(user_text: str, max_rounds: int = 6):
                 {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
                 for tc in tool_calls
             ]
+
         st.session_state.messages.append(assistant_msg)
 
         if st.session_state.agent_mode == "chat":
@@ -374,9 +260,7 @@ def _chat_with_tools(user_text: str, max_rounds: int = 6):
         for tc in tool_calls:
             name = tc.function.name
             args = json.loads(tc.function.arguments or "{}")
-
-            # ✅ enforce correct dataset location
-            args = _apply_default_dataset_args(name, args, user_text)
+            args = _apply_default_dataset_args(name, args)
 
             try:
                 out = _run_tool(name, args)
@@ -426,40 +310,49 @@ with st.sidebar:
         _try_load_chat(st.session_state.session_id)
         st.rerun()
 
-    colA, colB = st.columns(2)
-    with colA:
-        if st.button("➕ New"):
-            sid = str(uuid.uuid4())
-            _set_session(sid)
-            st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-            _persist_chat(title=f"Session {sid[:8]}")
-            st.rerun()
-    with colB:
-        if st.button("💾 Save"):
-            _persist_chat()
-            st.success("Saved.")
-
-    new_title = st.text_input("Rename current session", value="")
-    if st.button("Rename"):
-        if new_title.strip():
-            _run_tool("rename_chat", {"session_id": SESSION_ID, "title": new_title.strip()})
-            _persist_chat(title=new_title.strip())
-            st.success("Renamed.")
-            st.rerun()
-
-    if st.button("🗑️ Delete current session"):
-        _run_tool("delete_chat", {"session_id": SESSION_ID})
-        sid = str(uuid.uuid4())
+    if st.button("➕ New session"):
+        sid = _new_session_id()
         _set_session(sid)
         st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         _persist_chat(title=f"Session {sid[:8]}")
-        st.success("Deleted + created new.")
+        st.rerun()
+
+    st.divider()
+    st.subheader("🤖 Quick Test Buttons")
+
+    if st.button("Test: load_data_basic"):
+        out = _run_tool("load_data_basic", {"storage_bucket": DEFAULT_STORAGE_BUCKET, "storage_path": DEFAULT_STORAGE_PATH})
+        st.session_state.last_test = {"tool": "load_data_basic", "out": out}
+        st.rerun()
+
+    if st.button("Test: submit strategy_search (no target)"):
+        out = _run_tool("submit_strategy_search", {"storage_bucket": DEFAULT_STORAGE_BUCKET, "storage_path": DEFAULT_STORAGE_PATH, "results_bucket": DEFAULT_RESULTS_BUCKET, "time_split_ratio": 0.7})
+        st.session_state.last_test = {"tool": "submit_strategy_search", "out": out}
+        st.session_state.last_job_id = (out or {}).get("job_id")
+        st.rerun()
+
+    if st.button("Test: submit strategy_search (BTTS PL)"):
+        out = _run_tool("submit_strategy_search", {"storage_bucket": DEFAULT_STORAGE_BUCKET, "storage_path": DEFAULT_STORAGE_PATH, "results_bucket": DEFAULT_RESULTS_BUCKET, "time_split_ratio": 0.7, "target_pl_column": "BTTS PL"})
+        st.session_state.last_test = {"tool": "submit_strategy_search", "out": out}
+        st.session_state.last_job_id = (out or {}).get("job_id")
+        st.rerun()
+
+    if st.button("Test: wait last job (10 min)"):
+        job_id = st.session_state.get("last_job_id")
+        if not job_id:
+            st.session_state.last_test = {"error": "No last_job_id in session."}
+        else:
+            waited = _run_tool("wait_for_job", {"job_id": job_id, "timeout_s": 600, "poll_s": 3, "auto_download": True})
+            st.session_state.last_test = {"tool": "wait_for_job", "job_id": job_id, "out": waited}
         st.rerun()
 
 
 # ============================================================
 # Main UI
 # ============================================================
+
+st.subheader("🧾 Last test output")
+st.json(st.session_state.get("last_test") or {"note": "No tests run yet in this session."})
 
 st.subheader("💬 Chat")
 for m in st.session_state.messages:
