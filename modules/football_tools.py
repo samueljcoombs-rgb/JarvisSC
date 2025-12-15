@@ -8,7 +8,6 @@ from io import StringIO
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
-import requests
 import streamlit as st
 
 import gspread
@@ -17,7 +16,6 @@ from google.oauth2.service_account import Credentials
 from supabase import create_client
 
 try:
-    # storage3 is used under supabase storage
     from storage3.utils import StorageException
 except Exception:
     StorageException = Exception
@@ -234,7 +232,7 @@ def _sb():
 
 
 # ============================================================
-# CSV loading (Supabase Storage preferred)
+# CSV loading (SUPABASE STORAGE ONLY — csv_url removed)
 # ============================================================
 
 def _download_from_storage(bucket: str, path: str) -> bytes:
@@ -242,19 +240,10 @@ def _download_from_storage(bucket: str, path: str) -> bytes:
     return sb.storage.from_(bucket).download(path)
 
 
-def _download_from_url(csv_url: str) -> bytes:
-    r = requests.get(csv_url, timeout=180)
-    r.raise_for_status()
-    return r.content
-
-
-def _load_csv(storage_bucket: Optional[str] = None, storage_path: Optional[str] = None, csv_url: Optional[str] = None) -> pd.DataFrame:
-    if storage_bucket and storage_path:
-        raw = _download_from_storage(storage_bucket, storage_path)
-    elif csv_url:
-        raw = _download_from_url(csv_url)
-    else:
-        raise ValueError("Provide either (storage_bucket + storage_path) OR csv_url.")
+def _load_csv(storage_bucket: Optional[str] = None, storage_path: Optional[str] = None) -> pd.DataFrame:
+    if not (storage_bucket and storage_path):
+        raise ValueError("Provide (storage_bucket + storage_path). csv_url is not permitted.")
+    raw = _download_from_storage(storage_bucket, storage_path)
 
     try:
         text = raw.decode("utf-8")
@@ -264,13 +253,13 @@ def _load_csv(storage_bucket: Optional[str] = None, storage_path: Optional[str] 
     return pd.read_csv(StringIO(text), low_memory=False)
 
 
-def load_data_basic(storage_bucket: str = "", storage_path: str = "", csv_url: str = "") -> Dict[str, Any]:
-    df = _load_csv(storage_bucket or None, storage_path or None, csv_url or None)
+def load_data_basic(storage_bucket: str, storage_path: str) -> Dict[str, Any]:
+    df = _load_csv(storage_bucket, storage_path)
     return {"rows": int(df.shape[0]), "cols": int(df.shape[1]), "head": df.head(5).to_dict(orient="records")}
 
 
-def list_columns(storage_bucket: str = "", storage_path: str = "", csv_url: str = "") -> Dict[str, Any]:
-    df = _load_csv(storage_bucket or None, storage_path or None, csv_url or None)
+def list_columns(storage_bucket: str, storage_path: str) -> Dict[str, Any]:
+    df = _load_csv(storage_bucket, storage_path)
     return {"columns": df.columns.tolist(), "n": int(len(df.columns))}
 
 
@@ -290,8 +279,8 @@ def _mapping() -> Dict[str, Tuple[str, str]]:
     }
 
 
-def basic_roi_for_pl_column(pl_column: str, storage_bucket: str = "", storage_path: str = "", csv_url: str = "") -> Dict[str, Any]:
-    df = _load_csv(storage_bucket or None, storage_path or None, csv_url or None)
+def basic_roi_for_pl_column(pl_column: str, storage_bucket: str, storage_path: str) -> Dict[str, Any]:
+    df = _load_csv(storage_bucket, storage_path)
     if pl_column not in df.columns:
         return {"error": f"Missing PL column: {pl_column}"}
 
@@ -421,7 +410,11 @@ def _load_chat_index(sb) -> Dict[str, Any]:
 def _save_chat_index(sb, index: Dict[str, Any]) -> None:
     bucket = _chat_bucket()
     payload = json.dumps(index, ensure_ascii=False, indent=2).encode("utf-8")
-    sb.storage.from_(bucket).upload(path=_chat_index_path(), file=payload, file_options={"content-type": "application/json", "upsert": "true"})
+    sb.storage.from_(bucket).upload(
+        path=_chat_index_path(),
+        file=payload,
+        file_options={"content-type": "application/json", "upsert": "true"},
+    )
 
 
 def list_chats(limit: int = 200) -> Dict[str, Any]:
@@ -447,7 +440,6 @@ def save_chat(session_id: str, messages: List[Dict[str, Any]], title: str = "") 
     try:
         sb.storage.from_(bucket).upload(path=path, file=payload, file_options={"content-type": "application/json", "upsert": "true"})
     except StorageException as e:
-        # Non-fatal, clear guidance
         return {
             "ok": False,
             "error": f"Storage upload failed. Create bucket '{bucket}' in Supabase Storage and ensure the service role key has access. Details: {e}",
@@ -457,7 +449,6 @@ def save_chat(session_id: str, messages: List[Dict[str, Any]], title: str = "") 
     except Exception as e:
         return {"ok": False, "error": f"save_chat failed: {e}", "bucket": bucket, "path": path}
 
-    # Update index
     try:
         idx = _load_chat_index(sb)
         sessions = idx.get("sessions") or []
@@ -471,7 +462,6 @@ def save_chat(session_id: str, messages: List[Dict[str, Any]], title: str = "") 
         idx["sessions"] = sessions
         _save_chat_index(sb, idx)
     except Exception:
-        # don’t fail the save if index update fails
         pass
 
     return {"ok": True, "bucket": bucket, "path": path}
