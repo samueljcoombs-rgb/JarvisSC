@@ -1,11 +1,9 @@
 # pages/football_researcher.py
 from __future__ import annotations
 
-from datetime import datetime
-
-import json
 import os
-import inspect
+import json
+from datetime import datetime
 from typing import Any, Dict, List
 
 import streamlit as st
@@ -14,326 +12,370 @@ from openai import OpenAI
 from modules import football_tools as functions
 
 
+# =========================
+# OpenAI client + model selection
+# =========================
 def _init_client() -> OpenAI:
     api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY")
     if not api_key:
-        st.error("Missing OPENAI_API_KEY.")
+        st.error("Missing OPENAI_API_KEY in Streamlit secrets.")
         st.stop()
     return OpenAI(api_key=api_key)
 
+
 client = _init_client()
 
-
-def _select_best_model(c: OpenAI) -> str:
-    # Prefer GPT-5.2 Thinking explicitly, then GPT-5.2, then fallbacks
-    preferred = (os.getenv("PREFERRED_OPENAI_MODEL", "").strip()
-                 or st.secrets.get("PREFERRED_OPENAI_MODEL", "")).strip()
-    if preferred:
-        return preferred
-
-    try:
-        names = {m.id for m in c.models.list().data}
-        for candidate in [
-            "gpt-5.2-thinking",
-            "gpt-5.2",
-            "gpt-5",
-            "gpt-latest",
-            "gpt-4.1",
-            "gpt-4o",
-            "gpt-4.1-mini",
-        ]:
-            if candidate in names:
-                return candidate
-    except Exception:
-        pass
-
-    # final fallback
-    return "gpt-4o"
+PREFERRED = (os.getenv("PREFERRED_OPENAI_MODEL") or st.secrets.get("PREFERRED_OPENAI_MODEL") or "").strip()
+MODEL = PREFERRED or "gpt-5.2-thinking"  # will error only if your account truly cannot access it
 
 
-MODEL = _select_best_model(client)
-
-
-TOOL_FUNCS: Dict[str, Any] = {
-    "get_dataset_overview": functions.get_dataset_overview,
-    "get_column_definitions": functions.get_column_definitions,
-    "get_research_rules": functions.get_research_rules,
-    "get_evaluation_framework": functions.get_evaluation_framework,
-
-    "append_research_note": functions.append_research_note,
-    "get_recent_research_notes": functions.get_recent_research_notes,
-    "get_research_state": functions.get_research_state,
-    "set_research_state": functions.set_research_state,
-
-    "load_data_basic": functions.load_data_basic,
-    "list_columns": functions.list_columns,
-
-    "strategy_performance_summary": functions.strategy_performance_summary,
-    "strategy_performance_batch": functions.strategy_performance_batch,
-
-    "submit_job": functions.submit_job,
-    "get_job": functions.get_job,
-    "download_result": functions.download_result,
-    "wait_for_job": functions.wait_for_job,
-}
-
-
-def _tool_schema(name: str, description: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
-    return {"type": "function", "function": {"name": name, "description": description, "parameters": parameters}}
-
-
-TOOLS_SCHEMA: List[Dict[str, Any]] = [
-    _tool_schema("get_dataset_overview", "Load dataset_overview sheet.", {"type": "object", "properties": {}, "required": []}),
-    _tool_schema("get_column_definitions", "Load column_definitions sheet.", {"type": "object", "properties": {}, "required": []}),
-    _tool_schema("get_research_rules", "Load research_rules sheet.", {"type": "object", "properties": {}, "required": []}),
-    _tool_schema("get_evaluation_framework", "Load evaluation_framework sheet.", {"type": "object", "properties": {}, "required": []}),
-
-    _tool_schema("append_research_note", "Append a research note (note + optional tags).",
-                 {"type": "object", "properties": {"note": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}}, "required": ["note"]}),
-    _tool_schema("get_recent_research_notes", "Fetch last N research notes.",
-                 {"type": "object", "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 200}}, "required": []}),
-    _tool_schema("get_research_state", "Fetch research_state key/value map.", {"type": "object", "properties": {}, "required": []}),
-    _tool_schema("set_research_state", "Upsert key/value into research_state.",
-                 {"type": "object", "properties": {"key": {"type": "string"}, "value": {"type": "string"}}, "required": ["key", "value"]}),
-
-    _tool_schema("load_data_basic", "Load dataset preview.", {"type": "object", "properties": {"limit": {"type": "integer", "minimum": 10, "maximum": 2000}}, "required": []}),
-    _tool_schema("list_columns", "List all dataset columns.", {"type": "object", "properties": {}, "required": []}),
-
-    _tool_schema("strategy_performance_summary", "ROI + streak/drawdown for a PL column.",
-                 {"type": "object",
-                  "properties": {"pl_column": {"type": "string"},
-                                 "side": {"type": "string", "enum": ["back", "lay"]},
-                                 "odds_column": {"type": "string"},
-                                 "time_split_ratio": {"type": "number", "minimum": 0.5, "maximum": 0.95},
-                                 "compute_streaks": {"type": "boolean"}},
-                  "required": ["pl_column"]}),
-    _tool_schema("strategy_performance_batch", "Batch performance summaries.",
-                 {"type": "object",
-                  "properties": {"pl_columns": {"type": "array", "items": {"type": "string"}},
-                                 "time_split_ratio": {"type": "number", "minimum": 0.5, "maximum": 0.95},
-                                 "compute_streaks": {"type": "boolean"}},
-                  "required": ["pl_columns"]}),
-
-    _tool_schema("submit_job", "Submit heavy job to Supabase queue (Modal worker).",
-                 {"type": "object", "properties": {"task_type": {"type": "string"}, "params": {"type": "object"}}, "required": ["task_type", "params"]}),
-    _tool_schema("get_job", "Fetch job status for job_id.",
-                 {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]}),
-    _tool_schema("download_result", "Download JSON result from Supabase Storage path.",
-                 {"type": "object", "properties": {"result_path": {"type": "string"}}, "required": ["result_path"]}),
-    _tool_schema("wait_for_job", "Poll job until done/error/timeout. Optionally auto-download result.",
-                 {"type": "object",
-                  "properties": {"job_id": {"type": "string"},
-                                 "timeout_s": {"type": "integer"},
-                                 "poll_s": {"type": "integer"},
-                                 "auto_download": {"type": "boolean"}},
-                  "required": ["job_id"]}),
+# =========================
+# Tool registry (OpenAI function calling)
+# =========================
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_dataset_overview",
+            "description": "Get high-level dataset overview and intent from Google Sheet.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_research_rules",
+            "description": "Get research rules/principles from Google Sheet.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_column_definitions",
+            "description": "Get column definitions table from Google Sheet.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_evaluation_framework",
+            "description": "Get evaluation framework (P&L/ROI/streaks etc.) from Google Sheet.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_recent_research_notes",
+            "description": "Get last N research notes from Google Sheet.",
+            "parameters": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 200}},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "append_research_note",
+            "description": "Append a research note to Google Sheet.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "note": {"type": "string"},
+                    "tags": {"type": "string"},
+                },
+                "required": ["note"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_research_state",
+            "description": "Get persistent key/value research state from Google Sheet.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_research_state",
+            "description": "Set persistent key/value research state in Google Sheet.",
+            "parameters": {
+                "type": "object",
+                "properties": {"key": {"type": "string"}, "value": {"type": "string"}},
+                "required": ["key", "value"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "load_data_basic",
+            "description": "Load a preview of the CSV from DATA_CSV_URL (or provided csv_url) and return rows/cols/head.",
+            "parameters": {
+                "type": "object",
+                "properties": {"csv_url": {"type": "string"}},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_columns",
+            "description": "List column names in the CSV.",
+            "parameters": {
+                "type": "object",
+                "properties": {"csv_url": {"type": "string"}},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "basic_roi_for_pl_column",
+            "description": "Compute simple row-level P&L and avg P&L per bet for a given PL column (basic tool).",
+            "parameters": {
+                "type": "object",
+                "properties": {"pl_column": {"type": "string"}, "csv_url": {"type": "string"}},
+                "required": ["pl_column"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "submit_job",
+            "description": "Submit a background job to Supabase jobs table for Modal worker to pick up.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_type": {"type": "string"},
+                    "params": {"type": "object"},
+                },
+                "required": ["task_type", "params"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_job",
+            "description": "Get a job record from Supabase by job_id.",
+            "parameters": {
+                "type": "object",
+                "properties": {"job_id": {"type": "string"}},
+                "required": ["job_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "wait_for_job",
+            "description": "Poll Supabase for job completion; returns done/error/timeout.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string"},
+                    "timeout_s": {"type": "integer", "minimum": 10, "maximum": 7200},
+                    "poll_s": {"type": "integer", "minimum": 1, "maximum": 60},
+                    "auto_download": {"type": "boolean"},
+                },
+                "required": ["job_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "download_result",
+            "description": "Download a JSON result from Supabase Storage via result_path.",
+            "parameters": {
+                "type": "object",
+                "properties": {"result_path": {"type": "string"}},
+                "required": ["result_path"],
+            },
+        },
+    },
 ]
 
 
-SYSTEM_PROMPT = """You are Football Researcher, an autonomous research agent.
-
-Mission:
-- Find explicit strategy criteria (filters/ranges) that generalise to future matches and produce profit.
-- Apply anti-overfitting rules (time split, minimum sample sizes, simple rules first).
-- Never use outcome columns (PL, RETURN, BET RESULT, etc.) as predictive features.
-- When offloading compute: submit_job -> wait_for_job -> download_result.
-- Always log meaningful conclusions (append_research_note) and keep progress (set_research_state).
-"""
+def _run_tool(name: str, args: Dict[str, Any]) -> Any:
+    fn = getattr(functions, name, None)
+    if not fn:
+        raise RuntimeError(f"Unknown tool: {name}")
+    return fn(**args)
 
 
-def _sanitize_history(msgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    cleaned: List[Dict[str, Any]] = []
-    last_assistant_had_tool_calls = False
-    for m in msgs:
-        role = m.get("role")
-        if role == "assistant":
-            last_assistant_had_tool_calls = bool(m.get("tool_calls"))
-            cleaned.append(m)
+# =========================
+# System prompt (kept short, but strict)
+# =========================
+SYSTEM_PROMPT = """You are FootballResearcher, an autonomous research agent for building profitable, robust football trading strategies.
+You MUST follow the research rules and evaluation framework from the Google Sheet.
+You SHOULD use the tools to fetch dataset definitions, rules, notes, then propose and test strategies.
+Do not use PL columns as predictive features.
+Always use time-based splits and guard against overfitting.
+When you run tools, use OpenAI tool calling (function calls)."""
+
+
+# =========================
+# Streamlit UI state
+# =========================
+st.set_page_config(page_title="Football Researcher", layout="wide")
+
+if "messages" not in st.session_state:
+    st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+st.title("⚽ Football Researcher")
+
+
+# =========================
+# Chat renderer
+# =========================
+def _render_chat():
+    for m in st.session_state.messages:
+        if m["role"] == "system":
             continue
-        if role == "tool":
-            if last_assistant_had_tool_calls and m.get("tool_call_id"):
-                cleaned.append(m)
-            continue
-        cleaned.append(m)
-        last_assistant_had_tool_calls = False
-    return cleaned
+        with st.chat_message(m["role"]):
+            st.markdown(m["content"])
 
 
-def _call_llm(messages: List[Dict[str, Any]]) -> Any:
+# =========================
+# LLM + tool loop
+# =========================
+def _call_llm(messages: List[Dict[str, Any]]):
     return client.chat.completions.create(
         model=MODEL,
         messages=messages,
-        tools=TOOLS_SCHEMA,
+        tools=TOOLS,
         tool_choice="auto",
     )
 
 
-def _run_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
-    fn = TOOL_FUNCS.get(name)
-    if not fn:
-        return {"error": f"Tool not found: {name}"}
-    args = args or {}
-    try:
-        sig = inspect.signature(fn)
-        params = sig.parameters
-        accepted = {k: v for k, v in args.items() if k in params}
-
-        missing_required = []
-        for p_name, p in params.items():
-            if p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
-                continue
-            if p.default is inspect._empty and p_name not in accepted:
-                missing_required.append(p_name)
-        if missing_required:
-            return {"error": f"Missing required args for {name}: {missing_required}", "provided_args": list(args.keys())}
-
-        return fn(**accepted)
-    except Exception as e:
-        return {"error": f"{type(e).__name__}: {e}", "tool": name, "args": args}
-
-
-def _chat_with_tools(user_text: str, max_rounds: int = 6) -> None:
-    if "messages" not in st.session_state:
-        st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    st.session_state.messages = _sanitize_history(st.session_state.messages)
+def _chat_with_tools(user_text: str):
     st.session_state.messages.append({"role": "user", "content": user_text})
 
-    for _ in range(max_rounds):
-        try:
-            resp = _call_llm(st.session_state.messages)
-        except Exception as e:
-            st.session_state.messages.append({"role": "assistant", "content": f"OpenAI request failed: {type(e).__name__}: {e}"})
-            return
+    # 1) first call (may contain tool_calls)
+    resp = _call_llm(st.session_state.messages)
+    msg = resp.choices[0].message
 
-        msg = resp.choices[0].message
-        tool_calls = getattr(msg, "tool_calls", None)
+    # assistant content (can be empty if it immediately tool-calls)
+    if msg.content:
+        st.session_state.messages.append({"role": "assistant", "content": msg.content})
 
-        if tool_calls:
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": msg.content or "",
-                "tool_calls": [{"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments or "{}"}} for tc in tool_calls],
-            })
+    # 2) handle tool calls (if any)
+    if getattr(msg, "tool_calls", None):
+        tool_calls = msg.tool_calls
+        for tc in tool_calls:
+            name = tc.function.name
+            args = json.loads(tc.function.arguments or "{}")
+            out = _run_tool(name, args)
 
-            for tc in tool_calls:
-                tool_name = tc.function.name
-                tool_args = json.loads(tc.function.arguments or "{}")
-                out = _run_tool(tool_name, tool_args)
-                st.session_state.messages.append({"role": "tool", "tool_call_id": tc.id, "content": json.dumps(out, ensure_ascii=False)})
-
-            continue
-
-        st.session_state.messages.append({"role": "assistant", "content": msg.content or ""})
-        break
-
-
-def _autopilot_one_cycle():
-    """
-    One autonomous loop:
-      - submit strategy_search job (no market specified; worker picks)
-      - wait + download
-      - log note + update research_state
-    """
-    csv_url = os.getenv("DATA_CSV_URL") or st.secrets.get("DATA_CSV_URL", "")
-    if not csv_url:
-        st.session_state.messages.append({"role": "assistant", "content": "Missing DATA_CSV_URL in Streamlit secrets."})
-        return
-
-    # submit
-    submit_out = _run_tool("submit_job", {
-        "task_type": "strategy_search",
-        "params": {
-            "csv_url": csv_url,
-            "time_split_ratio": 0.7,
-            "_results_bucket": "football-results",
-        }
-    })
-    st.session_state.messages.append({"role": "assistant", "content": "Autopilot: submitted strategy_search.\n```json\n" + json.dumps(submit_out, indent=2) + "\n```"})
-
-    job_id = submit_out.get("job_id")
-    if not job_id:
-        return
-
-    # wait
-    waited = _run_tool("wait_for_job", {"job_id": job_id, "timeout_s": 240, "poll_s": 3, "auto_download": True})
-    st.session_state.messages.append({"role": "assistant", "content": "Autopilot: wait_for_job output.\n```json\n" + json.dumps(waited, indent=2) + "\n```"})
-
-    download = (waited.get("download") or {})
-    result = (download.get("result") or {})
-    payload = result.get("result") or {}
-
-    # log note (clean summary)
-    picked = payload.get("picked") or {}
-    search = payload.get("search") or {}
-    top = (search.get("top_rules") or [])[:5]
-
-    note_lines = []
-    note_lines.append("Autopilot cycle: strategy_search")
-    if picked:
-        note_lines.append(f"Picked market: {picked.get('pl_column')} (side={picked.get('side')}, odds_col={picked.get('odds_col')}).")
-        note_lines.append(f"Picked by best test ROI among mapped markets (current baseline).")
-    if search.get("error"):
-        note_lines.append(f"Search error: {search.get('error')}")
-    else:
-        note_lines.append(f"Searched rules tried: {search.get('searched_rules')}")
-        note_lines.append("Top candidate criteria (first 5):")
-        for idx, r in enumerate(top, start=1):
-            rule = r.get("rule", [])
-            tr = r.get("train", {})
-            te = r.get("test", {})
-            gl = r.get("test_game_level", {})
-            note_lines.append(
-                f"{idx}) {rule} | test_roi={te.get('roi'):.4f} | train_roi={tr.get('roi'):.4f} | "
-                f"gap={r.get('gap_train_minus_test'):.4f} | test_bets={te.get('bets')} | "
-                f"test_dd={gl.get('max_dd')} | test_ls_bets={((gl.get('losing_streak') or {}).get('bets'))}"
+            st.session_state.messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": json.dumps(out, ensure_ascii=False),
+                }
             )
 
-    note = "\n".join(note_lines)
-    _run_tool("append_research_note", {"note": note, "tags": ["autopilot", "strategy_search"]})
-    _run_tool("set_research_state", {"key": "last_autopilot_job_id", "value": str(job_id)})
+        # 3) follow-up call to let model see tool outputs
+        follow = _call_llm(st.session_state.messages)
+        follow_msg = follow.choices[0].message
+        st.session_state.messages.append(
+            {"role": "assistant", "content": follow_msg.content or "(no content)"}
+        )
+
+
+# =========================
+# Autopilot (1 cycle)
+# =========================
+def _autopilot_one_cycle():
+    csv_url = _get_csv_url_or_stop()
+    params = {
+        "csv_url": csv_url,
+        "_results_bucket": os.getenv("RESULTS_BUCKET") or st.secrets.get("RESULTS_BUCKET") or "football-results",
+        "time_split_ratio": 0.7,
+    }
+
+    submitted = _run_tool("submit_job", {"task_type": "strategy_search", "params": params})
+    st.success("Autopilot: submitted strategy_search.")
+    st.json(submitted)
+
+    job_id = submitted.get("job_id")
+    if not job_id:
+        st.error("No job_id returned from submit_job.")
+        return
+
+    waited = _run_tool("wait_for_job", {"job_id": job_id, "timeout_s": 900, "poll_s": 5, "auto_download": True})
+    st.info("Autopilot: wait_for_job output.")
+    st.json(waited)
+
+    # Persist autopilot timestamp regardless
     _run_tool("set_research_state", {"key": "last_autopilot_ran_at", "value": datetime.utcnow().isoformat()})
 
+    if waited.get("status") == "timeout":
+        st.warning(
+            "Job is still queued/running. This is NOT a failure. "
+            "If it stays queued for a long time, check Modal logs / schedule."
+        )
+        return
 
-# -----------------------------
-# UI
-# -----------------------------
+    if waited.get("status") == "error":
+        st.error("Job ended in error. See job.error in output.")
+        return
 
-st.set_page_config(page_title="Football Researcher", layout="wide")
-st.title("⚽ Football Researcher (Autonomous)")
-st.caption(f"Model: {MODEL}")
+    # done case
+    result = waited.get("result") or {}
+    note = (
+        "Autopilot cycle complete.\n\n"
+        f"- job_id: {job_id}\n"
+        f"- worker_status: {waited.get('status')}\n"
+        f"- result keys: {list(result.keys()) if isinstance(result, dict) else type(result)}\n"
+        f"- message: {result.get('message') if isinstance(result, dict) else ''}\n"
+    )
+    _run_tool("append_research_note", {"note": note, "tags": "autopilot,worker"})
+    st.success("Appended a research note for this autopilot cycle.")
 
-if "messages" not in st.session_state:
-    st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-st.session_state.messages = _sanitize_history(st.session_state.messages)
 
-for m in st.session_state.messages:
-    if m["role"] == "system":
-        continue
-    if m["role"] == "tool":
-        with st.expander("🛠 Tool output", expanded=False):
-            st.code(m.get("content", ""), language="json")
-        continue
-    with st.chat_message(m["role"]):
-        st.write(m.get("content", ""))
+def _get_csv_url_or_stop() -> str:
+    csv_url = os.getenv("DATA_CSV_URL") or st.secrets.get("DATA_CSV_URL")
+    if not csv_url:
+        st.error("Missing DATA_CSV_URL in Streamlit secrets.")
+        st.stop()
+    return csv_url
 
-user_msg = st.chat_input("Ask the researcher…")
-if user_msg:
-    _chat_with_tools(user_msg)
-    st.rerun()
 
-with st.expander("Autopilot", expanded=False):
-    st.write("Runs one autonomous cycle: submit heavy strategy search, wait, download, log conclusions.")
-    if st.button("🤖 Autopilot: run 1 cycle"):
+# =========================
+# Layout
+# =========================
+left, right = st.columns([1, 2], gap="large")
+
+with left:
+    st.subheader("🤖 Autopilot")
+    if st.button("Autopilot: run 1 cycle"):
         _autopilot_one_cycle()
-        st.rerun()
 
-with st.expander("Debug / Quick tests", expanded=False):
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("Test: list_columns"):
-            _chat_with_tools("Call list_columns and show the result.")
-            st.rerun()
-    with c2:
-        if st.button("Clear chat"):
-            st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-            st.rerun()
+    st.divider()
+    st.subheader("🧠 Context tools")
+    if st.button("Load dataset overview"):
+        st.json(_run_tool("get_dataset_overview", {}))
+    if st.button("Load research rules"):
+        st.json(_run_tool("get_research_rules", {}))
+    if st.button("List columns"):
+        st.json(_run_tool("list_columns", {}))
+
+with right:
+    st.subheader("💬 Chat")
+    _render_chat()
+    user_msg = st.chat_input("Ask the researcher…")
+    if user_msg:
+        _chat_with_tools(user_msg)
+        st.rerun()
