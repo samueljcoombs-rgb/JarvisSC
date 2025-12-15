@@ -12,11 +12,18 @@ import pandas as pd
 import requests
 from io import StringIO
 
+import streamlit as st
+import gspread
+from google.oauth2.service_account import Credentials
+
+# ================ PATHS =====================
+
 BASE_DIR = Path(__file__).resolve().parents[1]
 MODULES_DIR = BASE_DIR / "modules"
 REGISTRY_PATH = MODULES_DIR / "bot_registry.json"
 
-# ⚠️ Existing core modules the football bot MUST NOT edit
+# ================ PROTECTED MODULES ===================
+
 PROTECTED_FILES = {
     "layout_manager.py",
     "chat_ui.py",
@@ -27,257 +34,291 @@ PROTECTED_FILES = {
     "__init__.py",
 }
 
-# ⚽ Data URL – Google Drive CSV
-# This is your file ID from the link you gave:
-# https://drive.google.com/file/d/1aYMC7YJ1qim-132aDc50hhNMdDm20WbC/view
+# ================ DATA LOADING (MAIN FOOTBALL CSV) =======================
+
+# Google Drive file ID you provided
 GDRIVE_FILE_ID = "1aYMC7YJ1qim-132aDc50hhNMdDm20WbC"
 
-# Direct download URL
 DEFAULT_DATA_URL = f"https://drive.google.com/uc?export=download&id={GDRIVE_FILE_ID}"
 DATA_URL_ENV = os.getenv("FOOTBALL_DATA_URL", "").strip()
 DATA_URL = DATA_URL_ENV or DEFAULT_DATA_URL
 
 
-# ---------- Registry helpers ----------
+def _load_full_df() -> pd.DataFrame:
+    """
+    Download the full football dataset from Google Drive and return as DataFrame.
+    """
+    if not DATA_URL:
+        raise RuntimeError("DATA_URL not configured.")
+
+    resp = requests.get(DATA_URL)
+    resp.raise_for_status()
+
+    csv_data = resp.content.decode("utf-8", errors="ignore")
+    df = pd.read_csv(StringIO(csv_data))
+    df.columns = [c.strip() for c in df.columns]
+    return df
+
+
+# ================ REGISTRY HELPERS =======================
 
 def _load_registry() -> Dict[str, Any]:
     if REGISTRY_PATH.exists():
         try:
-            with REGISTRY_PATH.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-                if "owned" not in data:
-                    data["owned"] = []
-                return data
+            return json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
         except Exception:
             pass
     return {"owned": []}
 
 
-def _save_registry(reg: Dict[str, Any]) -> None:
-    with REGISTRY_PATH.open("w", encoding="utf-8") as f:
-        json.dump(reg, f, indent=2)
+def _save_registry(data: Dict[str, Any]) -> None:
+    REGISTRY_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
-def _is_owned(file_name: str) -> bool:
+def _is_owned(fname: str) -> bool:
+    return fname in _load_registry().get("owned", [])
+
+
+def _add_owned(fname: str) -> None:
     reg = _load_registry()
-    return file_name in reg.get("owned", [])
-
-
-def _add_owned(file_name: str) -> None:
-    reg = _load_registry()
-    if file_name not in reg["owned"]:
-        reg["owned"].append(file_name)
+    if fname not in reg["owned"]:
+        reg["owned"].append(fname)
         _save_registry(reg)
 
 
-# ---------- Data loading helper ----------
-
-def _load_full_df() -> pd.DataFrame:
-    """
-    Download the full football dataset from DATA_URL (Google Drive) and return as a DataFrame.
-
-    - Works on Streamlit Cloud and locally.
-    - Assumes a CSV file with headers.
-    """
-    if not DATA_URL:
-        raise RuntimeError("DATA_URL is not set. Set FOOTBALL_DATA_URL or update DEFAULT_DATA_URL.")
-
-    resp = requests.get(DATA_URL)
-    resp.raise_for_status()
-
-    csv_bytes = resp.content
-    csv_str = csv_bytes.decode("utf-8", errors="ignore")
-
-    df = pd.read_csv(StringIO(csv_str))
-    df.columns = [c.strip() for c in df.columns]
-    return df
-
-
-# ---------- Module management tools ----------
+# ================ MODULE MANAGEMENT =======================
 
 def list_modules() -> Dict[str, Any]:
-    """
-    List all modules in /modules with flags:
-    - owned: created/managed by football bot
-    - protected: core Jarvis modules
-    """
-    modules: List[Dict[str, Any]] = []
+    listings: List[Dict[str, Any]] = []
     for p in MODULES_DIR.glob("*.py"):
         name = p.name
-        modules.append(
-            {
-                "name": name,
-                "owned": _is_owned(name),
-                "protected": name in PROTECTED_FILES,
-            }
-        )
-    return {"modules": modules}
+        listings.append({
+            "name": name,
+            "owned": _is_owned(name),
+            "protected": name in PROTECTED_FILES,
+        })
+    return {"modules": listings}
 
 
 def read_module(path: str) -> Dict[str, Any]:
-    """
-    Read the contents of a module file relative to /modules.
-    Example: "my_strategy.py"
-    """
-    full_path = MODULES_DIR / path
-    if not full_path.exists():
-        return {"error": f"Module {path} not found."}
-    try:
-        code = full_path.read_text(encoding="utf-8")
-        return {"path": str(full_path), "code": code}
-    except Exception as e:
-        return {"error": str(e)}
+    fp = MODULES_DIR / Path(path).name
+    if not fp.exists():
+        return {"error": f"{path} not found"}
+    return {"path": str(fp), "code": fp.read_text(encoding="utf-8")}
 
 
 def write_module(path: str, code: str) -> Dict[str, Any]:
     """
-    Create or update a module in /modules with strong safety:
-    - Cannot modify PROTECTED_FILES
-    - Cannot modify non-owned existing modules
-    - Can freely create new modules
-    - Can edit any module it previously created (owned)
-    - Validates syntax before saving
-    - Creates timestamped backup on overwrite
-    - Registers new modules in bot_registry.json
+    Safely create or update a module under /modules.
+    - Cannot touch protected core modules.
+    - Can only edit existing files it owns.
+    - Can freely create new modules.
     """
-    # Normalize file name (no directories, ensure .py)
     name = Path(path).name
     if not name.endswith(".py"):
-        name = f"{name}.py"
-
-    full_path = MODULES_DIR / name
+        name += ".py"
+    fp = MODULES_DIR / name
 
     # Safety: do not allow touching protected files
     if name in PROTECTED_FILES:
-        return {"error": f"Modification blocked: {name} is a protected core module."}
+        return {"error": f"{name} is protected and cannot be modified."}
 
-    # If file exists and is not owned by the football bot, block edit
-    if full_path.exists() and not _is_owned(name):
-        return {
-            "error": f"Modification blocked: {name} exists and is not owned by Football Bot."
-        }
+    # Existing file not owned by bot -> block
+    if fp.exists() and not _is_owned(name):
+        return {"error": f"{name} exists and is not owned by the Football Bot."}
 
-    # Validate syntax
+    # Syntax check
     try:
         ast.parse(code)
     except SyntaxError as e:
         return {"error": f"Syntax error: {e}"}
 
-    # Backup if file exists
-    if full_path.exists():
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_path = MODULES_DIR / f"{name}.bak_{timestamp}"
-        backup_path.write_text(full_path.read_text(encoding="utf-8"), encoding="utf-8")
+    # Backup if overwriting
+    if fp.exists():
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup = MODULES_DIR / f"{name}.bak_{ts}"
+        backup.write_text(fp.read_text(encoding="utf-8"), encoding="utf-8")
 
     # Write new code
-    full_path.write_text(code, encoding="utf-8")
-
-    # Mark as owned by football bot
+    fp.write_text(code, encoding="utf-8")
     _add_owned(name)
 
-    return {
-        "status": "success",
-        "path": str(full_path),
-        "owned": True,
-    }
+    return {"status": "success", "path": str(fp), "owned": True}
 
 
 def run_module(path: str, function_name: str, args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Import a module from /modules and run a named function with kwargs.
-    Example:
-      run_module("my_strategy.py", "run_backtest", {"threshold": 0.05})
     """
     args = args or {}
     name = Path(path).name
     if not name.endswith(".py"):
-        name = f"{name}.py"
+        name += ".py"
 
-    full_path = MODULES_DIR / name
-    if not full_path.exists():
-        return {"error": f"Module {name} not found."}
+    fp = MODULES_DIR / name
+    if not fp.exists():
+        return {"error": f"{name} not found"}
 
-    module_name = f"modules.{name[:-3]}"  # strip .py
+    module_name = f"modules.{name[:-3]}"
 
     try:
-        if module_name in list(importlib.sys.modules.keys()):
-            # Reload to pick up changes
+        if module_name in importlib.sys.modules:
             mod = importlib.reload(importlib.sys.modules[module_name])
         else:
             mod = importlib.import_module(module_name)
 
         if not hasattr(mod, function_name):
-            return {"error": f"Function {function_name} not found in {name}."}
+            return {"error": f"{function_name} not found in {name}"}
 
         fn = getattr(mod, function_name)
         result = fn(**args)
         return {"result": result}
     except Exception as e:
-        # Return the error string so the bot can read & fix it
         return {"error": str(e)}
 
 
-# ---------- Data / ROI tools ----------
+# ================ DATA ANALYSIS TOOLS =======================
 
 def load_data_basic(limit: int = 200) -> Dict[str, Any]:
     """
-    Load a preview of the football dataset for the bot:
-      - rows (up to `limit`)
-      - columns
-      - sample rows
+    Return shape + sample of the dataset.
     """
     try:
         df = _load_full_df()
     except Exception as e:
-        return {"error": f"Failed to load data: {e}"}
+        return {"error": f"Load error: {e}"}
 
-    sample = df.head(limit).to_dict(orient="records")
     return {
         "rows": int(len(df)),
-        "cols": list(df.columns),
-        "sample": sample,
+        "cols": df.columns.tolist(),
+        "sample": df.head(limit).to_dict(orient="records"),
     }
 
 
 def list_columns() -> Dict[str, Any]:
-    """
-    Return just the column names for quick inspection.
-    """
     try:
         df = _load_full_df()
+        return {"columns": df.columns.tolist()}
     except Exception as e:
-        return {"error": f"Failed to load data: {e}"}
-    return {"columns": list(df.columns)}
+        return {"error": str(e)}
 
 
 def basic_roi_for_pl_column(pl_column: str) -> Dict[str, Any]:
     """
-    Compute a simple PL / ROI summary for a given PL column (e.g. 'BO 2.5 PL').
-    Uses NO GAMES if present to normalise.
+    Compute total PL, total NO GAMES, ROI per game, and row count
+    for a specific PL column.
     """
     try:
         df = _load_full_df()
     except Exception as e:
-        return {"error": f"Failed to load data: {e}"}
+        return {"error": f"Data error: {e}"}
 
     if pl_column not in df.columns:
-        return {"error": f"Column {pl_column} not found."}
+        return {"error": f"{pl_column} missing"}
 
     if "NO GAMES" not in df.columns:
-        return {"error": "NO GAMES column missing; cannot compute per-game ROI."}
+        return {"error": "NO GAMES missing"}
 
-    df = df[df[pl_column].notna() & df["NO GAMES"].notna()]
-    if df.empty:
-        return {"error": "No rows with non-null PL and NO GAMES."}
+    df2 = df[df[pl_column].notna() & df["NO GAMES"].notna()]
+    if df2.empty:
+        return {"error": "No rows with PL + NO GAMES"}
 
-    total_pl = float(df[pl_column].sum())
-    total_games = float(df["NO GAMES"].sum())
-    roi_per_game = total_pl / total_games if total_games > 0 else None
+    total_pl = df2[pl_column].sum()
+    total_games = df2["NO GAMES"].sum()
+    roi = total_pl / total_games if total_games > 0 else None
 
     return {
         "pl_column": pl_column,
-        "total_pl": total_pl,
-        "total_games": total_games,
-        "roi_per_game": roi_per_game,
-        "rows": int(len(df)),
+        "total_pl": float(total_pl),
+        "total_games": float(total_games),
+        "roi_per_game": roi,
+        "rows": int(len(df2)),
     }
+
+
+# ================ PERMANENT RESEARCH MEMORY (GOOGLE SHEETS) =======================
+
+# We'll reuse the same service account JSON as todos_panel.py: GOOGLE_SERVICE_ACCOUNT_JSON
+# and a new secret FOOTBALL_MEMORY_SHEET_URL holding the sheet URL.
+
+MEMORY_SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
+
+def _memory_creds() -> Optional[Credentials]:
+    """
+    Build Credentials object from GOOGLE_SERVICE_ACCOUNT_JSON in secrets/env.
+    """
+    raw = st.secrets.get("GOOGLE_SERVICE_ACCOUNT_JSON") or os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+        return Credentials.from_service_account_info(data, scopes=MEMORY_SCOPES)
+    except Exception:
+        return None
+
+
+def _get_memory_sheet_url() -> Optional[str]:
+    """
+    Returns the memory sheet URL from secrets or env.
+    """
+    return (
+        st.secrets.get("FOOTBALL_MEMORY_SHEET_URL")
+        or os.getenv("FOOTBALL_MEMORY_SHEET_URL")
+    )
+
+
+def _get_memory_sheet():
+    """
+    Return a gspread Worksheet object for the football memory sheet.
+    """
+    url = _get_memory_sheet_url()
+    if not url:
+        raise RuntimeError("FOOTBALL_MEMORY_SHEET_URL not set in secrets or env.")
+
+    creds = _memory_creds()
+    if not creds:
+        raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON not configured or invalid.")
+
+    gc = gspread.authorize(creds)
+    sh = gc.open_by_url(url)
+    # For simplicity, use the first sheet
+    ws = sh.sheet1
+    return ws
+
+
+def append_research_note(note: str, tags: Optional[List[str]] = None) -> Dict[str, Any]:
+    """
+    Append a research note as a new row: [timestamp, note, tags].
+    Stored permanently in Google Sheets.
+    """
+    tags = tags or []
+    ts = datetime.datetime.utcnow().isoformat()
+    tags_str = ", ".join(tags)
+
+    try:
+        ws = _get_memory_sheet()
+        ws.append_row([ts, note, tags_str])
+        return {"status": "ok", "timestamp": ts, "note": note, "tags": tags}
+    except Exception as e:
+        return {"error": f"Append failed: {e}"}
+
+
+def get_recent_research_notes(limit: int = 20) -> Dict[str, Any]:
+    """
+    Return the last N research notes from the sheet (based on row order).
+    """
+    try:
+        ws = _get_memory_sheet()
+        # get_all_records returns a list of dicts keyed by header row
+        records = ws.get_all_records()
+        if not records:
+            return {"notes": []}
+
+        notes = records[-limit:]
+        return {"notes": notes}
+    except Exception as e:
+        return {"error": f"Read failed: {e}"}
