@@ -4,7 +4,7 @@ import os
 import json
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Set
 
 import streamlit as st
 from openai import OpenAI
@@ -43,10 +43,6 @@ DEFAULT_RESULTS_BUCKET = os.getenv("RESULTS_BUCKET") or st.secrets.get("RESULTS_
 MAX_MESSAGES_TO_KEEP = int(os.getenv("MAX_CHAT_MESSAGES") or st.secrets.get("MAX_CHAT_MESSAGES", 220))
 
 
-def _dataset_locator() -> Dict[str, str]:
-    return {"storage_bucket": DEFAULT_STORAGE_BUCKET, "storage_path": DEFAULT_STORAGE_PATH}
-
-
 # ============================================================
 # Tool runner (supports multiple tool modules)
 # ============================================================
@@ -64,6 +60,7 @@ def _run_tool(name: str, args: Dict[str, Any]) -> Any:
 
 # ============================================================
 # Tools schema for OpenAI function calling
+# NOTE: OpenAI now requires array schemas to define "items".
 # ============================================================
 
 TOOLS = [
@@ -90,12 +87,46 @@ TOOLS = [
 
     # ---- Chat sessions (Supabase Storage)
     {"type": "function", "function": {"name": "list_chats", "description": "List saved chat sessions.", "parameters": {"type": "object", "properties": {"limit": {"type": "integer"}}, "required": []}}},
-    {"type": "function", "function": {"name": "save_chat", "description": "Save chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}, "messages": {"type": "array"}, "title": {"type": "string"}}, "required": ["session_id", "messages"]}}},
+
+    # ✅ FIXED: messages is an array, so it MUST have "items"
+    {
+        "type": "function",
+        "function": {
+            "name": "save_chat",
+            "description": "Save chat session.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string"},
+                    "messages": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "role": {"type": "string"},
+                                "content": {"type": "string"},
+                                "tool_call_id": {"type": "string"},
+                                "tool_calls": {
+                                    "type": "array",
+                                    "items": {"type": "object"},
+                                },
+                            },
+                            "required": ["role"],
+                            "additionalProperties": True,
+                        },
+                    },
+                    "title": {"type": "string"},
+                },
+                "required": ["session_id", "messages"],
+            },
+        },
+    },
+
     {"type": "function", "function": {"name": "load_chat", "description": "Load chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}}, "required": ["session_id"]}}},
     {"type": "function", "function": {"name": "rename_chat", "description": "Rename chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}, "title": {"type": "string"}}, "required": ["session_id", "title"]}}},
     {"type": "function", "function": {"name": "delete_chat", "description": "Delete chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}}, "required": ["session_id"]}}},
 
-    # ---- Code ops (manual workflow via UI, but tools exist for future automation)
+    # ---- Code ops (manual workflow via UI)
     {"type": "function", "function": {"name": "run_py_checks", "description": "Run python syntax/import checks for project files.", "parameters": {"type": "object", "properties": {"paths": {"type": "array", "items": {"type": "string"}}}, "required": ["paths"]}}},
     {"type": "function", "function": {"name": "github_commit_files", "description": "Commit full file contents to GitHub (PUT contents API).", "parameters": {"type": "object", "properties": {"message": {"type": "string"}, "files": {"type": "array", "items": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}}, "required": ["message", "files"]}}},
 ]
@@ -127,9 +158,6 @@ Important:
 
 Data access:
 - Dataset must be loaded from Supabase Storage ONLY (bucket/path). Never use URLs.
-
-Code changes:
-- Do not attempt to commit code unless the user explicitly asks to commit.
 """
 
 
@@ -246,9 +274,7 @@ def _sanitize_history_for_llm(messages: List[Dict[str, Any]]) -> List[Dict[str, 
                         name = fn.get("name")
                         args = fn.get("arguments", "{}")
                         if cid and name:
-                            cleaned_tool_calls.append(
-                                {"id": cid, "type": "function", "function": {"name": name, "arguments": args}}
-                            )
+                            cleaned_tool_calls.append({"id": cid, "type": "function", "function": {"name": name, "arguments": args}})
                             expecting_tool_ids.add(cid)
                     except Exception:
                         continue
@@ -275,7 +301,7 @@ def _sanitize_history_for_llm(messages: List[Dict[str, Any]]) -> List[Dict[str, 
 
 
 # ============================================================
-# LLM call (FIX: never send tool_choice unless tools is present)
+# LLM call (never send tool_choice unless tools present)
 # ============================================================
 
 def _call_llm(messages: List[Dict[str, Any]]):
@@ -335,9 +361,7 @@ def _chat_with_tools(user_text: str, max_rounds: int = 6):
             st.session_state.messages.append(assistant_msg)
         else:
             if st.session_state.agent_mode == "chat":
-                st.session_state.messages.append(
-                    {"role": "assistant", "content": "I’m here — what do you want to do next (strategy, debugging, or analysis)?"}
-                )
+                st.session_state.messages.append({"role": "assistant", "content": "I’m here — what do you want to do next (strategy, debugging, or analysis)?"})
             else:
                 st.session_state.messages.append(assistant_msg)
 
@@ -388,7 +412,6 @@ def _submit_autopilot_job() -> Dict[str, Any]:
     submitted = _run_tool("submit_job", {"task_type": "strategy_search", "params": params})
     job_id = submitted.get("job_id")
 
-    # Persist job id into research_state so it survives reruns/restarts
     if job_id:
         _run_tool("set_research_state", {"key": "last_job_id", "value": job_id})
         _run_tool("set_research_state", {"key": "last_job_submitted_at", "value": datetime.utcnow().isoformat()})
@@ -407,7 +430,6 @@ def _poll_latest_job_and_log_if_done(state: Dict[str, str]) -> Dict[str, Any]:
     status = (job.get("status") or "").lower()
     out: Dict[str, Any] = {"ok": True, "job_id": job_id, "status": status, "job": job}
 
-    # If done, log exactly once
     if status == "done" and job.get("result_path"):
         last_logged = (state.get("last_logged_job_id") or "").strip()
         if last_logged == job_id:
@@ -444,7 +466,6 @@ with st.sidebar:
         if st.button("Clear chat save warning"):
             st.session_state.last_chat_save_error = None
 
-    # --- Autopilot controls in research_state (Start/Stop flag)
     st.subheader("🤖 Autopilot Controls")
     rs = _run_tool("get_research_state", {}).get("data", {}) or {}
     enabled = (rs.get("autopilot_enabled") or "").strip().lower() in ("1", "true", "yes", "on")
@@ -462,7 +483,6 @@ with st.sidebar:
             st.rerun()
 
     st.caption(f"Enabled: **{enabled}**")
-
     st.divider()
 
     st.subheader("💾 Chat Sessions")
@@ -487,7 +507,7 @@ with st.sidebar:
     colA, colB = st.columns(2)
     with colA:
         if st.button("➕ New"):
-            sid = _new_session_id()
+            sid = str(uuid.uuid4())
             _set_session(sid)
             st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
             _persist_chat(title=f"Session {sid[:8]}")
@@ -508,7 +528,7 @@ with st.sidebar:
 
     if st.button("🗑️ Delete current session"):
         _run_tool("delete_chat", {"session_id": SESSION_ID})
-        sid = _new_session_id()
+        sid = str(uuid.uuid4())
         _set_session(sid)
         st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         _persist_chat(title=f"Session {sid[:8]}")
@@ -531,12 +551,9 @@ with st.sidebar:
 
     st.divider()
 
-    # ========================================================
-    # Developer panel: Safe checks + GitHub commit
-    # ========================================================
     with st.expander("🛠 Developer: Checks + Commit to GitHub", expanded=False):
         st.caption("Edits in Streamlit are ephemeral. Use this panel to validate and commit to GitHub safely.")
-        st.caption("Requires secrets/env: GITHUB_TOKEN, GITHUB_REPO (owner/repo), optional GITHUB_BRANCH.")
+        st.caption("Requires secrets/env: GITHUB_PAT, GITHUB_USERNAME, GITHUB_REPO, optional GITHUB_BRANCH.")
 
         allowed = tools_code.allowed_paths()
         target_path = st.selectbox("Target file path", options=allowed, index=0)
@@ -553,7 +570,7 @@ with st.sidebar:
             st.session_state.last_dev_checks = res
             st.json(res)
 
-        commit_msg = st.text_input("Commit message", value="Update Football Researcher code")
+        commit_msg = st.text_input("Commit message", value="Fix tools schema + updates")
 
         if st.button("🚀 Commit to GitHub (only if checks OK)"):
             checks = st.session_state.get("last_dev_checks") or {}
