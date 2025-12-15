@@ -27,7 +27,7 @@ def _init_client() -> OpenAI:
 client = _init_client()
 
 PREFERRED = (os.getenv("PREFERRED_OPENAI_MODEL") or st.secrets.get("PREFERRED_OPENAI_MODEL") or "").strip()
-MODEL = PREFERRED or "gpt-5.2-thinking"  # pinned
+MODEL = PREFERRED or "gpt-5.1  # pinned
 
 
 # ============================================================
