@@ -7,7 +7,6 @@ import io
 import time
 import math
 import re
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -25,22 +24,14 @@ from supabase import create_client
 # Config
 # -----------------------------
 
-# Google Sheets (definitions, rules, memory/state)
 DEFAULT_FOOTBALL_SHEET_URL = os.getenv("FOOTBALL_SHEET_URL") or st.secrets.get("FOOTBALL_SHEET_URL", "")
-
-# CSV data source (recommended: Google Drive direct download OR any direct URL)
-# Put this in Streamlit secrets:
-# DATA_CSV_URL="https://drive.google.com/uc?export=download&id=FILE_ID"
 DEFAULT_DATA_CSV_URL = os.getenv("DATA_CSV_URL") or st.secrets.get("DATA_CSV_URL", "")
 
-# Supabase
 SUPABASE_URL = os.getenv("SUPABASE_URL") or st.secrets.get("SUPABASE_URL", "")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or st.secrets.get("SUPABASE_SERVICE_ROLE_KEY", "")
 
-# Supabase storage bucket for results
 RESULTS_BUCKET = os.getenv("FOOTBALL_RESULTS_BUCKET") or st.secrets.get("FOOTBALL_RESULTS_BUCKET", "football-results")
 
-# Google auth scopes
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -75,12 +66,10 @@ def _ws(name: str):
     try:
         return sh.worksheet(name)
     except Exception:
-        # better error
         existing = [w.title for w in sh.worksheets()]
         raise RuntimeError(f"Worksheet '{name}' not found. Existing: {existing}")
 
 def _sheet_rows(ws) -> List[Dict[str, Any]]:
-    """Return sheet rows as list[dict] using header row 1."""
     values = ws.get_all_values()
     if not values or len(values) < 1:
         return []
@@ -99,12 +88,6 @@ def _sheet_rows(ws) -> List[Dict[str, Any]]:
 # -----------------------------
 
 def _normalize_drive_url(url: str) -> str:
-    """
-    Accepts:
-      - https://drive.google.com/file/d/<ID>/view?...
-      - https://drive.google.com/uc?export=download&id=<ID>
-    Returns a direct download URL.
-    """
     if not url:
         return ""
     m = re.search(r"/file/d/([^/]+)/", url)
@@ -119,21 +102,18 @@ def _normalize_drive_url(url: str) -> str:
 def _load_df_cached(csv_url: str) -> pd.DataFrame:
     if not csv_url:
         raise RuntimeError("Missing DATA_CSV_URL (set in Streamlit secrets).")
-    url = _normalize_drive_url(csv_url)
 
+    url = _normalize_drive_url(csv_url)
     r = requests.get(url, timeout=120)
     r.raise_for_status()
 
-    # try utf-8, fall back latin-1
     content = r.content
     try:
         s = content.decode("utf-8")
-        bio = io.StringIO(s)
-        df = pd.read_csv(bio, low_memory=False)
+        df = pd.read_csv(io.StringIO(s), low_memory=False)
     except Exception:
         s = content.decode("latin-1", errors="replace")
-        bio = io.StringIO(s)
-        df = pd.read_csv(bio, low_memory=False)
+        df = pd.read_csv(io.StringIO(s), low_memory=False)
 
     return df
 
@@ -156,20 +136,16 @@ def _sb():
 # -----------------------------
 
 def get_dataset_overview() -> Dict[str, Any]:
-    rows = _sheet_rows(_ws("dataset_overview"))
-    return {"rows": rows}
+    return {"rows": _sheet_rows(_ws("dataset_overview"))}
 
 def get_research_rules() -> Dict[str, Any]:
-    rows = _sheet_rows(_ws("research_rules"))
-    return {"rows": rows}
+    return {"rows": _sheet_rows(_ws("research_rules"))}
 
 def get_column_definitions() -> Dict[str, Any]:
-    rows = _sheet_rows(_ws("column_definitions"))
-    return {"rows": rows}
+    return {"rows": _sheet_rows(_ws("column_definitions"))}
 
 def get_evaluation_framework() -> Dict[str, Any]:
-    rows = _sheet_rows(_ws("evaluation_framework"))
-    return {"rows": rows}
+    return {"rows": _sheet_rows(_ws("evaluation_framework"))}
 
 
 # -----------------------------
@@ -184,8 +160,7 @@ def append_research_note(note: str, tags: Optional[List[str]] = None) -> Dict[st
     return {"ok": True, "timestamp": ts, "tags": tag_str}
 
 def get_recent_research_notes(limit: int = 25) -> Dict[str, Any]:
-    limit = int(limit or 25)
-    limit = max(1, min(limit, 200))
+    limit = max(1, min(int(limit or 25), 200))
     rows = _sheet_rows(_ws("research_memory"))
     return {"rows": rows[-limit:]}
 
@@ -203,15 +178,15 @@ def set_research_state(key: str, value: str) -> Dict[str, Any]:
     key = (key or "").strip()
     if not key:
         return {"error": "key is required"}
+
     ws = _ws("research_state")
     rows = ws.get_all_values()
     if not rows:
         ws.append_row(["key", "value"])
         ws.append_row([key, value])
-        return {"ok": True, "key": key, "value": value, "action": "insert"}
+        return {"ok": True, "action": "insert", "key": key, "value": value}
 
     header = rows[0]
-    # Find columns
     try:
         key_i = header.index("key")
         val_i = header.index("value")
@@ -219,16 +194,15 @@ def set_research_state(key: str, value: str) -> Dict[str, Any]:
         ws.clear()
         ws.append_row(["key", "value"])
         ws.append_row([key, value])
-        return {"ok": True, "key": key, "value": value, "action": "reset_insert"}
+        return {"ok": True, "action": "reset_insert", "key": key, "value": value}
 
-    # Find existing
     for idx, row in enumerate(rows[1:], start=2):
         if len(row) > key_i and (row[key_i] or "").strip() == key:
             ws.update_cell(idx, val_i + 1, value)
-            return {"ok": True, "key": key, "value": value, "action": "update"}
+            return {"ok": True, "action": "update", "key": key, "value": value}
 
     ws.append_row([key, value])
-    return {"ok": True, "key": key, "value": value, "action": "insert"}
+    return {"ok": True, "action": "insert", "key": key, "value": value}
 
 
 # -----------------------------
@@ -241,23 +215,16 @@ def list_columns() -> Dict[str, Any]:
 
 def load_data_basic(limit: int = 50) -> Dict[str, Any]:
     df = _load_df()
-    limit = int(limit or 50)
-    limit = max(10, min(limit, 2000))
+    limit = max(10, min(int(limit or 50), 2000))
     preview = df.head(limit).to_dict(orient="records")
-    return {
-        "n_rows": int(df.shape[0]),
-        "n_cols": int(df.shape[1]),
-        "columns": df.columns.tolist(),
-        "preview": preview,
-    }
+    return {"n_rows": int(df.shape[0]), "n_cols": int(df.shape[1]), "columns": df.columns.tolist(), "preview": preview}
 
 
 # -----------------------------
-# Performance / ROI / Streaks helpers
+# Performance helpers
 # -----------------------------
 
 def _to_datetime_series(df: pd.DataFrame) -> pd.Series:
-    # best-effort parse DATE + TIME
     if "DATE" in df.columns and "TIME" in df.columns:
         dt = pd.to_datetime(df["DATE"].astype(str) + " " + df["TIME"].astype(str), errors="coerce")
         if dt.notna().any():
@@ -266,12 +233,10 @@ def _to_datetime_series(df: pd.DataFrame) -> pd.Series:
         dt = pd.to_datetime(df["DATE"], errors="coerce")
         if dt.notna().any():
             return dt
-    # fallback
     return pd.to_datetime(pd.Series([None] * len(df)), errors="coerce")
 
 def _split_by_time(df: pd.DataFrame, ratio: float) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    ratio = float(ratio or 0.7)
-    ratio = max(0.5, min(ratio, 0.95))
+    ratio = max(0.5, min(float(ratio or 0.7), 0.95))
     tmp = df.copy()
     tmp["_dt"] = _to_datetime_series(tmp)
     tmp = tmp.sort_values("_dt", na_position="last")
@@ -286,7 +251,6 @@ def _bet_level_roi(df: pd.DataFrame, pl_col: str, side: str, odds_col: Optional[
     d = d[d[pl_col].notna()]
     n = int(len(d))
     total_pl = float(d[pl_col].sum()) if n else 0.0
-
     if n == 0:
         return {"bets": 0, "total_pl": 0.0, "roi": 0.0, "avg_pl": 0.0, "stake_or_liability": 0.0}
 
@@ -298,39 +262,33 @@ def _bet_level_roi(df: pd.DataFrame, pl_col: str, side: str, odds_col: Optional[
         liability = (odds - 1.0).clip(lower=0.0)
         total_liability = float(liability.sum())
         roi = (total_pl / total_liability) if total_liability > 0 else 0.0
-        avg_pl = total_pl / n
         return {
             "bets": n,
             "total_pl": total_pl,
             "roi": roi,
-            "avg_pl": avg_pl,
+            "avg_pl": total_pl / n,
             "stake_or_liability": total_liability,
             "mode": "lay_liability",
             "odds_column": odds_col,
         }
 
-    # default back
-    total_stake = float(n)  # 1pt per bet
-    roi = total_pl / total_stake
-    avg_pl = total_pl / n
+    # back
     return {
         "bets": n,
         "total_pl": total_pl,
-        "roi": roi,
-        "avg_pl": avg_pl,
-        "stake_or_liability": total_stake,
+        "roi": total_pl / float(n),
+        "avg_pl": total_pl / float(n),
+        "stake_or_liability": float(n),
         "mode": "back_flat_1pt",
     }
 
 def _game_level_metrics(df: pd.DataFrame, pl_col: str) -> Dict[str, Any]:
-    # aggregate by ID for streak/drawdown
     if "ID" not in df.columns:
         return {"error": "Missing ID column (required for game-level streak/drawdown)."}
 
     d = df[df[pl_col].notna()].copy()
     d[pl_col] = pd.to_numeric(d[pl_col], errors="coerce")
     d = d[d[pl_col].notna()]
-
     if len(d) == 0:
         return {"games": 0, "longest_losing_streak_bets": 0, "longest_losing_streak_pl": 0.0, "max_drawdown": 0.0}
 
@@ -338,48 +296,41 @@ def _game_level_metrics(df: pd.DataFrame, pl_col: str) -> Dict[str, Any]:
 
     g = (
         d.groupby("ID", as_index=False)
-         .agg(
-            game_pl=(pl_col, "sum"),
-            date=("_dt", "min"),
-         )
+         .agg(game_pl=(pl_col, "sum"), date=("_dt", "min"))
          .sort_values("date", na_position="last")
     )
 
     game_pls = g["game_pl"].tolist()
 
-    # Longest losing streak: by consecutive games with game_pl < 0
     max_streak = 0
-    cur_streak = 0
-
-    # longest losing streak in PL (points) = most negative sum across any consecutive losing streak
+    cur = 0
     worst_streak_pl = 0.0
-    cur_streak_pl = 0.0
+    cur_pl = 0.0
 
     for pl in game_pls:
         if pl < 0:
-            cur_streak += 1
-            cur_streak_pl += float(pl)
-            max_streak = max(max_streak, cur_streak)
-            worst_streak_pl = min(worst_streak_pl, cur_streak_pl)
+            cur += 1
+            cur_pl += float(pl)
+            max_streak = max(max_streak, cur)
+            worst_streak_pl = min(worst_streak_pl, cur_pl)  # negative points
         else:
-            cur_streak = 0
-            cur_streak_pl = 0.0
+            cur = 0
+            cur_pl = 0.0
 
-    # Max drawdown on cumulative PL series (points)
     cum = 0.0
     peak = 0.0
     max_dd = 0.0
     for pl in game_pls:
         cum += float(pl)
         peak = max(peak, cum)
-        dd = cum - peak  # negative or 0
+        dd = cum - peak
         max_dd = min(max_dd, dd)
 
     return {
         "games": int(len(g)),
         "longest_losing_streak_bets": int(max_streak),
-        "longest_losing_streak_pl": float(worst_streak_pl),  # negative number in points
-        "max_drawdown": float(max_dd),  # negative number in points
+        "longest_losing_streak_pl": float(worst_streak_pl),
+        "max_drawdown": float(max_dd),
     }
 
 
@@ -395,12 +346,11 @@ def strategy_performance_summary(
     compute_streaks: bool = True,
 ) -> Dict[str, Any]:
     df = _load_df()
-
     if pl_column not in df.columns:
         return {"error": f"PL column not found: {pl_column}"}
 
-    # time split on bet rows
-    train_df, test_df = _split_by_time(df[df[pl_column].notna()].copy(), time_split_ratio)
+    filtered = df[df[pl_column].notna()].copy()
+    train_df, test_df = _split_by_time(filtered, time_split_ratio)
 
     overall = _bet_level_roi(df, pl_column, side, odds_column)
     train = _bet_level_roi(train_df, pl_column, side, odds_column)
@@ -427,16 +377,6 @@ def strategy_performance_batch(
     time_split_ratio: float = 0.7,
     compute_streaks: bool = True,
 ) -> Dict[str, Any]:
-    # Default mappings (based on your notes)
-    # Lay:
-    #   SHG PL -> HT CS Price
-    #   SHG 2+ PL -> HT 2 Ahead Odds
-    #   LU1.5 PL -> U1.5 Odds (best available mapping)
-    #   LFGHU0.5 PL -> FHGU0.5Odds
-    # Back:
-    #   BO 2.5 PL -> O2.5 Odds
-    #   BO1.5 FHG PL -> FHGO1.5 Odds
-    #   BTTS PL -> BTTS Y Odds
     mappings = {
         "SHG PL": ("lay", "HT CS Price"),
         "SHG 2+ PL": ("lay", "HT 2 Ahead Odds"),
@@ -465,33 +405,18 @@ def strategy_performance_batch(
 # -----------------------------
 
 def submit_job(task_type: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """
-    Submit a job to public.jobs for Modal worker to process.
-    params is OPTIONAL (defaults to {}), so the agent cannot fail by omission.
-    """
     if params is None:
         params = {}
     sb = _sb()
 
-    payload = {
-        "status": "queued",
-        "task_type": task_type,
-        "params": params,
-    }
+    payload = {"status": "queued", "task_type": task_type, "params": params}
     res = sb.table("jobs").insert(payload).execute()
 
-    # supabase-py returns .data as list of inserted rows
     data = getattr(res, "data", None)
     if not data:
         return {"error": "Insert returned no data", "raw": str(res)}
-
     row = data[0]
-    return {
-        "job_id": row.get("job_id"),
-        "status": row.get("status"),
-        "task_type": row.get("task_type"),
-        "created_at": row.get("created_at"),
-    }
+    return {"job_id": row.get("job_id"), "status": row.get("status"), "task_type": row.get("task_type"), "created_at": row.get("created_at")}
 
 def get_job(job_id: str) -> Dict[str, Any]:
     sb = _sb()
@@ -500,7 +425,6 @@ def get_job(job_id: str) -> Dict[str, Any]:
     if not data:
         return {"error": f"Job not found: {job_id}"}
     row = data[0]
-    # include key fields
     return {
         "job_id": row.get("job_id"),
         "status": row.get("status"),
@@ -518,9 +442,37 @@ def download_result(result_path: str) -> Dict[str, Any]:
         return {"error": "result_path is required"}
     try:
         b = sb.storage.from_(RESULTS_BUCKET).download(result_path)
-        # b is bytes in supabase-py sync client
         txt = b.decode("utf-8", errors="replace")
         obj = json.loads(txt)
         return {"ok": True, "result_path": result_path, "result": obj}
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}", "result_path": result_path}
+
+def wait_for_job(job_id: str, timeout_s: int = 120, poll_s: int = 3, auto_download: bool = True) -> Dict[str, Any]:
+    """
+    Poll job until done/error/timeout. Optionally auto-downloads result JSON.
+    """
+    timeout_s = max(5, min(int(timeout_s or 120), 600))
+    poll_s = max(1, min(int(poll_s or 3), 20))
+
+    t0 = time.time()
+    last = None
+
+    while True:
+        last = get_job(job_id)
+        if "error" in last:
+            return {"status": "error", "job": last}
+
+        status = (last.get("status") or "").lower().strip()
+        if status in ("done", "error"):
+            if status == "done" and auto_download:
+                rp = last.get("result_path")
+                if rp:
+                    res = download_result(rp)
+                    return {"status": "done", "job": last, "download": res}
+            return {"status": status, "job": last}
+
+        if time.time() - t0 > timeout_s:
+            return {"status": "timeout", "job": last}
+
+        time.sleep(poll_s)
