@@ -1,15 +1,9 @@
 # worker/modal_app.py
 import json
-import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
-from io import StringIO
 
 import modal
-import requests
-import pandas as pd
-import numpy as np
-from supabase import create_client
 
 app = modal.App("football-research-worker")
 
@@ -32,44 +26,40 @@ SUPABASE_SECRET = modal.Secret.from_name("football-supabase")
 def _now_iso() -> str:
     return datetime.utcnow().isoformat()
 
-def _normalize_drive_url(url: str) -> str:
-    import re
-    m = re.search(r"/file/d/([^/]+)/", url or "")
-    if m:
-        file_id = m.group(1)
-        return f"https://drive.google.com/uc?export=download&id={file_id}"
-    return url or ""
 
-def _load_csv_from_drive(csv_url: str) -> pd.DataFrame:
-    url = _normalize_drive_url(csv_url)
-    r = requests.get(url, timeout=180)
-    r.raise_for_status()
-    try:
-        text = r.content.decode("utf-8")
-    except Exception:
-        text = r.content.decode("latin-1", errors="replace")
-    return pd.read_csv(StringIO(text), low_memory=False)
+# -----------------------------
+# Heavy compute + Supabase logic
+# (runs inside Modal container)
+# -----------------------------
+def _load_csv_from_supabase_storage(sb, bucket: str, path: str):
+    import pandas as pd
+    import numpy as np
+    from io import BytesIO
 
-def _load_csv_from_supabase_storage(sb, bucket: str, path: str) -> pd.DataFrame:
-    # Supabase storage download returns bytes
+    # Download bytes from Supabase Storage
+    # supabase-py returns a response-like object; .read() is supported by storage3
     res = sb.storage.from_(bucket).download(path)
-    if isinstance(res, dict) and res.get("error"):
-        raise RuntimeError(f"Storage download error: {res}")
-    if isinstance(res, str):
-        # rare: some libs return str; normalize
-        raw = res.encode("utf-8")
+    if res is None:
+        raise RuntimeError(f"Storage download returned None for {bucket}/{path}")
+
+    if isinstance(res, (bytes, bytearray)):
+        raw = bytes(res)
     else:
+        # fallback: try to treat it as a file-like object
         raw = res
 
-    try:
-        text = raw.decode("utf-8")
-    except Exception:
-        text = raw.decode("latin-1", errors="replace")
-    return pd.read_csv(StringIO(text), low_memory=False)
+    bio = BytesIO(raw)
+    df = pd.read_csv(bio, low_memory=False)
+    return df
 
-def _to_dt(df: pd.DataFrame) -> pd.Series:
+
+def _to_dt(df):
+    import pandas as pd
+
     if "DATE" in df.columns and "TIME" in df.columns:
-        dt = pd.to_datetime(df["DATE"].astype(str) + " " + df["TIME"].astype(str), errors="coerce")
+        dt = pd.to_datetime(
+            df["DATE"].astype(str) + " " + df["TIME"].astype(str), errors="coerce"
+        )
         if dt.notna().any():
             return dt
     if "DATE" in df.columns:
@@ -78,7 +68,10 @@ def _to_dt(df: pd.DataFrame) -> pd.Series:
             return dt
     return pd.to_datetime(pd.Series([None] * len(df)), errors="coerce")
 
-def _time_split(df: pd.DataFrame, ratio: float = 0.7) -> Tuple[pd.DataFrame, pd.DataFrame]:
+
+def _time_split(df, ratio: float = 0.7):
+    import numpy as np
+
     ratio = float(ratio or 0.7)
     ratio = max(0.5, min(ratio, 0.95))
     tmp = df.copy()
@@ -89,7 +82,10 @@ def _time_split(df: pd.DataFrame, ratio: float = 0.7) -> Tuple[pd.DataFrame, pd.
     test = tmp.iloc[cut:].drop(columns=["_dt"])
     return train, test
 
-def _roi(df: pd.DataFrame, pl_col: str, side: str, odds_col: Optional[str]) -> Dict[str, Any]:
+
+def _roi(df, pl_col: str, side: str, odds_col: Optional[str]) -> Dict[str, Any]:
+    import pandas as pd
+
     d = df[df[pl_col].notna()].copy()
     d[pl_col] = pd.to_numeric(d[pl_col], errors="coerce")
     d = d[d[pl_col].notna()]
@@ -107,10 +103,25 @@ def _roi(df: pd.DataFrame, pl_col: str, side: str, odds_col: Optional[str]) -> D
         liability = (odds - 1.0).clip(lower=0.0)
         denom = float(liability.sum())
         roi = (total_pl / denom) if denom > 0 else 0.0
-        return {"bets": n, "total_pl": total_pl, "roi": roi, "avg_pl": total_pl / n, "denom": denom, "mode": "lay_liability"}
+        return {
+            "bets": n,
+            "total_pl": total_pl,
+            "roi": roi,
+            "avg_pl": total_pl / n,
+            "denom": denom,
+            "mode": "lay_liability",
+        }
 
-    denom = float(n)  # 1pt stake per bet
-    return {"bets": n, "total_pl": total_pl, "roi": total_pl / denom, "avg_pl": total_pl / denom, "denom": denom, "mode": "back_flat_1pt"}
+    denom = float(n)
+    return {
+        "bets": n,
+        "total_pl": total_pl,
+        "roi": total_pl / denom,
+        "avg_pl": total_pl / denom,
+        "denom": denom,
+        "mode": "back_flat_1pt",
+    }
+
 
 def _max_drawdown(points: List[float]) -> float:
     cum = 0.0
@@ -121,6 +132,7 @@ def _max_drawdown(points: List[float]) -> float:
         peak = max(peak, cum)
         max_dd = min(max_dd, cum - peak)
     return float(max_dd)
+
 
 def _longest_losing_streak(points: List[float]) -> Dict[str, Any]:
     max_bets = 0
@@ -138,7 +150,10 @@ def _longest_losing_streak(points: List[float]) -> Dict[str, Any]:
             cur_pl = 0.0
     return {"bets": int(max_bets), "pl": float(worst_pl)}
 
-def _game_level(df: pd.DataFrame, pl_col: str) -> Dict[str, Any]:
+
+def _game_level(df, pl_col: str) -> Dict[str, Any]:
+    import pandas as pd
+
     if "ID" not in df.columns:
         return {"error": "Missing ID column"}
     d = df[df[pl_col].notna()].copy()
@@ -160,6 +175,7 @@ def _game_level(df: pd.DataFrame, pl_col: str) -> Dict[str, Any]:
         "losing_streak": _longest_losing_streak(pts),
     }
 
+
 def _mapping() -> Dict[str, Tuple[str, str]]:
     return {
         "SHG PL": ("lay", "HT CS Price"),
@@ -172,10 +188,7 @@ def _mapping() -> Dict[str, Tuple[str, str]]:
     }
 
 
-# -----------------------------
-# Strategy search task
-# -----------------------------
-def _pick_market(df: pd.DataFrame, split_ratio: float = 0.7) -> Dict[str, Any]:
+def _pick_market(df, split_ratio: float = 0.7) -> Dict[str, Any]:
     mp = _mapping()
     candidates = []
     for pl_col, (side, odds_col) in mp.items():
@@ -183,23 +196,37 @@ def _pick_market(df: pd.DataFrame, split_ratio: float = 0.7) -> Dict[str, Any]:
             continue
         filtered = df[df[pl_col].notna()].copy()
         train, test = _time_split(filtered, split_ratio)
-        t = _roi(test, pl_col, side, odds_col)
-        test_roi = float(t.get("roi", -999))
-        test_bets = int(t.get("bets", 0))
-        candidates.append((pl_col, side, odds_col, test_roi, test_bets))
+        test_stats = _roi(test, pl_col, side, odds_col)
+        candidates.append(
+            (pl_col, side, odds_col, float(test_stats.get("roi", -999)), int(test_stats.get("bets", 0)))
+        )
+
     candidates.sort(key=lambda x: (x[3], x[4]), reverse=True)
     if not candidates:
         return {"error": "No PL columns found to choose from."}
-    pl_col, side, odds_col, test_roi, test_bets = candidates[0]
-    return {"pl_column": pl_col, "side": side, "odds_col": odds_col, "test_roi": test_roi, "test_bets": test_bets}
 
-def _rule_search(df: pd.DataFrame, pl_col: str, side: str, odds_col: str, split_ratio: float = 0.7) -> Dict[str, Any]:
+    pl_col, side, odds_col, test_roi, test_bets = candidates[0]
+    return {
+        "pl_column": pl_col,
+        "side": side,
+        "odds_col": odds_col,
+        "test_roi": float(test_roi),
+        "test_bets": int(test_bets),
+    }
+
+
+def _rule_search(df, pl_col: str, side: str, odds_col: str, split_ratio: float = 0.7) -> Dict[str, Any]:
+    import pandas as pd
+    import numpy as np
+
     numeric_cols = [
-        "DIFF", "% DRIFT",
+        "DIFF",
+        "% DRIFT",
+        "ACTUAL ODDS",
         odds_col,
-        "H XG VS A XG S", "H XG VS A XG 6",
+        "H XG VS A XG S",
+        "H XG VS A XG 6",
         "Points Diff",
-        "ACTUAL ODDS",  # optional: can remove later if it overfits
     ]
     available = [c for c in numeric_cols if c in df.columns]
     if pl_col not in df.columns:
@@ -210,21 +237,19 @@ def _rule_search(df: pd.DataFrame, pl_col: str, side: str, odds_col: str, split_
     d0 = df[df[pl_col].notna()].copy()
     d0[pl_col] = pd.to_numeric(d0[pl_col], errors="coerce")
     d0 = d0[d0[pl_col].notna()].copy()
+
     for c in available:
         d0[c] = pd.to_numeric(d0[c], errors="coerce")
 
     train, test = _time_split(d0, split_ratio)
 
-    def qgrid(s: pd.Series) -> List[Tuple[float, float]]:
+    def qgrid(s: pd.Series):
         s2 = s.dropna()
         if len(s2) < 500:
             return []
-        qs = [0.15, 0.30, 0.45, 0.60, 0.75, 0.90]
+        qs = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
         vals = [float(s2.quantile(q)) for q in qs]
-        out = []
-        for i in range(len(vals) - 1):
-            out.append((vals[i], vals[i + 1]))
-        return out
+        return [(vals[i], vals[i + 1]) for i in range(len(vals) - 1)]
 
     grids = {c: qgrid(train[c]) for c in available}
     cols = [c for c in available if grids.get(c)]
@@ -232,7 +257,7 @@ def _rule_search(df: pd.DataFrame, pl_col: str, side: str, odds_col: str, split_
         return {"error": "Not enough numeric columns with stable quantile grids to search."}
 
     best = []
-    max_rules = 5000  # more realistic V1
+    max_rules = 250
     tried = 0
 
     for i in range(len(cols)):
@@ -244,37 +269,33 @@ def _rule_search(df: pd.DataFrame, pl_col: str, side: str, odds_col: str, split_
                     if tried > max_rules:
                         break
 
-                    mask_train = train[c1].between(a1, b1) & train[c2].between(a2, b2)
-                    mask_test = test[c1].between(a1, b1) & test[c2].between(a2, b2)
-
-                    tr = train[mask_train]
-                    te = test[mask_test]
+                    tr = train[train[c1].between(a1, b1) & train[c2].between(a2, b2)]
+                    te = test[test[c1].between(a1, b1) & test[c2].between(a2, b2)]
 
                     if len(tr) < 300 or len(te) < 120:
                         continue
 
                     tr_roi = _roi(tr, pl_col, side, odds_col)
                     te_roi = _roi(te, pl_col, side, odds_col)
-                    if "error" in tr_roi or "error" in te_roi:
-                        continue
 
                     gap = float(tr_roi["roi"]) - float(te_roi["roi"])
                     te_games = _game_level(te, pl_col)
-
                     score = float(te_roi["roi"]) - 0.25 * max(gap, 0.0)
 
-                    best.append({
-                        "score": score,
-                        "rule": [
-                            {"col": c1, "min": a1, "max": b1},
-                            {"col": c2, "min": a2, "max": b2},
-                        ],
-                        "train": tr_roi,
-                        "test": te_roi,
-                        "test_game_level": te_games,
-                        "gap_train_minus_test": gap,
-                        "samples": {"train_rows": int(len(tr)), "test_rows": int(len(te))},
-                    })
+                    best.append(
+                        {
+                            "score": score,
+                            "rule": [
+                                {"col": c1, "min": a1, "max": b1},
+                                {"col": c2, "min": a2, "max": b2},
+                            ],
+                            "train": tr_roi,
+                            "test": te_roi,
+                            "test_game_level": te_games,
+                            "gap_train_minus_test": gap,
+                            "samples": {"train_rows": int(len(tr)), "test_rows": int(len(te))},
+                        }
+                    )
                 if tried > max_rules:
                     break
             if tried > max_rules:
@@ -283,23 +304,24 @@ def _rule_search(df: pd.DataFrame, pl_col: str, side: str, odds_col: str, split_
             break
 
     best.sort(key=lambda x: x["score"], reverse=True)
-    return {"pl_column": pl_col, "side": side, "odds_col": odds_col, "searched_rules": int(tried), "top_rules": best[:10]}
+    return {
+        "pl_column": pl_col,
+        "side": side,
+        "odds_col": odds_col,
+        "searched_rules": int(tried),
+        "top_rules": best[:10],
+    }
+
 
 def _compute_task_strategy_search(sb, params: Dict[str, Any]) -> Dict[str, Any]:
     split_ratio = float(params.get("time_split_ratio", 0.7))
 
     storage_bucket = params.get("storage_bucket")
     storage_path = params.get("storage_path")
-    csv_url = params.get("csv_url") or params.get("DATA_CSV_URL")
+    if not storage_bucket or not storage_path:
+        return {"error": "strategy_search requires params.storage_bucket and params.storage_path"}
 
-    if storage_bucket and storage_path:
-        df = _load_csv_from_supabase_storage(sb, storage_bucket, storage_path)
-        source = {"type": "supabase_storage", "bucket": storage_bucket, "path": storage_path}
-    elif csv_url:
-        df = _load_csv_from_drive(csv_url)
-        source = {"type": "google_drive", "csv_url": csv_url}
-    else:
-        return {"error": "strategy_search requires either (storage_bucket + storage_path) OR csv_url."}
+    df = _load_csv_from_supabase_storage(sb, storage_bucket, storage_path)
 
     chosen = params.get("pl_column")
     mp = _mapping()
@@ -319,12 +341,9 @@ def _compute_task_strategy_search(sb, params: Dict[str, Any]) -> Dict[str, Any]:
         pick_meta = {"pl_column": chosen, "side": side, "odds_col": odds_col}
 
     out = _rule_search(df, chosen, side, odds_col, split_ratio)
-    return {"data_source": source, "picked": pick_meta, "search": out}
+    return {"picked": pick_meta, "search": out}
 
 
-# -----------------------------
-# Job processing
-# -----------------------------
 def _process_one(sb) -> Dict[str, Any]:
     job_rows = (
         sb.table("jobs")
@@ -382,7 +401,10 @@ def _process_one(sb) -> Dict[str, Any]:
             file_options={"content-type": "application/json", "upsert": "true"},
         )
 
-        sb.table("jobs").update({"status": "done", "result_path": path, "updated_at": _now_iso(), "error": None}).eq("job_id", job_id).execute()
+        sb.table("jobs").update(
+            {"status": "done", "result_path": path, "updated_at": _now_iso(), "error": None}
+        ).eq("job_id", job_id).execute()
+
         return {"status": "done", "job_id": job_id, "result_path": path}
 
     except Exception as e:
@@ -390,9 +412,14 @@ def _process_one(sb) -> Dict[str, Any]:
         return {"status": "error", "job_id": job_id, "error": str(e)}
 
 
+# -----------------------------
+# Modal functions
+# -----------------------------
 @app.function(image=image, secrets=[SUPABASE_SECRET], timeout=60 * 60)
 def run_batch(max_jobs: int = 10) -> Dict[str, Any]:
     import os
+    from supabase import create_client
+
     url = os.environ["SUPABASE_URL"]
     key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
     sb = create_client(url, key)
@@ -409,11 +436,18 @@ def run_batch(max_jobs: int = 10) -> Dict[str, Any]:
     return {"status": "ok", "processed": len(results), "results": results, "ts": _now_iso()}
 
 
-@app.function(image=image, secrets=[SUPABASE_SECRET], timeout=60 * 60, schedule=modal.Period(minutes=1))
+@app.function(
+    image=image,
+    secrets=[SUPABASE_SECRET],
+    timeout=60 * 60,
+    schedule=modal.Period(minutes=1),
+)
 def poll_and_run():
-    return run_batch(max_jobs=10)
+    # IMPORTANT: this is a Modal function. Call run_batch via .remote()
+    return run_batch.remote(max_jobs=10)
 
 
 @app.local_entrypoint()
 def main():
     print(run_batch.remote(max_jobs=5))
+
