@@ -11,7 +11,6 @@ from openai import OpenAI
 from openai import BadRequestError
 
 from modules import football_tools as tools_football
-from modules import code_ops as tools_code
 
 
 # ============================================================
@@ -44,27 +43,24 @@ MAX_MESSAGES_TO_KEEP = int(os.getenv("MAX_CHAT_MESSAGES") or st.secrets.get("MAX
 
 
 # ============================================================
-# Tool runner (supports multiple tool modules)
+# Tool runner (APP INTERNAL)
 # ============================================================
 
-TOOL_MODULES = (tools_football, tools_code)
-
-
 def _run_tool(name: str, args: Dict[str, Any]) -> Any:
-    for mod in TOOL_MODULES:
-        fn = getattr(mod, name, None)
-        if fn:
-            return fn(**args)
-    raise RuntimeError(f"Unknown tool: {name}")
+    fn = getattr(tools_football, name, None)
+    if not fn:
+        raise RuntimeError(f"Unknown tool: {name}")
+    return fn(**args)
 
 
 # ============================================================
 # Tools schema for OpenAI function calling
-# IMPORTANT: Only include tools the LLM should use.
-# Do NOT include app-internal tools like save_chat/load_chat/etc.
+# IMPORTANT:
+# - Only include tools the LLM should call.
+# - NEVER include internal app tools like save_chat/load_chat/rename_chat/delete_chat.
 # ============================================================
 
-TOOLS = [
+LLM_TOOLS = [
     # ---- Google Sheets (source of truth)
     {"type": "function", "function": {"name": "get_dataset_overview", "description": "Get dataset_overview tab.", "parameters": {"type": "object", "properties": {}, "required": []}}},
     {"type": "function", "function": {"name": "get_research_rules", "description": "Get research_rules tab.", "parameters": {"type": "object", "properties": {}, "required": []}}},
@@ -126,7 +122,7 @@ st.title("⚽ Football Researcher")
 
 
 # ============================================================
-# Session management (chat persistence is APP-INTERNAL, not LLM tools)
+# Session management (chat persistence is APP INTERNAL)
 # ============================================================
 
 def _load_sessions() -> List[Dict[str, Any]]:
@@ -230,7 +226,9 @@ def _sanitize_history_for_llm(messages: List[Dict[str, Any]]) -> List[Dict[str, 
                         name = fn.get("name")
                         args = fn.get("arguments", "{}")
                         if cid and name:
-                            cleaned_tool_calls.append({"id": cid, "type": "function", "function": {"name": name, "arguments": args}})
+                            cleaned_tool_calls.append(
+                                {"id": cid, "type": "function", "function": {"name": name, "arguments": args}}
+                            )
                             expecting_tool_ids.add(cid)
                     except Exception:
                         continue
@@ -265,7 +263,7 @@ def _call_llm(messages: List[Dict[str, Any]]):
     safe_messages = _sanitize_history_for_llm(messages)
 
     if mode == "chat":
-        # CHAT MODE: no tools, no tool_choice
+        # CHAT MODE: absolutely no tools, no tool_choice
         chat_only: List[Dict[str, Any]] = []
         for m in safe_messages:
             if m.get("role") == "tool":
@@ -280,7 +278,7 @@ def _call_llm(messages: List[Dict[str, Any]]):
         return client.chat.completions.create(model=MODEL, messages=chat_only)
 
     # AUTOPILOT: tools enabled
-    return client.chat.completions.create(model=MODEL, messages=safe_messages, tools=TOOLS, tool_choice="auto")
+    return client.chat.completions.create(model=MODEL, messages=safe_messages, tools=LLM_TOOLS, tool_choice="auto")
 
 
 # ============================================================
@@ -317,7 +315,7 @@ def _chat_with_tools(user_text: str, max_rounds: int = 6):
             st.session_state.messages.append(assistant_msg)
         else:
             if st.session_state.agent_mode == "chat":
-                st.session_state.messages.append({"role": "assistant", "content": "I’m here — what do you want to do next (strategy, debugging, or analysis)?"})
+                st.session_state.messages.append({"role": "assistant", "content": "I’m here — what do you want to do next?"})
             else:
                 st.session_state.messages.append(assistant_msg)
 
