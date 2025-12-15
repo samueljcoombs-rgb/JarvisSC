@@ -33,7 +33,7 @@ def _select_best_model(client: OpenAI) -> str:
     Picks the best available chat model without hardcoding to 4o-mini.
     Preference order:
       1) PREFERRED_OPENAI_MODEL (env)
-      2) gpt-5
+      2) gpt-5.1
       3) gpt-latest
       4) gpt-4.1, gpt-4o, gpt-4.1-mini
       5) gpt-4o (fallback)
