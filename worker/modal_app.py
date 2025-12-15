@@ -2,10 +2,10 @@
 import json
 import time
 from datetime import datetime
-from io import BytesIO
 
 import modal
 from supabase import create_client
+
 
 app = modal.App("football-research-worker")
 
@@ -22,20 +22,19 @@ image = (
 SUPABASE_SECRET = modal.Secret.from_name("football-supabase")
 
 
-def _now_iso():
+def _now_iso() -> str:
     return datetime.utcnow().isoformat()
 
 
-@app.function(image=image, secrets=[SUPABASE_SECRET], timeout=60 * 60)  # 1 hour
-def run_one_job():
-    import os
-
-    url = os.environ["SUPABASE_URL"]
-    key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
-    sb = create_client(url, key)
-
+def _process_one(sb) -> dict:
+    """
+    Claim + process one queued job.
+    Returns a status dict:
+      - {"status":"idle"} if none found
+      - {"status":"done", ...} / {"status":"error", ...}
+    """
     # 1) Fetch one queued job
-    job = (
+    job_rows = (
         sb.table("jobs")
         .select("*")
         .eq("status", "queued")
@@ -44,23 +43,26 @@ def run_one_job():
         .execute()
         .data
     )
-    if not job:
+
+    if not job_rows:
         return {"status": "idle", "message": "No queued jobs."}
 
-    job = job[0]
+    job = job_rows[0]
     job_id = job["job_id"]
 
-    # 2) Mark running
-    sb.table("jobs").update({"status": "running", "updated_at": _now_iso()}).eq("job_id", job_id).execute()
+    # 2) Mark running (best-effort "claim")
+    sb.table("jobs").update(
+        {"status": "running", "updated_at": _now_iso()}
+    ).eq("job_id", job_id).execute()
 
     try:
-        task_type = job["task_type"]
+        task_type = job.get("task_type")
         params = job.get("params") or {}
 
         # ---- PLACEHOLDER HEAVY COMPUTE ----
-        # Replace this with your actual search / evaluation.
-        # For now we just return the params as a sanity test.
-        time.sleep(2)
+        # Replace this block with your real strategy search / evaluation.
+        time.sleep(1.0)
+
         result = {
             "job_id": job_id,
             "task_type": task_type,
@@ -70,7 +72,7 @@ def run_one_job():
         }
 
         # 3) Upload results JSON to Supabase Storage
-        bucket = "football-results"
+        bucket = params.get("_results_bucket") or "football-results"
         path = f"results/{job_id}.json"
         payload = json.dumps(result, indent=2).encode("utf-8")
 
@@ -85,7 +87,7 @@ def run_one_job():
             {"status": "done", "result_path": path, "updated_at": _now_iso(), "error": None}
         ).eq("job_id", job_id).execute()
 
-        return {"status": "done", "job_id": job_id, "result_path": path}
+        return {"status": "done", "job_id": job_id, "result_path": path, "bucket": bucket}
 
     except Exception as e:
         sb.table("jobs").update(
@@ -94,14 +96,53 @@ def run_one_job():
         return {"status": "error", "job_id": job_id, "error": str(e)}
 
 
-@app.function(image=image, secrets=[SUPABASE_SECRET], timeout=60 * 60, schedule=modal.Period(minutes=1))
+@app.function(image=image, secrets=[SUPABASE_SECRET], timeout=60 * 60)  # 1 hour
+def run_batch(max_jobs: int = 10) -> dict:
+    """
+    Process up to max_jobs in one container invocation (prevents backlog buildup).
+    """
+    import os
+
+    url = os.environ["SUPABASE_URL"]
+    key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+    sb = create_client(url, key)
+
+    max_jobs = max(1, min(int(max_jobs or 10), 100))
+
+    results = []
+    for _ in range(max_jobs):
+        out = _process_one(sb)
+        results.append(out)
+        if out.get("status") == "idle":
+            break
+
+    done = sum(1 for r in results if r.get("status") == "done")
+    err = sum(1 for r in results if r.get("status") == "error")
+    return {
+        "status": "ok",
+        "processed": len(results),
+        "done": done,
+        "errors": err,
+        "results": results,
+        "ts": _now_iso(),
+    }
+
+
+@app.function(
+    image=image,
+    secrets=[SUPABASE_SECRET],
+    timeout=60 * 60,
+    schedule=modal.Period(minutes=1),
+)
 def poll_and_run():
-    # Runs every minute and processes one job per tick.
-    return run_one_job.remote()
+    """
+    Runs every minute on Modal automatically.
+    Processes a small batch each tick to keep up with load.
+    """
+    return run_batch(max_jobs=10)
 
 
 @app.local_entrypoint()
 def main():
-    # Run one job locally-triggered (handy for testing)
-    print(run_one_job.remote())
-
+    # Handy: run a batch once from your Mac
+    print(run_batch.remote(max_jobs=5))
