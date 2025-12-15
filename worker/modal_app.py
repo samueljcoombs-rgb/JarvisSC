@@ -416,7 +416,7 @@ def _process_one(sb) -> Dict[str, Any]:
 # Modal functions
 # -----------------------------
 @app.function(image=image, secrets=[SUPABASE_SECRET], timeout=60 * 60)
-def run_batch(max_jobs: int = 10) -> Dict[str, Any]:
+def run_batch.remote(max_jobs: int = 10) -> Dict[str, Any]:
     import os
     from supabase import create_client
 
