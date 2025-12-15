@@ -1,6 +1,7 @@
 # pages/football_researcher.py
-from datetime import datetime
 from __future__ import annotations
+
+from datetime import datetime
 
 import json
 import os
