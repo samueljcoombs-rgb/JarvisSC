@@ -56,7 +56,7 @@ def _run_tool(name: str, args: Dict[str, Any]) -> Any:
 # ============================================================
 # Tools schema for OpenAI function calling
 # IMPORTANT: only include tools the LLM should call.
-# Do NOT include chat persistence tools here.
+# (Never include chat persistence tools here)
 # ============================================================
 
 LLM_TOOLS = [
@@ -154,9 +154,8 @@ def _trim_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     system = messages[0:1]
     tail = messages[-(MAX_MESSAGES_TO_KEEP - 1):]
 
-    # Avoid starting trimmed history on a tool message (can orphan tool call context)
+    # Avoid trimming into an orphaned tool message
     while tail and tail[0].get("role") == "tool":
-        # pull one more message from earlier if possible
         idx_start = len(messages) - len(tail) - 1
         if idx_start <= 0:
             break
@@ -197,17 +196,10 @@ if "agent_mode" not in st.session_state:
 
 
 # ============================================================
-# History repair + sanitization
-# This FIXES:
-# "assistant tool_calls must be followed by tool messages..."
+# History repair (prevents dangling tool_calls)
 # ============================================================
 
 def _repair_tool_call_chains(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Ensures no dangling assistant.tool_calls exist without matching tool responses.
-    If a tool_call chain is incomplete, we strip tool_calls from that assistant
-    and remove any orphan tool messages for that chain.
-    """
     if not messages:
         return [{"role": "system", "content": SYSTEM_PROMPT}]
 
@@ -216,34 +208,31 @@ def _repair_tool_call_chains(messages: List[Dict[str, Any]]) -> List[Dict[str, A
 
     pending_ids: Set[str] = set()
     pending_assistant_index: Optional[int] = None
-    pending_tool_msg_indices: List[int] = []
+    pending_tool_indices: List[int] = []
 
     def _drop_pending_chain():
-        nonlocal pending_ids, pending_assistant_index, pending_tool_msg_indices
+        nonlocal pending_ids, pending_assistant_index, pending_tool_indices
         if pending_assistant_index is not None and 0 <= pending_assistant_index < len(repaired):
             repaired[pending_assistant_index].pop("tool_calls", None)
-        # remove any tool messages we attached for that pending chain (orphan now)
-        for idx in sorted(pending_tool_msg_indices, reverse=True):
+        for idx in sorted(pending_tool_indices, reverse=True):
             if 0 <= idx < len(repaired) and repaired[idx].get("role") == "tool":
                 repaired.pop(idx)
         pending_ids = set()
         pending_assistant_index = None
-        pending_tool_msg_indices = []
+        pending_tool_indices = []
 
     for m in messages[1:]:
         role = (m.get("role") or "").strip()
 
         if role == "assistant":
-            # If there was a pending tool chain and we're seeing a new assistant,
-            # it means it wasn't completed -> drop it.
             if pending_ids:
                 _drop_pending_chain()
 
             clean = {"role": "assistant", "content": m.get("content", "") or ""}
             tc = m.get("tool_calls")
             if isinstance(tc, list) and tc:
-                cleaned_tool_calls = []
-                ids = set()
+                cleaned = []
+                ids: Set[str] = set()
                 for call in tc:
                     try:
                         cid = call.get("id")
@@ -251,43 +240,35 @@ def _repair_tool_call_chains(messages: List[Dict[str, Any]]) -> List[Dict[str, A
                         name = fn.get("name")
                         args = fn.get("arguments", "{}")
                         if cid and name:
-                            cleaned_tool_calls.append({"id": cid, "type": "function", "function": {"name": name, "arguments": args}})
+                            cleaned.append({"id": cid, "type": "function", "function": {"name": name, "arguments": args}})
                             ids.add(cid)
                     except Exception:
                         continue
-
-                if cleaned_tool_calls:
-                    clean["tool_calls"] = cleaned_tool_calls
+                if cleaned:
+                    clean["tool_calls"] = cleaned
                     pending_ids = set(ids)
                     pending_assistant_index = len(repaired)
-                    pending_tool_msg_indices = []
-
+                    pending_tool_indices = []
             repaired.append(clean)
             continue
 
         if role == "tool":
             tcid = (m.get("tool_call_id") or "").strip()
-            if pending_ids and tcid and tcid in pending_ids:
+            if pending_ids and tcid in pending_ids:
                 repaired.append({"role": "tool", "tool_call_id": tcid, "content": m.get("content", "") or ""})
-                pending_tool_msg_indices.append(len(repaired) - 1)
+                pending_tool_indices.append(len(repaired) - 1)
                 pending_ids.remove(tcid)
                 if not pending_ids:
                     pending_assistant_index = None
-                    pending_tool_msg_indices = []
-            # Drop unexpected/orphan tool messages
-            continue
+                    pending_tool_indices = []
+            continue  # drop orphans
 
         if role == "user":
-            # If user arrives before tool chain completes -> drop pending chain
             if pending_ids:
                 _drop_pending_chain()
             repaired.append({"role": "user", "content": m.get("content", "") or ""})
             continue
 
-        # drop other roles
-        continue
-
-    # End of history: if tool chain still pending -> drop it
     if pending_ids:
         _drop_pending_chain()
 
@@ -295,38 +276,28 @@ def _repair_tool_call_chains(messages: List[Dict[str, Any]]) -> List[Dict[str, A
 
 
 def _sanitize_history_for_llm(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    # Repair first so OpenAI never sees invalid sequences.
     repaired = _repair_tool_call_chains(messages)
-
-    # Guarantee leading system message
     out: List[Dict[str, Any]] = []
     first = repaired[0] if repaired else {"role": "system", "content": SYSTEM_PROMPT}
-    if first.get("role") != "system":
-        out.append({"role": "system", "content": SYSTEM_PROMPT})
-    else:
-        out.append({"role": "system", "content": first.get("content", SYSTEM_PROMPT)})
+    out.append({"role": "system", "content": first.get("content", SYSTEM_PROMPT)})
 
-    # Copy through already-repaired content
     for m in repaired[1:]:
-        role = (m.get("role") or "").strip()
-        if role in ("user", "assistant", "tool"):
+        if m.get("role") in ("user", "assistant", "tool"):
             out.append(m)
     return out
 
 
 # ============================================================
-# LLM call (never send tool_choice unless tools present)
+# LLM call
 # ============================================================
 
 def _call_llm(messages: List[Dict[str, Any]]):
-    # Repair the stored history in-session too, so the error doesn't come back.
     st.session_state.messages = _repair_tool_call_chains(st.session_state.messages)
 
     mode = st.session_state.agent_mode
     safe_messages = _sanitize_history_for_llm(st.session_state.messages)
 
     if mode == "chat":
-        # CHAT MODE: no tools, no tool_choice
         chat_only: List[Dict[str, Any]] = []
         for m in safe_messages:
             if m.get("role") == "tool":
@@ -337,10 +308,8 @@ def _call_llm(messages: List[Dict[str, Any]]):
                 chat_only.append(mm)
             else:
                 chat_only.append(m)
-
         return client.chat.completions.create(model=MODEL, messages=chat_only)
 
-    # AUTOPILOT MODE: tools enabled
     return client.chat.completions.create(model=MODEL, messages=safe_messages, tools=LLM_TOOLS, tool_choice="auto")
 
 
@@ -367,13 +336,11 @@ def _chat_with_tools(user_text: str, max_rounds: int = 6):
         tool_calls = getattr(msg, "tool_calls", None)
 
         assistant_msg: Dict[str, Any] = {"role": "assistant", "content": msg.content or ""}
-
         if tool_calls:
             assistant_msg["tool_calls"] = [
                 {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
                 for tc in tool_calls
             ]
-
         st.session_state.messages.append(assistant_msg)
 
         if st.session_state.agent_mode == "chat":
@@ -385,80 +352,18 @@ def _chat_with_tools(user_text: str, max_rounds: int = 6):
         for tc in tool_calls:
             name = tc.function.name
             args = json.loads(tc.function.arguments or "{}")
-            out = _run_tool(name, args)
+
+            # ✅ CRITICAL: tool exceptions must NEVER crash the whole app
+            try:
+                out = _run_tool(name, args)
+            except Exception as e:
+                out = {"ok": False, "tool": name, "args": args, "error": str(e)}
+
             st.session_state.messages.append({"role": "tool", "tool_call_id": tc.id, "content": json.dumps(out, ensure_ascii=False)})
 
         st.session_state.messages = _trim_messages(st.session_state.messages)
 
     _persist_chat()
-
-
-# ============================================================
-# Autopilot receipt + structured logging (manual non-blocking)
-# ============================================================
-
-def _structured_note(worker_payload: Dict[str, Any], job_id: str, result_path: str) -> str:
-    result = worker_payload.get("result", {}) if isinstance(worker_payload, dict) else {}
-    picked = result.get("picked") or {}
-    search = result.get("search") or {}
-    top_rules = (search.get("top_rules") or [])[:3]
-    note = {
-        "ts": datetime.utcnow().isoformat(),
-        "kind": "strategy_search_result",
-        "job_id": job_id,
-        "result_path": result_path,
-        "picked": picked,
-        "top_rules": top_rules,
-    }
-    return json.dumps(note, ensure_ascii=False)
-
-
-def _submit_autopilot_job() -> Dict[str, Any]:
-    params = {
-        "storage_bucket": DEFAULT_STORAGE_BUCKET,
-        "storage_path": DEFAULT_STORAGE_PATH,
-        "_results_bucket": DEFAULT_RESULTS_BUCKET,
-        "time_split_ratio": 0.7,
-    }
-    submitted = _run_tool("submit_job", {"task_type": "strategy_search", "params": params})
-    job_id = submitted.get("job_id")
-
-    if job_id:
-        _run_tool("set_research_state", {"key": "last_job_id", "value": job_id})
-        _run_tool("set_research_state", {"key": "last_job_submitted_at", "value": datetime.utcnow().isoformat()})
-    return {"submitted": submitted, "job_id": job_id}
-
-
-def _poll_latest_job_and_log_if_done() -> Dict[str, Any]:
-    rs = _run_tool("get_research_state", {}).get("data", {}) or {}
-    job_id = (rs.get("last_job_id") or "").strip()
-    if not job_id:
-        return {"ok": True, "note": "No last_job_id in research_state."}
-
-    job = _run_tool("get_job", {"job_id": job_id})
-    if job.get("error"):
-        return {"ok": False, "error": job.get("error"), "job": job}
-
-    status = (job.get("status") or "").lower()
-    out: Dict[str, Any] = {"ok": True, "job_id": job_id, "status": status, "job": job}
-
-    if status == "done" and job.get("result_path"):
-        last_logged = (rs.get("last_logged_job_id") or "").strip()
-        if last_logged == job_id:
-            out["logged"] = False
-            out["note"] = "Result already logged."
-            return out
-
-        res = _run_tool("download_result", {"result_path": job["result_path"], "bucket": DEFAULT_RESULTS_BUCKET})
-        result_json = res.get("result") if isinstance(res, dict) else None
-
-        note = _structured_note(result_json or {}, job_id, job["result_path"])
-        _run_tool("append_research_note", {"note": note, "tags": "autopilot,worker,structured"})
-        _run_tool("set_research_state", {"key": "last_logged_job_id", "value": job_id})
-        _run_tool("set_research_state", {"key": "last_autopilot_logged_at", "value": datetime.utcnow().isoformat()})
-        out["logged"] = True
-
-    return out
 
 
 # ============================================================
@@ -505,7 +410,6 @@ with st.sidebar:
             st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
             _persist_chat(title=f"Session {sid[:8]}")
             st.rerun()
-
     with colB:
         if st.button("💾 Save"):
             _persist_chat()
@@ -528,30 +432,10 @@ with st.sidebar:
         st.success("Deleted + created new.")
         st.rerun()
 
-    st.divider()
-
-    st.subheader("🤖 Autopilot (Manual)")
-    if st.button("Submit 1 strategy_search job"):
-        submitted = _submit_autopilot_job()
-        st.session_state.last_autopilot = {"stage": "submitted", **submitted}
-        st.rerun()
-
-    if st.button("Poll latest job + log if done"):
-        receipt = _poll_latest_job_and_log_if_done()
-        st.session_state.last_autopilot = {"stage": "polled", "receipt": receipt}
-        st.rerun()
-
 
 # ============================================================
-# Main: Autopilot receipt + Chat
+# Main UI
 # ============================================================
-
-st.subheader("🧾 Autopilot Receipt")
-last = st.session_state.get("last_autopilot")
-if not last:
-    st.info("No autopilot run in this session yet.")
-else:
-    st.json(last)
 
 st.subheader("💬 Chat")
 for m in st.session_state.messages:
