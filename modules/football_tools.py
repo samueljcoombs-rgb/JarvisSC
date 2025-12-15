@@ -17,9 +17,9 @@ from google.oauth2.service_account import Credentials
 from supabase import create_client
 
 
-# =========================
-# Google Sheets (memory tabs)
-# =========================
+# ============================================================
+# Google Sheets tabs (YOUR agreed names)
+# ============================================================
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -40,15 +40,16 @@ def _now_iso() -> str:
     return datetime.utcnow().isoformat()
 
 
+# ============================================================
+# Google Sheets helpers (fault tolerant)
+# ============================================================
+
 def _gs_creds() -> Credentials:
     raw = st.secrets.get("GOOGLE_SERVICE_ACCOUNT_JSON") or os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
     if not raw:
         raise RuntimeError("Missing GOOGLE_SERVICE_ACCOUNT_JSON in Streamlit secrets/env.")
-    try:
-        data = json.loads(raw) if isinstance(raw, str) else raw
-        return Credentials.from_service_account_info(data, scopes=SCOPES)
-    except Exception as e:
-        raise RuntimeError(f"Invalid GOOGLE_SERVICE_ACCOUNT_JSON: {e}")
+    data = json.loads(raw) if isinstance(raw, str) else raw
+    return Credentials.from_service_account_info(data, scopes=SCOPES)
 
 
 def _sheet_url() -> str:
@@ -59,22 +60,54 @@ def _sheet_url() -> str:
     return url
 
 
-def _sh():
+@st.cache_resource(show_spinner=False)
+def _sh_cached():
     gc = gspread.authorize(_gs_creds())
     return gc.open_by_url(_sheet_url())
 
 
 def _ws(name: str):
-    sh = _sh()
+    sh = _sh_cached()
     try:
         return sh.worksheet(name)
     except WorksheetNotFound:
         raise RuntimeError(f"WorksheetNotFound: '{name}'. Create this tab in the Google Sheet.")
 
 
+def _safe_get_all_values(tab: str) -> List[List[str]]:
+    try:
+        return _ws(tab).get_all_values()
+    except Exception:
+        return []
+
+
+def _ensure_header(tab: str, header: List[str]) -> Dict[str, Any]:
+    """
+    Ensures the first row is header. Non-fatal.
+    Returns {ok, changed?}.
+    """
+    try:
+        ws = _ws(tab)
+        vals = ws.get_all_values()
+        if not vals:
+            ws.append_row(header, value_input_option="RAW")
+            return {"ok": True, "changed": True, "created": True}
+        # if first row empty-ish, try to fix
+        first = [c.strip() for c in vals[0]] if vals else []
+        if len(first) < len(header) or any((first[i].strip().lower() != header[i].strip().lower()) for i in range(min(len(first), len(header)))):
+            # don't risk overwriting protected header; best effort insert if possible
+            try:
+                ws.insert_row(header, index=1)
+                return {"ok": True, "changed": True, "inserted": True}
+            except Exception:
+                return {"ok": True, "changed": False, "note": "Header differs but cannot insert (possibly protected)."}
+        return {"ok": True, "changed": False}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 def _read_kv_tab(tab_name: str) -> Dict[str, str]:
-    ws = _ws(tab_name)
-    vals = ws.get_all_values()
+    vals = _safe_get_all_values(tab_name)
     out: Dict[str, str] = {}
     if not vals or len(vals) < 2:
         return out
@@ -89,8 +122,7 @@ def _read_kv_tab(tab_name: str) -> Dict[str, str]:
 
 
 def _read_table_tab(tab_name: str) -> List[Dict[str, str]]:
-    ws = _ws(tab_name)
-    vals = ws.get_all_values()
+    vals = _safe_get_all_values(tab_name)
     if not vals or len(vals) < 2:
         return []
     headers = [h.strip() for h in vals[0]]
@@ -124,8 +156,7 @@ def get_evaluation_framework() -> Dict[str, Any]:
 
 
 def get_recent_research_notes(limit: int = 20) -> Dict[str, Any]:
-    ws = _ws(TAB_RESEARCH_MEMORY)
-    vals = ws.get_all_values()
+    vals = _safe_get_all_values(TAB_RESEARCH_MEMORY)
     if not vals or len(vals) < 2:
         return {"tab": TAB_RESEARCH_MEMORY, "rows": []}
     headers = [h.strip() for h in vals[0]]
@@ -141,12 +172,17 @@ def get_recent_research_notes(limit: int = 20) -> Dict[str, Any]:
 
 
 def append_research_note(note: str, tags: str = "") -> Dict[str, Any]:
-    ws = _ws(TAB_RESEARCH_MEMORY)
+    # Ensure header exists (non-fatal)
+    _ensure_header(TAB_RESEARCH_MEMORY, ["timestamp", "note", "tags"])
+
     try:
+        ws = _ws(TAB_RESEARCH_MEMORY)
         ws.append_row([_now_iso(), note, tags or ""], value_input_option="RAW")
         return {"ok": True, "tab": TAB_RESEARCH_MEMORY}
     except APIError as e:
         return {"ok": False, "error": f"gspread APIError append_research_note: {e}"}
+    except Exception as e:
+        return {"ok": False, "error": f"append_research_note failed: {e}"}
 
 
 def get_research_state() -> Dict[str, Any]:
@@ -155,35 +191,19 @@ def get_research_state() -> Dict[str, Any]:
 
 def set_research_state(key: str, value: str) -> Dict[str, Any]:
     """
-    Fault-tolerant:
-    - ensures header exists
-    - tries to update existing row
-    - if update fails (protected range / perms / transient), appends a new row instead
-    - never raises (returns ok False with error details)
+    Matches your format:
+      key | value
+    Fault-tolerant & non-fatal.
     """
+    _ensure_header(TAB_RESEARCH_STATE, ["key", "value"])
     try:
         ws = _ws(TAB_RESEARCH_STATE)
-        vals = ws.get_all_values()
+        vals = ws.get_all_values() or []
 
-        if not vals:
-            ws.append_row(["key", "value"], value_input_option="RAW")
-            ws.append_row([key, value], value_input_option="RAW")
-            return {"ok": True, "key": key, "value": value, "created_sheet": True}
-
-        # Ensure header
-        header = [c.strip().lower() for c in (vals[0] if vals else [])]
-        if len(header) < 2 or header[0] != "key" or header[1] != "value":
-            # Don’t try to rewrite header if protected; just append safely.
-            try:
-                ws.insert_row(["key", "value"], index=1)
-            except Exception:
-                pass  # ok
-
-        # Find key
+        # Find and update
         for idx, row in enumerate(vals[1:], start=2):
             if len(row) >= 1 and (row[0] or "").strip() == key:
                 try:
-                    # update_cell is less error-prone than A1 range strings
                     ws.update_cell(idx, 2, value)
                     return {"ok": True, "key": key, "value": value, "updated": True}
                 except APIError as e:
@@ -191,23 +211,22 @@ def set_research_state(key: str, value: str) -> Dict[str, Any]:
                     try:
                         ws.append_row([key, value], value_input_option="RAW")
                         return {"ok": True, "key": key, "value": value, "appended_fallback": True, "update_error": str(e)}
-                    except APIError as e2:
+                    except Exception as e2:
                         return {"ok": False, "error": f"update failed ({e}); append fallback failed ({e2})"}
 
         # Not found -> append
-        try:
-            ws.append_row([key, value], value_input_option="RAW")
-            return {"ok": True, "key": key, "value": value, "created": True}
-        except APIError as e:
-            return {"ok": False, "error": f"append failed: {e}"}
+        ws.append_row([key, value], value_input_option="RAW")
+        return {"ok": True, "key": key, "value": value, "created": True}
 
+    except APIError as e:
+        return {"ok": False, "error": f"set_research_state APIError: {e}"}
     except Exception as e:
         return {"ok": False, "error": f"set_research_state failed: {e}"}
 
 
-# =========================
-# Supabase
-# =========================
+# ============================================================
+# Supabase (jobs + storage)
+# ============================================================
 
 def _sb():
     url = st.secrets.get("SUPABASE_URL") or os.getenv("SUPABASE_URL")
@@ -217,9 +236,9 @@ def _sb():
     return create_client(url, key)
 
 
-# =========================
+# ============================================================
 # CSV loading (Supabase Storage preferred)
-# =========================
+# ============================================================
 
 def _download_from_storage(bucket: str, path: str) -> bytes:
     sb = _sb()
@@ -232,7 +251,11 @@ def _download_from_url(csv_url: str) -> bytes:
     return r.content
 
 
-def _load_csv(storage_bucket: Optional[str] = None, storage_path: Optional[str] = None, csv_url: Optional[str] = None) -> pd.DataFrame:
+def _load_csv(
+    storage_bucket: Optional[str] = None,
+    storage_path: Optional[str] = None,
+    csv_url: Optional[str] = None,
+) -> pd.DataFrame:
     if storage_bucket and storage_path:
         raw = _download_from_storage(storage_bucket, storage_path)
     elif csv_url:
@@ -258,9 +281,9 @@ def list_columns(storage_bucket: str = "", storage_path: str = "", csv_url: str 
     return {"columns": df.columns.tolist(), "n": int(len(df.columns))}
 
 
-# =========================
-# ROI helpers (row-level)
-# =========================
+# ============================================================
+# ROI (row-level) — uses your lay/back mapping
+# ============================================================
 
 def _mapping() -> Dict[str, Tuple[str, str]]:
     return {
@@ -296,35 +319,63 @@ def basic_roi_for_pl_column(pl_column: str, storage_bucket: str = "", storage_pa
         liability = (odds - 1.0).clip(lower=0.0)
         denom = float(liability.sum())
         roi = (total_pl / denom) if denom > 0 else 0.0
-        return {"pl_column": pl_column, "side": "lay", "odds_col": odds_col, "bets": n, "total_pl": total_pl,
-                "denom_liability": denom, "roi": float(roi), "avg_pl_per_bet": float(total_pl / n)}
+        return {
+            "pl_column": pl_column,
+            "side": "lay",
+            "odds_col": odds_col,
+            "bets": n,
+            "total_pl": total_pl,
+            "denom_liability": denom,
+            "roi": float(roi),
+            "avg_pl_per_bet": float(total_pl / n),
+        }
 
     denom = float(n)
-    return {"pl_column": pl_column, "side": "back", "odds_col": odds_col or None, "bets": n, "total_pl": total_pl,
-            "denom_stake": denom, "roi": float(total_pl / denom), "avg_pl_per_bet": float(total_pl / denom)}
+    return {
+        "pl_column": pl_column,
+        "side": "back",
+        "odds_col": odds_col or None,
+        "bets": n,
+        "total_pl": total_pl,
+        "denom_stake": denom,
+        "roi": float(total_pl / denom),
+        "avg_pl_per_bet": float(total_pl / denom),
+    }
 
 
-# =========================
+# ============================================================
 # Background jobs (Supabase table + Storage results)
-# =========================
+# ============================================================
 
 def submit_job(task_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
     sb = _sb()
-    row = {"status": "queued", "task_type": task_type, "params": params or {}, "created_at": _now_iso(), "updated_at": _now_iso()}
-    res = sb.table("jobs").insert(row).execute()
-    data = (res.data or [])
-    if not data:
-        return {"error": "Insert returned no rows. Check table schema/RLS.", "raw": str(res)}
-    return data[0]
+    row = {
+        "status": "queued",
+        "task_type": task_type,
+        "params": params or {},
+        "created_at": _now_iso(),
+        "updated_at": _now_iso(),
+    }
+    try:
+        res = sb.table("jobs").insert(row).execute()
+        data = (res.data or [])
+        if not data:
+            return {"error": "Insert returned no rows. Check table schema/RLS.", "raw": str(res)}
+        return data[0]
+    except Exception as e:
+        return {"error": f"submit_job failed: {e}"}
 
 
 def get_job(job_id: str) -> Dict[str, Any]:
     sb = _sb()
-    res = sb.table("jobs").select("*").eq("job_id", job_id).limit(1).execute()
-    data = (res.data or [])
-    if not data:
-        return {"error": "job not found", "job_id": job_id}
-    return data[0]
+    try:
+        res = sb.table("jobs").select("*").eq("job_id", job_id).limit(1).execute()
+        data = (res.data or [])
+        if not data:
+            return {"error": "job not found", "job_id": job_id}
+        return data[0]
+    except Exception as e:
+        return {"error": f"get_job failed: {e}", "job_id": job_id}
 
 
 def download_result(result_path: str, bucket: str = "") -> Dict[str, Any]:
@@ -359,21 +410,72 @@ def wait_for_job(job_id: str, timeout_s: int = 300, poll_s: int = 5, auto_downlo
     return {"status": "timeout", "job": last_job, "job_id": job_id}
 
 
-# =========================
-# Chat persistence (Supabase Storage)
-# =========================
+# ============================================================
+# Chat sessions (Supabase Storage) — RESTORED
+# ============================================================
 
 def _chat_bucket() -> str:
     return (st.secrets.get("CHAT_BUCKET") or os.getenv("CHAT_BUCKET") or "football-chats").strip()
 
 
-def save_chat(session_id: str, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _chat_index_path() -> str:
+    return "sessions/index.json"
+
+
+def _load_chat_index(sb) -> Dict[str, Any]:
+    bucket = _chat_bucket()
+    try:
+        raw = sb.storage.from_(bucket).download(_chat_index_path())
+        return json.loads(raw.decode("utf-8"))
+    except Exception:
+        return {"sessions": []}
+
+
+def _save_chat_index(sb, index: Dict[str, Any]) -> None:
+    bucket = _chat_bucket()
+    payload = json.dumps(index, ensure_ascii=False, indent=2).encode("utf-8")
+    sb.storage.from_(bucket).upload(
+        path=_chat_index_path(),
+        file=payload,
+        file_options={"content-type": "application/json", "upsert": "true"},
+    )
+
+
+def list_chats(limit: int = 200) -> Dict[str, Any]:
+    sb = _sb()
+    idx = _load_chat_index(sb)
+    sessions = idx.get("sessions") or []
+    sessions = sessions[-int(limit):] if limit else sessions[-200:]
+    return {"ok": True, "bucket": _chat_bucket(), "sessions": sessions}
+
+
+def save_chat(session_id: str, messages: List[Dict[str, Any]], title: str = "") -> Dict[str, Any]:
     sb = _sb()
     bucket = _chat_bucket()
     path = f"sessions/{session_id}.json"
-    payload = json.dumps({"session_id": session_id, "messages": messages, "saved_at": _now_iso()}, ensure_ascii=False, indent=2).encode("utf-8")
+    payload = json.dumps(
+        {"session_id": session_id, "title": title or "", "messages": messages, "saved_at": _now_iso()},
+        ensure_ascii=False,
+        indent=2,
+    ).encode("utf-8")
 
-    sb.storage.from_(bucket).upload(path=path, file=payload, file_options={"content-type": "application/json", "upsert": "true"})
+    sb.storage.from_(bucket).upload(
+        path=path, file=payload, file_options={"content-type": "application/json", "upsert": "true"}
+    )
+
+    # Update index
+    idx = _load_chat_index(sb)
+    sessions = idx.get("sessions") or []
+    existing = next((s for s in sessions if s.get("session_id") == session_id), None)
+    if existing:
+        existing["saved_at"] = _now_iso()
+        if title:
+            existing["title"] = title
+    else:
+        sessions.append({"session_id": session_id, "title": title or f"Session {session_id[:8]}", "saved_at": _now_iso()})
+    idx["sessions"] = sessions
+    _save_chat_index(sb, idx)
+
     return {"ok": True, "bucket": bucket, "path": path}
 
 
@@ -386,3 +488,39 @@ def load_chat(session_id: str) -> Dict[str, Any]:
         return {"ok": True, "bucket": bucket, "path": path, "data": json.loads(raw.decode("utf-8"))}
     except Exception:
         return {"ok": False, "bucket": bucket, "path": path, "data": {}}
+
+
+def rename_chat(session_id: str, title: str) -> Dict[str, Any]:
+    sb = _sb()
+    idx = _load_chat_index(sb)
+    sessions = idx.get("sessions") or []
+    found = False
+    for s in sessions:
+        if s.get("session_id") == session_id:
+            s["title"] = title
+            s["saved_at"] = _now_iso()
+            found = True
+            break
+    if not found:
+        sessions.append({"session_id": session_id, "title": title, "saved_at": _now_iso()})
+    idx["sessions"] = sessions
+    _save_chat_index(sb, idx)
+    return {"ok": True, "session_id": session_id, "title": title}
+
+
+def delete_chat(session_id: str) -> Dict[str, Any]:
+    sb = _sb()
+    bucket = _chat_bucket()
+    # Remove file best-effort (storage delete API differs; safe: ignore failures)
+    try:
+        sb.storage.from_(bucket).remove([f"sessions/{session_id}.json"])
+    except Exception:
+        pass
+
+    # Remove from index
+    idx = _load_chat_index(sb)
+    sessions = idx.get("sessions") or []
+    sessions = [s for s in sessions if s.get("session_id") != session_id]
+    idx["sessions"] = sessions
+    _save_chat_index(sb, idx)
+    return {"ok": True, "deleted": True, "session_id": session_id}
