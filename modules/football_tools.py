@@ -8,14 +8,16 @@ import importlib
 import os
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
+from io import StringIO
 
 import pandas as pd
 import requests
-from io import StringIO
 
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
+
+from supabase import create_client
 
 
 # ============================================================
@@ -69,7 +71,7 @@ DATA_URL = DATA_URL_ENV or DEFAULT_DATA_URL
 
 @st.cache_data(ttl=600, show_spinner=False)
 def _load_full_df_cached(data_url: str) -> pd.DataFrame:
-    resp = requests.get(data_url)
+    resp = requests.get(data_url, timeout=60)
     resp.raise_for_status()
     csv_data = resp.content.decode("utf-8", errors="ignore")
     df = pd.read_csv(StringIO(csv_data), low_memory=False)
@@ -143,9 +145,7 @@ def get_evaluation_framework() -> Dict[str, Any]:
 # ------------------------
 
 def append_research_note(note: str, tags: Optional[List[str]] = None) -> Dict[str, Any]:
-    """
-    Appends to 'research_memory' tab: timestamp | note | tags
-    """
+    """Appends to 'research_memory' tab: timestamp | note | tags"""
     tags = tags or []
     ts = datetime.datetime.utcnow().isoformat()
     try:
@@ -167,10 +167,7 @@ def get_recent_research_notes(limit: int = 20) -> Dict[str, Any]:
 # ------------------------
 
 def get_research_state() -> Dict[str, Any]:
-    """
-    Reads 'research_state' tab (key/value) into a dict.
-    Expected headers: key | value
-    """
+    """Reads 'research_state' tab (key/value) into a dict. Headers: key | value"""
     try:
         rows = _ws("research_state").get_all_records()
         state = {}
@@ -184,15 +181,12 @@ def get_research_state() -> Dict[str, Any]:
         return {"error": f"Failed to read research_state: {e}"}
 
 def set_research_state(key: str, value: str) -> Dict[str, Any]:
-    """
-    Upserts key/value into 'research_state'.
-    """
+    """Upserts key/value into 'research_state'."""
     try:
         sheet = _ws("research_state")
-        rows = sheet.get_all_records()  # list of dicts
-        # find row index (1-based in Sheets; +2 because header is row 1 and records start row 2)
+        rows = sheet.get_all_records()
         target_row = None
-        for i, r in enumerate(rows, start=2):
+        for i, r in enumerate(rows, start=2):  # row 1 = header
             if str(r.get("key", "")).strip() == key:
                 target_row = i
                 break
@@ -205,6 +199,39 @@ def set_research_state(key: str, value: str) -> Dict[str, Any]:
         return {"status": "ok", "key": key, "value": value}
     except Exception as e:
         return {"error": f"Failed to write research_state: {e}"}
+
+
+# ============================================================
+# Supabase (job queue + results)
+# ============================================================
+
+def _sb():
+    url = st.secrets.get("SUPABASE_URL") or os.getenv("SUPABASE_URL")
+    key = st.secrets.get("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    if not url or not key:
+        raise RuntimeError("Missing SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY")
+    return create_client(url, key)
+
+def submit_job(task_type: str, params: dict) -> dict:
+    """Insert a queued job into Supabase jobs table."""
+    sb = _sb()
+    row = sb.table("jobs").insert({"task_type": task_type, "params": params, "status": "queued"}).execute().data[0]
+    return {"job_id": row["job_id"], "status": row["status"], "task_type": row["task_type"]}
+
+def get_job(job_id: str) -> dict:
+    """Fetch a job row by job_id."""
+    sb = _sb()
+    data = sb.table("jobs").select("*").eq("job_id", job_id).limit(1).execute().data
+    if not data:
+        return {"error": "job not found"}
+    return data[0]
+
+def download_result(result_path: str) -> dict:
+    """Download a JSON result from Supabase Storage bucket football-results."""
+    sb = _sb()
+    bucket = "football-results"
+    raw = sb.storage.from_(bucket).download(result_path)
+    return json.loads(raw.decode("utf-8"))
 
 
 # ============================================================
@@ -350,9 +377,7 @@ def _longest_losing_streak(pl_series: List[float]) -> Dict[str, Any]:
     return {"longest_losing_streak_bets": int(best_count), "longest_losing_streak_pts": float(best_pl)}
 
 def _max_drawdown(pl_series: List[float]) -> Dict[str, Any]:
-    """
-    Max drawdown on cumulative PL (points) for the per-game series.
-    """
+    """Max drawdown on cumulative PL (points) for the per-game series."""
     cum = 0.0
     peak = 0.0
     max_dd = 0.0
