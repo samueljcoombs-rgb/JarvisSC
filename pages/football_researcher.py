@@ -4,12 +4,12 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import Any, Dict, List, Optional
+import inspect
+from typing import Any, Dict, List
 
 import streamlit as st
 from openai import OpenAI
 
-# IMPORTANT: This must exist in your repo: modules/football_tools.py
 from modules import football_tools as functions
 
 
@@ -29,14 +29,13 @@ client = _init_client()
 def _select_best_model(c: OpenAI) -> str:
     """
     Prefer GPT-5 if available, otherwise fall back.
-    (This is as close as we can get to 'always GPT-5.2 Thinking' programmatically,
-     since the exact variant name may not appear in model listing.)
+    Note: exact '5.2 Thinking' name isn't always listed; prefer gpt-5 / gpt-latest.
     """
-    preferred = os.getenv("PREFERRED_OPENAI_MODEL", "").strip() or st.secrets.get("PREFERRED_OPENAI_MODEL", "")
+    preferred = (os.getenv("PREFERRED_OPENAI_MODEL", "").strip()
+                 or st.secrets.get("PREFERRED_OPENAI_MODEL", ""))
     if preferred:
         return preferred
 
-    # Try to list models; if unavailable, fall back
     try:
         names = {m.id for m in c.models.list().data}
         for candidate in ["gpt-5", "gpt-latest", "gpt-4.1", "gpt-4o", "gpt-4.1-mini"]:
@@ -83,189 +82,57 @@ TOOL_FUNCS: Dict[str, Any] = {
 
 TOOLS_SCHEMA: List[Dict[str, Any]] = [
     # ---- KB ----
-    {
-        "type": "function",
-        "function": {
-            "name": "get_dataset_overview",
-            "description": "Load dataset_overview sheet (key/value style rows).",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_column_definitions",
-            "description": "Load column_definitions sheet.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_research_rules",
-            "description": "Load research_rules sheet.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_evaluation_framework",
-            "description": "Load evaluation_framework sheet.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    },
+    {"type": "function", "function": {"name": "get_dataset_overview", "description": "Load dataset_overview sheet.", "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {"name": "get_column_definitions", "description": "Load column_definitions sheet.", "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {"name": "get_research_rules", "description": "Load research_rules sheet.", "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {"name": "get_evaluation_framework", "description": "Load evaluation_framework sheet.", "parameters": {"type": "object", "properties": {}, "required": []}}},
 
     # ---- memory/state ----
-    {
-        "type": "function",
-        "function": {
-            "name": "append_research_note",
-            "description": "Append a research note into research_memory sheet. Provide note and optional tags.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "note": {"type": "string"},
-                    "tags": {"type": "array", "items": {"type": "string"}},
-                },
-                "required": ["note"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_recent_research_notes",
-            "description": "Fetch last N research notes from research_memory.",
-            "parameters": {
-                "type": "object",
-                "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 200}},
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_research_state",
-            "description": "Fetch key/value state dictionary from research_state sheet.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "set_research_state",
-            "description": "Upsert a key/value into research_state.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "key": {"type": "string"},
-                    "value": {"type": "string"},
-                },
-                "required": ["key", "value"],
-            },
-        },
-    },
+    {"type": "function", "function": {"name": "append_research_note", "description": "Append a research note (note + optional tags).",
+        "parameters": {"type": "object", "properties": {"note": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}}, "required": ["note"]}}},
+    {"type": "function", "function": {"name": "get_recent_research_notes", "description": "Fetch last N research notes.",
+        "parameters": {"type": "object", "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 200}}, "required": []}}},
+    {"type": "function", "function": {"name": "get_research_state", "description": "Fetch key/value state from research_state.", "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {"name": "set_research_state", "description": "Upsert key/value into research_state.",
+        "parameters": {"type": "object", "properties": {"key": {"type": "string"}, "value": {"type": "string"}}, "required": ["key", "value"]}}},
 
     # ---- data ----
-    {
-        "type": "function",
-        "function": {
-            "name": "load_data_basic",
-            "description": "Load dataset preview + column list.",
-            "parameters": {
-                "type": "object",
-                "properties": {"limit": {"type": "integer", "minimum": 10, "maximum": 2000}},
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_columns",
-            "description": "List all columns in the dataset.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    },
+    {"type": "function", "function": {"name": "load_data_basic", "description": "Load dataset preview.",
+        "parameters": {"type": "object", "properties": {"limit": {"type": "integer", "minimum": 10, "maximum": 2000}}, "required": []}}},
+    {"type": "function", "function": {"name": "list_columns", "description": "List all columns in the dataset.", "parameters": {"type": "object", "properties": {}, "required": []}}},
 
     # ---- evaluation ----
-    {
-        "type": "function",
-        "function": {
-            "name": "strategy_performance_summary",
-            "description": "Compute bet-level ROI and ID-aggregated streak/drawdown for a PL column.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pl_column": {"type": "string"},
-                    "side": {"type": "string", "enum": ["back", "lay"]},
-                    "odds_column": {"type": "string"},
-                    "time_split_ratio": {"type": "number", "minimum": 0.5, "maximum": 0.95},
-                    "compute_streaks": {"type": "boolean"},
-                },
-                "required": ["pl_column"],
+    {"type": "function", "function": {"name": "strategy_performance_summary", "description": "Compute ROI + streaks/drawdown for a PL column.",
+        "parameters": {"type": "object",
+            "properties": {
+                "pl_column": {"type": "string"},
+                "side": {"type": "string", "enum": ["back", "lay"]},
+                "odds_column": {"type": "string"},
+                "time_split_ratio": {"type": "number", "minimum": 0.5, "maximum": 0.95},
+                "compute_streaks": {"type": "boolean"},
             },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "strategy_performance_batch",
-            "description": "Compute performance summaries for multiple PL columns.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pl_columns": {"type": "array", "items": {"type": "string"}},
-                    "time_split_ratio": {"type": "number", "minimum": 0.5, "maximum": 0.95},
-                    "compute_streaks": {"type": "boolean"},
-                },
-                "required": ["pl_columns"],
+            "required": ["pl_column"]
+        }}}},
+    {"type": "function", "function": {"name": "strategy_performance_batch", "description": "Batch performance summaries.",
+        "parameters": {"type": "object",
+            "properties": {
+                "pl_columns": {"type": "array", "items": {"type": "string"}},
+                "time_split_ratio": {"type": "number", "minimum": 0.5, "maximum": 0.95},
+                "compute_streaks": {"type": "boolean"},
             },
-        },
-    },
+            "required": ["pl_columns"]
+        }}}},
 
     # ---- offloaded compute ----
-    {
-        "type": "function",
-        "function": {
-            "name": "submit_job",
-            "description": "Submit a heavy compute job to Supabase queue (processed by Modal worker).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "task_type": {"type": "string"},
-                    "params": {"type": "object"},
-                },
-                "required": ["task_type", "params"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_job",
-            "description": "Get status + fields for a Supabase job_id.",
-            "parameters": {
-                "type": "object",
-                "properties": {"job_id": {"type": "string"}},
-                "required": ["job_id"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "download_result",
-            "description": "Download a JSON result from Supabase Storage path.",
-            "parameters": {
-                "type": "object",
-                "properties": {"result_path": {"type": "string"}},
-                "required": ["result_path"],
-            },
-        },
-    },
+    {"type": "function", "function": {"name": "submit_job", "description": "Submit heavy job to Supabase queue.",
+        "parameters": {"type": "object",
+            "properties": {"task_type": {"type": "string"}, "params": {"type": "object"}},
+            "required": ["task_type", "params"]
+        }}}},
+    {"type": "function", "function": {"name": "get_job", "description": "Get status for a Supabase job_id.",
+        "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]}}},
+    {"type": "function", "function": {"name": "download_result", "description": "Download JSON result from Supabase Storage path.",
+        "parameters": {"type": "object", "properties": {"result_path": {"type": "string"}}, "required": ["result_path"]}}},
 ]
 
 
@@ -281,13 +148,13 @@ Mission:
 - Never use outcome columns as predictive features.
 
 You have tools to:
-- load dataset overview, column definitions, research rules, evaluation framework
-- run evaluations on PL columns (bet-level ROI; game-level streak/drawdown in points)
-- submit heavy jobs to an offloaded compute worker (Supabase queue processed by Modal)
-- store persistent research notes and state in Google Sheets.
+- load dataset overview/definitions/rules/framework from Google Sheets
+- evaluate strategies on PL columns (bet-level ROI; game-level streak/drawdown in points)
+- submit heavy jobs to a Supabase queue (processed by a Modal worker), then poll+download results
+- store persistent research notes and state in Google Sheets
 
-When you need heavy computation, submit a job via submit_job and then poll get_job until done,
-then download_result and interpret. Always log key findings using append_research_note and update research_state.
+When you need heavy computation, submit via submit_job then poll get_job until done, then download_result.
+Always log key findings via append_research_note and update research_state.
 """
 
 
@@ -304,16 +171,43 @@ def _call_llm(messages: List[Dict[str, Any]]) -> Any:
     )
 
 def _run_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Robust tool runner:
+    - Filters args to match function signature
+    - Never calls a function with missing required args
+    - Returns clear errors instead of crashing Streamlit
+    """
     fn = TOOL_FUNCS.get(name)
     if not fn:
         return {"error": f"Tool not found: {name}"}
+
+    args = args or {}
+
     try:
-        return fn(**args) if args else fn()
-    except TypeError:
-        # If function takes no kwargs
-        return fn()
+        sig = inspect.signature(fn)
+        params = sig.parameters
+
+        accepted = {k: v for k, v in args.items() if k in params}
+
+        # Identify required params not provided
+        missing_required = []
+        for p_name, p in params.items():
+            if p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+                continue
+            if p.default is inspect._empty and p_name not in accepted:
+                missing_required.append(p_name)
+
+        if missing_required:
+            return {
+                "error": f"Missing required args for {name}: {missing_required}",
+                "provided_args": list(args.keys()),
+                "accepted_args": list(accepted.keys()),
+            }
+
+        return fn(**accepted)
+
     except Exception as e:
-        return {"error": f"{type(e).__name__}: {e}"}
+        return {"error": f"{type(e).__name__}: {e}", "tool": name, "args": args}
 
 def _chat_with_tools(user_text: str, max_rounds: int = 6) -> None:
     if "messages" not in st.session_state:
@@ -325,10 +219,8 @@ def _chat_with_tools(user_text: str, max_rounds: int = 6) -> None:
         resp = _call_llm(st.session_state.messages)
         msg = resp.choices[0].message
 
-        # If the model returns tool calls, execute them
         tool_calls = getattr(msg, "tool_calls", None)
         if tool_calls:
-            # Add assistant message indicating it is calling tools
             st.session_state.messages.append({
                 "role": "assistant",
                 "content": msg.content or "",
@@ -338,9 +230,9 @@ def _chat_with_tools(user_text: str, max_rounds: int = 6) -> None:
             for tc in tool_calls:
                 tool_name = tc.function.name
                 tool_args = json.loads(tc.function.arguments or "{}")
+
                 out = _run_tool(tool_name, tool_args)
 
-                # Append tool output
                 st.session_state.messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
@@ -350,7 +242,6 @@ def _chat_with_tools(user_text: str, max_rounds: int = 6) -> None:
 
             continue
 
-        # Otherwise it's a normal assistant response — end
         st.session_state.messages.append({"role": "assistant", "content": msg.content or ""})
         break
 
@@ -360,9 +251,7 @@ def _chat_with_tools(user_text: str, max_rounds: int = 6) -> None:
 # ---------------------------
 
 st.set_page_config(page_title="Football Researcher", layout="wide")
-
 st.title("⚽ Football Researcher (Autonomous)")
-
 st.caption(f"Model: {MODEL}")
 
 if "messages" not in st.session_state:
@@ -379,24 +268,22 @@ for m in st.session_state.messages:
     with st.chat_message(m["role"]):
         st.write(m.get("content", ""))
 
-# Input
 user_msg = st.chat_input("Ask the researcher…")
 if user_msg:
     _chat_with_tools(user_msg)
     st.rerun()
 
-# Debug helpers
 with st.expander("Debug / Quick tests", expanded=False):
-    col1, col2, col3 = st.columns(3)
-    with col1:
+    c1, c2, c3 = st.columns(3)
+    with c1:
         if st.button("Test: list_columns"):
             _chat_with_tools("Call list_columns and show the result.")
             st.rerun()
-    with col2:
+    with c2:
         if st.button("Test: submit ping job"):
-            _chat_with_tools('Submit a job: task_type="ping", params={"hello":"world"}. Then show me the job_id.')
+            _chat_with_tools('Call submit_job with task_type="ping" and params={"hello":"world"} and show me the tool output.')
             st.rerun()
-    with col3:
+    with c3:
         if st.button("Clear chat"):
             st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
             st.rerun()
