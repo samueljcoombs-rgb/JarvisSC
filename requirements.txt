@@ -8,3 +8,4 @@ google-auth==2.35.0
 beautifulsoup4
 requests
 lxml
+pandas
