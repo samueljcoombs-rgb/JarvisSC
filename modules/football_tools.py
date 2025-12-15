@@ -8,6 +8,7 @@ from io import StringIO
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
+import requests
 import streamlit as st
 
 import gspread
@@ -232,18 +233,33 @@ def _sb():
 
 
 # ============================================================
-# CSV loading (SUPABASE STORAGE ONLY — csv_url removed)
+# CSV loading (Supabase Storage preferred)
 # ============================================================
 
 def _download_from_storage(bucket: str, path: str) -> bytes:
     sb = _sb()
-    return sb.storage.from_(bucket).download(path)
+    try:
+        return sb.storage.from_(bucket).download(path)
+    except StorageException as e:
+        # storage3 exceptions usually include a dict with statusCode
+        raise RuntimeError(f"Storage download failed for bucket='{bucket}', path='{path}'. Details: {e}") from e
+    except Exception as e:
+        raise RuntimeError(f"Storage download failed for bucket='{bucket}', path='{path}'. Error: {e}") from e
 
 
-def _load_csv(storage_bucket: Optional[str] = None, storage_path: Optional[str] = None) -> pd.DataFrame:
-    if not (storage_bucket and storage_path):
-        raise ValueError("Provide (storage_bucket + storage_path). csv_url is not permitted.")
-    raw = _download_from_storage(storage_bucket, storage_path)
+def _download_from_url(csv_url: str) -> bytes:
+    r = requests.get(csv_url, timeout=180)
+    r.raise_for_status()
+    return r.content
+
+
+def _load_csv(storage_bucket: Optional[str] = None, storage_path: Optional[str] = None, csv_url: Optional[str] = None) -> pd.DataFrame:
+    if storage_bucket and storage_path:
+        raw = _download_from_storage(storage_bucket, storage_path)
+    elif csv_url:
+        raw = _download_from_url(csv_url)
+    else:
+        raise ValueError("Provide either (storage_bucket + storage_path) OR csv_url.")
 
     try:
         text = raw.decode("utf-8")
@@ -253,14 +269,14 @@ def _load_csv(storage_bucket: Optional[str] = None, storage_path: Optional[str] 
     return pd.read_csv(StringIO(text), low_memory=False)
 
 
-def load_data_basic(storage_bucket: str, storage_path: str) -> Dict[str, Any]:
-    df = _load_csv(storage_bucket, storage_path)
-    return {"rows": int(df.shape[0]), "cols": int(df.shape[1]), "head": df.head(5).to_dict(orient="records")}
+def load_data_basic(storage_bucket: str = "", storage_path: str = "", csv_url: str = "") -> Dict[str, Any]:
+    df = _load_csv(storage_bucket or None, storage_path or None, csv_url or None)
+    return {"ok": True, "rows": int(df.shape[0]), "cols": int(df.shape[1]), "head": df.head(5).to_dict(orient="records")}
 
 
-def list_columns(storage_bucket: str, storage_path: str) -> Dict[str, Any]:
-    df = _load_csv(storage_bucket, storage_path)
-    return {"columns": df.columns.tolist(), "n": int(len(df.columns))}
+def list_columns(storage_bucket: str = "", storage_path: str = "", csv_url: str = "") -> Dict[str, Any]:
+    df = _load_csv(storage_bucket or None, storage_path or None, csv_url or None)
+    return {"ok": True, "columns": df.columns.tolist(), "n": int(len(df.columns))}
 
 
 # ============================================================
@@ -279,10 +295,10 @@ def _mapping() -> Dict[str, Tuple[str, str]]:
     }
 
 
-def basic_roi_for_pl_column(pl_column: str, storage_bucket: str, storage_path: str) -> Dict[str, Any]:
-    df = _load_csv(storage_bucket, storage_path)
+def basic_roi_for_pl_column(pl_column: str, storage_bucket: str = "", storage_path: str = "", csv_url: str = "") -> Dict[str, Any]:
+    df = _load_csv(storage_bucket or None, storage_path or None, csv_url or None)
     if pl_column not in df.columns:
-        return {"error": f"Missing PL column: {pl_column}"}
+        return {"ok": False, "error": f"Missing PL column: {pl_column}"}
 
     side, odds_col = _mapping().get(pl_column, ("back", ""))
     d = df[df[pl_column].notna()].copy()
@@ -292,16 +308,17 @@ def basic_roi_for_pl_column(pl_column: str, storage_bucket: str, storage_path: s
     total_pl = float(d[pl_column].sum()) if n else 0.0
 
     if n == 0:
-        return {"pl_column": pl_column, "bets": 0, "total_pl": 0.0, "roi": 0.0, "avg_pl": 0.0, "side": side}
+        return {"ok": True, "pl_column": pl_column, "bets": 0, "total_pl": 0.0, "roi": 0.0, "avg_pl": 0.0, "side": side}
 
     if side == "lay":
         if odds_col not in d.columns:
-            return {"error": f"Lay ROI requires odds col '{odds_col}' but it is missing."}
+            return {"ok": False, "error": f"Lay ROI requires odds col '{odds_col}' but it is missing."}
         odds = pd.to_numeric(d[odds_col], errors="coerce").fillna(0.0)
         liability = (odds - 1.0).clip(lower=0.0)
         denom = float(liability.sum())
         roi = (total_pl / denom) if denom > 0 else 0.0
         return {
+            "ok": True,
             "pl_column": pl_column,
             "side": "lay",
             "odds_col": odds_col,
@@ -314,6 +331,7 @@ def basic_roi_for_pl_column(pl_column: str, storage_bucket: str, storage_path: s
 
     denom = float(n)
     return {
+        "ok": True,
         "pl_column": pl_column,
         "side": "back",
         "odds_col": odds_col or None,
@@ -336,10 +354,10 @@ def submit_job(task_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
         res = sb.table("jobs").insert(row).execute()
         data = (res.data or [])
         if not data:
-            return {"error": "Insert returned no rows. Check table schema/RLS.", "raw": str(res)}
+            return {"ok": False, "error": "Insert returned no rows. Check table schema/RLS.", "raw": str(res)}
         return data[0]
     except Exception as e:
-        return {"error": f"submit_job failed: {e}"}
+        return {"ok": False, "error": f"submit_job failed: {e}"}
 
 
 def get_job(job_id: str) -> Dict[str, Any]:
@@ -348,16 +366,22 @@ def get_job(job_id: str) -> Dict[str, Any]:
         res = sb.table("jobs").select("*").eq("job_id", job_id).limit(1).execute()
         data = (res.data or [])
         if not data:
-            return {"error": "job not found", "job_id": job_id}
+            return {"ok": False, "error": "job not found", "job_id": job_id}
         return data[0]
     except Exception as e:
-        return {"error": f"get_job failed: {e}", "job_id": job_id}
+        return {"ok": False, "error": f"get_job failed: {e}", "job_id": job_id}
 
 
 def download_result(result_path: str, bucket: str = "") -> Dict[str, Any]:
     sb = _sb()
     b = (bucket or st.secrets.get("RESULTS_BUCKET") or os.getenv("RESULTS_BUCKET") or "football-results").strip()
-    raw = sb.storage.from_(b).download(result_path)
+    try:
+        raw = sb.storage.from_(b).download(result_path)
+    except StorageException as e:
+        return {"ok": False, "bucket": b, "result_path": result_path, "error": f"Storage download failed: {e}"}
+    except Exception as e:
+        return {"ok": False, "bucket": b, "result_path": result_path, "error": f"download_result failed: {e}"}
+
     try:
         return {"ok": True, "bucket": b, "result_path": result_path, "result": json.loads(raw.decode("utf-8"))}
     except Exception:
@@ -442,7 +466,7 @@ def save_chat(session_id: str, messages: List[Dict[str, Any]], title: str = "") 
     except StorageException as e:
         return {
             "ok": False,
-            "error": f"Storage upload failed. Create bucket '{bucket}' in Supabase Storage and ensure the service role key has access. Details: {e}",
+            "error": f"Storage upload failed. Create bucket '{bucket}' and ensure the service role key has access. Details: {e}",
             "bucket": bucket,
             "path": path,
         }
