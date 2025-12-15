@@ -2,527 +2,477 @@ from __future__ import annotations
 
 import os
 import json
-import time
+import uuid
 from datetime import datetime
-from io import StringIO
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
-import pandas as pd
-import requests
 import streamlit as st
+from openai import OpenAI
 
-import gspread
-from gspread.exceptions import APIError, WorksheetNotFound
-from google.oauth2.service_account import Credentials
-from supabase import create_client
-
-try:
-    # storage3 is used under supabase storage
-    from storage3.utils import StorageException
-except Exception:
-    StorageException = Exception
+from modules import football_tools as functions
 
 
 # ============================================================
-# Google Sheets tabs (agreed names)
+# OpenAI client + model
 # ============================================================
 
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive.readonly",
+def _init_client() -> OpenAI:
+    api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY")
+    if not api_key:
+        st.error("Missing OPENAI_API_KEY in Streamlit secrets.")
+        st.stop()
+    return OpenAI(api_key=api_key)
+
+
+client = _init_client()
+
+PREFERRED = (os.getenv("PREFERRED_OPENAI_MODEL") or st.secrets.get("PREFERRED_OPENAI_MODEL") or "").strip()
+MODEL = PREFERRED or "gpt-5.2-thinking"  # pinned
+
+
+# ============================================================
+# Defaults
+# ============================================================
+
+DEFAULT_STORAGE_BUCKET = os.getenv("DATA_STORAGE_BUCKET") or st.secrets.get("DATA_STORAGE_BUCKET", "football-data")
+DEFAULT_STORAGE_PATH = os.getenv("DATA_STORAGE_PATH") or st.secrets.get("DATA_STORAGE_PATH", "football_ai_NNIA.csv")
+DEFAULT_RESULTS_BUCKET = os.getenv("RESULTS_BUCKET") or st.secrets.get("RESULTS_BUCKET", "football-results")
+
+# Prevent giant conversations (browser crashes)
+MAX_MESSAGES_TO_KEEP = int(os.getenv("MAX_CHAT_MESSAGES") or st.secrets.get("MAX_CHAT_MESSAGES", 220))
+
+
+def _dataset_locator() -> Dict[str, str]:
+    return {"storage_bucket": DEFAULT_STORAGE_BUCKET, "storage_path": DEFAULT_STORAGE_PATH}
+
+
+# ============================================================
+# Tool runner
+# ============================================================
+
+def _run_tool(name: str, args: Dict[str, Any]) -> Any:
+    fn = getattr(functions, name, None)
+    if not fn:
+        raise RuntimeError(f"Unknown tool: {name}")
+    return fn(**args)
+
+
+# ============================================================
+# Tools schema for OpenAI function calling
+# ============================================================
+
+TOOLS = [
+    {"type": "function", "function": {"name": "get_dataset_overview", "description": "Get dataset_overview tab.", "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {"name": "get_research_rules", "description": "Get research_rules tab.", "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {"name": "get_column_definitions", "description": "Get column_definitions tab.", "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {"name": "get_evaluation_framework", "description": "Get evaluation_framework tab.", "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {"name": "get_recent_research_notes", "description": "Get recent research_memory rows.", "parameters": {"type": "object", "properties": {"limit": {"type": "integer"}}, "required": []}}},
+    {"type": "function", "function": {"name": "append_research_note", "description": "Append to research_memory.", "parameters": {"type": "object", "properties": {"note": {"type": "string"}, "tags": {"type": "string"}}, "required": ["note"]}}},
+    {"type": "function", "function": {"name": "get_research_state", "description": "Get research_state KV.", "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {"name": "set_research_state", "description": "Set research_state KV.", "parameters": {"type": "object", "properties": {"key": {"type": "string"}, "value": {"type": "string"}}, "required": ["key", "value"]}}},
+
+    {"type": "function", "function": {"name": "load_data_basic", "description": "Load CSV preview.", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "csv_url": {"type": "string"}}, "required": []}}},
+    {"type": "function", "function": {"name": "list_columns", "description": "List CSV columns.", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "csv_url": {"type": "string"}}, "required": []}}},
+    {"type": "function", "function": {"name": "basic_roi_for_pl_column", "description": "Row-level ROI for PL column.", "parameters": {"type": "object", "properties": {"pl_column": {"type": "string"}, "storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "csv_url": {"type": "string"}}, "required": ["pl_column"]}}},
+
+    {"type": "function", "function": {"name": "submit_job", "description": "Submit Modal worker job.", "parameters": {"type": "object", "properties": {"task_type": {"type": "string"}, "params": {"type": "object"}}, "required": ["task_type", "params"]}}},
+    {"type": "function", "function": {"name": "get_job", "description": "Get job status by job_id.", "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]}}},
+    {"type": "function", "function": {"name": "wait_for_job", "description": "Wait for completion; optionally downloads results.", "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}, "timeout_s": {"type": "integer"}, "poll_s": {"type": "integer"}, "auto_download": {"type": "boolean"}}, "required": ["job_id"]}}},
+    {"type": "function", "function": {"name": "download_result", "description": "Download a result JSON from storage by path.", "parameters": {"type": "object", "properties": {"result_path": {"type": "string"}, "bucket": {"type": "string"}}, "required": ["result_path"]}}},
+
+    # chat sessions (restored)
+    {"type": "function", "function": {"name": "list_chats", "description": "List saved chat sessions.", "parameters": {"type": "object", "properties": {"limit": {"type": "integer"}}, "required": []}}},
+    {"type": "function", "function": {"name": "save_chat", "description": "Save chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}, "messages": {"type": "array"}, "title": {"type": "string"}}, "required": ["session_id", "messages"]}}},
+    {"type": "function", "function": {"name": "load_chat", "description": "Load chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}}, "required": ["session_id"]}}},
+    {"type": "function", "function": {"name": "rename_chat", "description": "Rename chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}, "title": {"type": "string"}}, "required": ["session_id", "title"]}}},
+    {"type": "function", "function": {"name": "delete_chat", "description": "Delete chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}}, "required": ["session_id"]}}},
 ]
 
-SHEET_URL_DEFAULT = os.getenv("FOOTBALL_MEMORY_SHEET_URL") or st.secrets.get("FOOTBALL_MEMORY_SHEET_URL", "")
 
-TAB_RESEARCH_MEMORY = "research_memory"
-TAB_DATASET_OVERVIEW = "dataset_overview"
-TAB_RESEARCH_RULES = "research_rules"
-TAB_COLUMN_DEFS = "column_definitions"
-TAB_RESEARCH_STATE = "research_state"
-TAB_EVAL_FRAMEWORK = "evaluation_framework"
+# ============================================================
+# System prompt
+# ============================================================
 
+SYSTEM_PROMPT = """You are FootballResearcher — an autonomous research agent that discovers profitable, robust football trading strategy criteria.
 
-def _now_iso() -> str:
-    return datetime.utcnow().isoformat()
+Source of truth:
+- Use Google Sheet tabs: dataset_overview, research_rules, column_definitions, evaluation_framework, research_state, research_memory.
+
+Hard constraints:
+- PL columns are outcomes only and MUST NOT be used as predictive features.
+- Avoid overfitting: time-based splits; never tune thresholds on final test.
+- Always report sample sizes and stability (train vs test gap) and drawdown/losing streak in POINTS.
+- Prefer simple rules that generalise; penalise fragile, tiny samples.
+
+Objective:
+- When user asks to “design a strategy”, you should plan, run experiments (using worker jobs when needed), log results into research_memory, and present progress updates.
+- Strategies must be explicit filters: MARKET/PL column + ranges on numeric fields + optional categorical constraints.
+- Be decisive: pick what to test next. Only ask user if blocked by missing config.
+
+Important:
+- In CHAT mode you must reply conversationally and should not call tools unless explicitly asked.
+- In AUTOPILOT mode you may call tools and run jobs, but still write a short explanation of what you did.
+"""
 
 
 # ============================================================
-# Google Sheets helpers (fault tolerant)
+# Streamlit UI setup
 # ============================================================
 
-def _gs_creds() -> Credentials:
-    raw = st.secrets.get("GOOGLE_SERVICE_ACCOUNT_JSON") or os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-    if not raw:
-        raise RuntimeError("Missing GOOGLE_SERVICE_ACCOUNT_JSON in Streamlit secrets/env.")
-    data = json.loads(raw) if isinstance(raw, str) else raw
-    return Credentials.from_service_account_info(data, scopes=SCOPES)
+st.set_page_config(page_title="Football Researcher", layout="wide")
+st.title("⚽ Football Researcher")
 
 
-def _sheet_url() -> str:
-    url = st.secrets.get("FOOTBALL_MEMORY_SHEET_URL") or os.getenv("FOOTBALL_MEMORY_SHEET_URL") or SHEET_URL_DEFAULT
-    url = (url or "").strip()
-    if not url:
-        raise RuntimeError("Missing FOOTBALL_MEMORY_SHEET_URL in Streamlit secrets/env.")
-    return url
+# ============================================================
+# Session management
+# ============================================================
 
-
-@st.cache_resource(show_spinner=False)
-def _sh_cached():
-    gc = gspread.authorize(_gs_creds())
-    return gc.open_by_url(_sheet_url())
-
-
-def _ws(name: str):
-    sh = _sh_cached()
-    try:
-        return sh.worksheet(name)
-    except WorksheetNotFound:
-        raise RuntimeError(f"WorksheetNotFound: '{name}'. Create this tab in the Google Sheet.")
-
-
-def _safe_get_all_values(tab: str) -> List[List[str]]:
-    try:
-        return _ws(tab).get_all_values()
-    except Exception:
+def _load_sessions() -> List[Dict[str, Any]]:
+    out = _run_tool("list_chats", {"limit": 200})
+    if not out.get("ok", True):
+        # non-fatal: show later in sidebar
         return []
+    return out.get("sessions") or []
 
 
-def _ensure_header(tab: str, header: List[str]) -> Dict[str, Any]:
-    try:
-        ws = _ws(tab)
-        vals = ws.get_all_values()
-        if not vals:
-            ws.append_row(header, value_input_option="RAW")
-            return {"ok": True, "changed": True, "created": True}
-
-        first = [c.strip() for c in (vals[0] or [])]
-        if len(first) < len(header):
-            try:
-                ws.insert_row(header, index=1)
-                return {"ok": True, "changed": True, "inserted": True}
-            except Exception:
-                return {"ok": True, "changed": False, "note": "Header short but cannot insert (possibly protected)."}
-
-        return {"ok": True, "changed": False}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+def _new_session_id() -> str:
+    return str(uuid.uuid4())
 
 
-def _read_kv_tab(tab_name: str) -> Dict[str, str]:
-    vals = _safe_get_all_values(tab_name)
-    out: Dict[str, str] = {}
-    if not vals or len(vals) < 2:
-        return out
-    for row in vals[1:]:
-        if len(row) < 2:
-            continue
-        k = (row[0] or "").strip()
-        v = (row[1] or "").strip()
-        if k:
-            out[k] = v
-    return out
+if "session_id" not in st.session_state:
+    qp = st.query_params.get("sid")
+    st.session_state.session_id = qp if qp else _new_session_id()
+
+SESSION_ID = st.session_state.session_id
 
 
-def _read_table_tab(tab_name: str) -> List[Dict[str, str]]:
-    vals = _safe_get_all_values(tab_name)
-    if not vals or len(vals) < 2:
-        return []
-    headers = [h.strip() for h in vals[0]]
-    rows = []
-    for r in vals[1:]:
-        if not any((c or "").strip() for c in r):
-            continue
-        d = {}
-        for i, h in enumerate(headers):
-            d[h] = (r[i] if i < len(r) else "").strip()
-        rows.append(d)
-    return rows
+def _set_session(sid: str):
+    st.session_state.session_id = sid
+    st.query_params["sid"] = sid
 
 
-# ---------------- Public getters ----------------
-
-def get_dataset_overview() -> Dict[str, Any]:
-    return {"tab": TAB_DATASET_OVERVIEW, "data": _read_kv_tab(TAB_DATASET_OVERVIEW)}
-
-
-def get_research_rules() -> Dict[str, Any]:
-    return {"tab": TAB_RESEARCH_RULES, "data": _read_table_tab(TAB_RESEARCH_RULES)}
+def _init_messages_if_needed():
+    if "messages" not in st.session_state:
+        st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
 
-def get_column_definitions() -> Dict[str, Any]:
-    return {"tab": TAB_COLUMN_DEFS, "data": _read_table_tab(TAB_COLUMN_DEFS)}
+def _trim_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if len(messages) <= MAX_MESSAGES_TO_KEEP:
+        return messages
+    # keep first system message + last N-1 messages
+    system = messages[0:1]
+    tail = messages[-(MAX_MESSAGES_TO_KEEP - 1):]
+    return system + tail
 
 
-def get_evaluation_framework() -> Dict[str, Any]:
-    return {"tab": TAB_EVAL_FRAMEWORK, "data": _read_table_tab(TAB_EVAL_FRAMEWORK)}
+def _persist_chat(title: str = ""):
+    st.session_state.messages = _trim_messages(st.session_state.messages)
+    out = _run_tool("save_chat", {"session_id": SESSION_ID, "messages": st.session_state.messages, "title": title})
+    # non-fatal storage failures shouldn’t crash app
+    if isinstance(out, dict) and out.get("ok") is False:
+        st.session_state.last_chat_save_error = out
 
 
-def get_recent_research_notes(limit: int = 20) -> Dict[str, Any]:
-    vals = _safe_get_all_values(TAB_RESEARCH_MEMORY)
-    if not vals or len(vals) < 2:
-        return {"tab": TAB_RESEARCH_MEMORY, "rows": []}
-    headers = [h.strip() for h in vals[0]]
-    body = vals[1:]
-    take = body[-int(limit):] if limit else body[-20:]
-    rows = []
-    for r in take:
-        d = {}
-        for i, h in enumerate(headers):
-            d[h] = (r[i] if i < len(r) else "")
-        rows.append(d)
-    return {"tab": TAB_RESEARCH_MEMORY, "rows": rows}
+def _try_load_chat(sid: str) -> bool:
+    loaded = _run_tool("load_chat", {"session_id": sid})
+    if loaded.get("ok") and loaded.get("data", {}).get("messages"):
+        st.session_state.messages = loaded["data"]["messages"]
+        st.session_state.messages = _trim_messages(st.session_state.messages)
+        return True
+    return False
 
 
-def append_research_note(note: str, tags: str = "") -> Dict[str, Any]:
-    _ensure_header(TAB_RESEARCH_MEMORY, ["timestamp", "note", "tags"])
-    try:
-        ws = _ws(TAB_RESEARCH_MEMORY)
-        ws.append_row([_now_iso(), note, tags or ""], value_input_option="RAW")
-        return {"ok": True, "tab": TAB_RESEARCH_MEMORY}
-    except APIError as e:
-        return {"ok": False, "error": f"gspread APIError append_research_note: {e}"}
-    except Exception as e:
-        return {"ok": False, "error": f"append_research_note failed: {e}"}
+_init_messages_if_needed()
 
-
-def get_research_state() -> Dict[str, Any]:
-    return {"tab": TAB_RESEARCH_STATE, "data": _read_kv_tab(TAB_RESEARCH_STATE)}
-
-
-def set_research_state(key: str, value: str) -> Dict[str, Any]:
-    _ensure_header(TAB_RESEARCH_STATE, ["key", "value"])
-    try:
-        ws = _ws(TAB_RESEARCH_STATE)
-        vals = ws.get_all_values() or []
-
-        for idx, row in enumerate(vals[1:], start=2):
-            if len(row) >= 1 and (row[0] or "").strip() == key:
-                try:
-                    ws.update_cell(idx, 2, value)
-                    return {"ok": True, "key": key, "value": value, "updated": True}
-                except APIError as e:
-                    try:
-                        ws.append_row([key, value], value_input_option="RAW")
-                        return {"ok": True, "key": key, "value": value, "appended_fallback": True, "update_error": str(e)}
-                    except Exception as e2:
-                        return {"ok": False, "error": f"update failed ({e}); append fallback failed ({e2})"}
-
-        ws.append_row([key, value], value_input_option="RAW")
-        return {"ok": True, "key": key, "value": value, "created": True}
-
-    except APIError as e:
-        return {"ok": False, "error": f"set_research_state APIError: {e}"}
-    except Exception as e:
-        return {"ok": False, "error": f"set_research_state failed: {e}"}
+if "loaded_for_sid" not in st.session_state or st.session_state.loaded_for_sid != SESSION_ID:
+    st.session_state.loaded_for_sid = SESSION_ID
+    if not _try_load_chat(SESSION_ID):
+        _persist_chat(title=f"Session {SESSION_ID[:8]}")
 
 
 # ============================================================
-# Supabase
+# Agent mode (restores “mind”)
 # ============================================================
 
-@st.cache_resource(show_spinner=False)
-def _sb_cached():
-    url = st.secrets.get("SUPABASE_URL") or os.getenv("SUPABASE_URL")
-    key = st.secrets.get("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-    if not url or not key:
-        raise RuntimeError("Missing SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY in Streamlit secrets/env.")
-    return create_client(url, key)
-
-
-def _sb():
-    return _sb_cached()
+if "agent_mode" not in st.session_state:
+    st.session_state.agent_mode = "chat"  # chat | autopilot
 
 
 # ============================================================
-# CSV loading (Supabase Storage preferred)
+# LLM call + tool loop
 # ============================================================
 
-def _download_from_storage(bucket: str, path: str) -> bytes:
-    sb = _sb()
-    return sb.storage.from_(bucket).download(path)
+def _call_llm(messages: List[Dict[str, Any]]):
+    mode = st.session_state.agent_mode
+    if mode == "chat":
+        # Chat mode: always speak, no tools.
+        return client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            tool_choice="none",
+        )
+
+    # Autopilot mode: tools enabled.
+    return client.chat.completions.create(
+        model=MODEL,
+        messages=messages,
+        tools=TOOLS,
+        tool_choice="auto",
+    )
 
 
-def _download_from_url(csv_url: str) -> bytes:
-    r = requests.get(csv_url, timeout=180)
-    r.raise_for_status()
-    return r.content
+def _chat_with_tools(user_text: str, max_rounds: int = 6):
+    st.session_state.messages.append({"role": "user", "content": user_text})
+    st.session_state.messages = _trim_messages(st.session_state.messages)
 
+    for _ in range(max_rounds):
+        resp = _call_llm(st.session_state.messages)
+        msg = resp.choices[0].message
 
-def _load_csv(storage_bucket: Optional[str] = None, storage_path: Optional[str] = None, csv_url: Optional[str] = None) -> pd.DataFrame:
-    if storage_bucket and storage_path:
-        raw = _download_from_storage(storage_bucket, storage_path)
-    elif csv_url:
-        raw = _download_from_url(csv_url)
-    else:
-        raise ValueError("Provide either (storage_bucket + storage_path) OR csv_url.")
-
-    try:
-        text = raw.decode("utf-8")
-    except Exception:
-        text = raw.decode("latin-1", errors="replace")
-
-    return pd.read_csv(StringIO(text), low_memory=False)
-
-
-def load_data_basic(storage_bucket: str = "", storage_path: str = "", csv_url: str = "") -> Dict[str, Any]:
-    df = _load_csv(storage_bucket or None, storage_path or None, csv_url or None)
-    return {"rows": int(df.shape[0]), "cols": int(df.shape[1]), "head": df.head(5).to_dict(orient="records")}
-
-
-def list_columns(storage_bucket: str = "", storage_path: str = "", csv_url: str = "") -> Dict[str, Any]:
-    df = _load_csv(storage_bucket or None, storage_path or None, csv_url or None)
-    return {"columns": df.columns.tolist(), "n": int(len(df.columns))}
-
-
-# ============================================================
-# ROI (row-level)
-# ============================================================
-
-def _mapping() -> Dict[str, Tuple[str, str]]:
-    return {
-        "SHG PL": ("lay", "HT CS Price"),
-        "SHG 2+ PL": ("lay", "HT 2 Ahead Odds"),
-        "LU1.5 PL": ("lay", "U1.5 Odds"),
-        "LFGHU0.5 PL": ("lay", "FHGU0.5Odds"),
-        "BO 2.5 PL": ("back", "O2.5 Odds"),
-        "BO1.5 FHG PL": ("back", "FHGO1.5 Odds"),
-        "BTTS PL": ("back", "BTTS Y Odds"),
-    }
-
-
-def basic_roi_for_pl_column(pl_column: str, storage_bucket: str = "", storage_path: str = "", csv_url: str = "") -> Dict[str, Any]:
-    df = _load_csv(storage_bucket or None, storage_path or None, csv_url or None)
-    if pl_column not in df.columns:
-        return {"error": f"Missing PL column: {pl_column}"}
-
-    side, odds_col = _mapping().get(pl_column, ("back", ""))
-    d = df[df[pl_column].notna()].copy()
-    d[pl_column] = pd.to_numeric(d[pl_column], errors="coerce")
-    d = d[d[pl_column].notna()]
-    n = int(len(d))
-    total_pl = float(d[pl_column].sum()) if n else 0.0
-
-    if n == 0:
-        return {"pl_column": pl_column, "bets": 0, "total_pl": 0.0, "roi": 0.0, "avg_pl": 0.0, "side": side}
-
-    if side == "lay":
-        if odds_col not in d.columns:
-            return {"error": f"Lay ROI requires odds col '{odds_col}' but it is missing."}
-        odds = pd.to_numeric(d[odds_col], errors="coerce").fillna(0.0)
-        liability = (odds - 1.0).clip(lower=0.0)
-        denom = float(liability.sum())
-        roi = (total_pl / denom) if denom > 0 else 0.0
-        return {
-            "pl_column": pl_column,
-            "side": "lay",
-            "odds_col": odds_col,
-            "bets": n,
-            "total_pl": total_pl,
-            "denom_liability": denom,
-            "roi": float(roi),
-            "avg_pl_per_bet": float(total_pl / n),
-        }
-
-    denom = float(n)
-    return {
-        "pl_column": pl_column,
-        "side": "back",
-        "odds_col": odds_col or None,
-        "bets": n,
-        "total_pl": total_pl,
-        "denom_stake": denom,
-        "roi": float(total_pl / denom),
-        "avg_pl_per_bet": float(total_pl / denom),
-    }
-
-
-# ============================================================
-# Background jobs (Supabase table + Storage results)
-# ============================================================
-
-def submit_job(task_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
-    sb = _sb()
-    row = {"status": "queued", "task_type": task_type, "params": params or {}, "created_at": _now_iso(), "updated_at": _now_iso()}
-    try:
-        res = sb.table("jobs").insert(row).execute()
-        data = (res.data or [])
-        if not data:
-            return {"error": "Insert returned no rows. Check table schema/RLS.", "raw": str(res)}
-        return data[0]
-    except Exception as e:
-        return {"error": f"submit_job failed: {e}"}
-
-
-def get_job(job_id: str) -> Dict[str, Any]:
-    sb = _sb()
-    try:
-        res = sb.table("jobs").select("*").eq("job_id", job_id).limit(1).execute()
-        data = (res.data or [])
-        if not data:
-            return {"error": "job not found", "job_id": job_id}
-        return data[0]
-    except Exception as e:
-        return {"error": f"get_job failed: {e}", "job_id": job_id}
-
-
-def download_result(result_path: str, bucket: str = "") -> Dict[str, Any]:
-    sb = _sb()
-    b = (bucket or st.secrets.get("RESULTS_BUCKET") or os.getenv("RESULTS_BUCKET") or "football-results").strip()
-    raw = sb.storage.from_(b).download(result_path)
-    try:
-        return {"ok": True, "bucket": b, "result_path": result_path, "result": json.loads(raw.decode("utf-8"))}
-    except Exception:
-        return {"ok": True, "bucket": b, "result_path": result_path, "raw_text": raw.decode("latin-1", errors="replace")}
-
-
-def wait_for_job(job_id: str, timeout_s: int = 300, poll_s: int = 5, auto_download: bool = True) -> Dict[str, Any]:
-    deadline = time.time() + int(timeout_s or 300)
-    poll = max(1, int(poll_s or 5))
-    last_job: Dict[str, Any] = {}
-
-    while time.time() < deadline:
-        last_job = get_job(job_id)
-        if last_job.get("error"):
-            return {"status": "error", "error": last_job.get("error"), "job": last_job}
-
-        status = (last_job.get("status") or "").lower()
-        if status in ("done", "error"):
-            out = {"status": status, "job": last_job}
-            if status == "done" and auto_download and last_job.get("result_path"):
-                out["result"] = download_result(last_job["result_path"]).get("result")
-            return out
-
-        time.sleep(poll)
-
-    return {"status": "timeout", "job": last_job, "job_id": job_id}
-
-
-# ============================================================
-# Chat sessions (Supabase Storage)
-# ============================================================
-
-def _chat_bucket() -> str:
-    return (st.secrets.get("CHAT_BUCKET") or os.getenv("CHAT_BUCKET") or "football-chats").strip()
-
-
-def _chat_index_path() -> str:
-    return "sessions/index.json"
-
-
-def _load_chat_index(sb) -> Dict[str, Any]:
-    bucket = _chat_bucket()
-    try:
-        raw = sb.storage.from_(bucket).download(_chat_index_path())
-        return json.loads(raw.decode("utf-8"))
-    except Exception:
-        return {"sessions": []}
-
-
-def _save_chat_index(sb, index: Dict[str, Any]) -> None:
-    bucket = _chat_bucket()
-    payload = json.dumps(index, ensure_ascii=False, indent=2).encode("utf-8")
-    sb.storage.from_(bucket).upload(path=_chat_index_path(), file=payload, file_options={"content-type": "application/json", "upsert": "true"})
-
-
-def list_chats(limit: int = 200) -> Dict[str, Any]:
-    sb = _sb()
-    bucket = _chat_bucket()
-    idx = _load_chat_index(sb)
-    sessions = idx.get("sessions") or []
-    sessions = sessions[-int(limit):] if limit else sessions[-200:]
-    return {"ok": True, "bucket": bucket, "sessions": sessions}
-
-
-def save_chat(session_id: str, messages: List[Dict[str, Any]], title: str = "") -> Dict[str, Any]:
-    sb = _sb()
-    bucket = _chat_bucket()
-    path = f"sessions/{session_id}.json"
-
-    payload = json.dumps(
-        {"session_id": session_id, "title": title or "", "messages": messages, "saved_at": _now_iso()},
-        ensure_ascii=False,
-        indent=2,
-    ).encode("utf-8")
-
-    try:
-        sb.storage.from_(bucket).upload(path=path, file=payload, file_options={"content-type": "application/json", "upsert": "true"})
-    except StorageException as e:
-        # Non-fatal, clear guidance
-        return {
-            "ok": False,
-            "error": f"Storage upload failed. Create bucket '{bucket}' in Supabase Storage and ensure the service role key has access. Details: {e}",
-            "bucket": bucket,
-            "path": path,
-        }
-    except Exception as e:
-        return {"ok": False, "error": f"save_chat failed: {e}", "bucket": bucket, "path": path}
-
-    # Update index
-    try:
-        idx = _load_chat_index(sb)
-        sessions = idx.get("sessions") or []
-        existing = next((s for s in sessions if s.get("session_id") == session_id), None)
-        if existing:
-            existing["saved_at"] = _now_iso()
-            if title:
-                existing["title"] = title
+        # Always append assistant message, even if empty (so UI doesn’t feel “dead”)
+        if msg.content:
+            st.session_state.messages.append({"role": "assistant", "content": msg.content})
         else:
-            sessions.append({"session_id": session_id, "title": title or f"Session {session_id[:8]}", "saved_at": _now_iso()})
-        idx["sessions"] = sessions
-        _save_chat_index(sb, idx)
-    except Exception:
-        # don’t fail the save if index update fails
-        pass
+            # In chat mode, empty content is undesirable; add a friendly fallback
+            if st.session_state.agent_mode == "chat":
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": "I’m here — ask me anything about the model, the system, or strategies. What do you want to do next?"}
+                )
 
-    return {"ok": True, "bucket": bucket, "path": path}
+        tool_calls = getattr(msg, "tool_calls", None)
 
-
-def load_chat(session_id: str) -> Dict[str, Any]:
-    sb = _sb()
-    bucket = _chat_bucket()
-    path = f"sessions/{session_id}.json"
-    try:
-        raw = sb.storage.from_(bucket).download(path)
-        return {"ok": True, "bucket": bucket, "path": path, "data": json.loads(raw.decode("utf-8"))}
-    except Exception:
-        return {"ok": False, "bucket": bucket, "path": path, "data": {}}
-
-
-def rename_chat(session_id: str, title: str) -> Dict[str, Any]:
-    sb = _sb()
-    idx = _load_chat_index(sb)
-    sessions = idx.get("sessions") or []
-    found = False
-    for s in sessions:
-        if s.get("session_id") == session_id:
-            s["title"] = title
-            s["saved_at"] = _now_iso()
-            found = True
+        # In chat mode we explicitly disabled tools, so we stop here.
+        if st.session_state.agent_mode == "chat":
             break
-    if not found:
-        sessions.append({"session_id": session_id, "title": title, "saved_at": _now_iso()})
-    idx["sessions"] = sessions
+
+        if not tool_calls:
+            break
+
+        # Execute tool calls
+        for tc in tool_calls:
+            name = tc.function.name
+            args = json.loads(tc.function.arguments or "{}")
+            out = _run_tool(name, args)
+
+            # MUST be response to tool_call_id
+            st.session_state.messages.append(
+                {"role": "tool", "tool_call_id": tc.id, "content": json.dumps(out, ensure_ascii=False)}
+            )
+
+        st.session_state.messages = _trim_messages(st.session_state.messages)
+
+    _persist_chat()
+
+
+# ============================================================
+# Autopilot receipt + structured logging
+# ============================================================
+
+def _format_rule(rule_obj: Dict[str, Any]) -> str:
+    parts = []
+    for cond in rule_obj.get("rule", []):
+        parts.append(f"{cond.get('col')} in [{cond.get('min')}, {cond.get('max')}]")
+    return " AND ".join(parts) if parts else "(no rule)"
+
+
+def _structured_note(worker_payload: Dict[str, Any], job_id: str, result_path: str) -> str:
+    result = worker_payload.get("result", {}) if isinstance(worker_payload, dict) else {}
+    picked = result.get("picked") or {}
+    search = result.get("search") or {}
+    top_rules = (search.get("top_rules") or [])[:3]
+
+    note = {
+        "ts": datetime.utcnow().isoformat(),
+        "kind": "strategy_search_result",
+        "job_id": job_id,
+        "result_path": result_path,
+        "picked": picked,
+        "top_rules": top_rules,
+    }
+    return json.dumps(note, ensure_ascii=False)
+
+
+def _autopilot_one_cycle():
+    params = {
+        "storage_bucket": DEFAULT_STORAGE_BUCKET,
+        "storage_path": DEFAULT_STORAGE_PATH,
+        "_results_bucket": DEFAULT_RESULTS_BUCKET,
+        "time_split_ratio": 0.7,
+    }
+
+    submitted = _run_tool("submit_job", {"task_type": "strategy_search", "params": params})
+    job_id = submitted.get("job_id")
+
+    st.session_state.last_autopilot = {"stage": "submitted", "submitted": submitted}
+
+    if not job_id:
+        st.session_state.last_autopilot["stage"] = "error"
+        st.session_state.last_autopilot["error"] = "No job_id returned from submit_job"
+        return
+
+    waited = _run_tool("wait_for_job", {"job_id": job_id, "timeout_s": 900, "poll_s": 5, "auto_download": True})
+    st.session_state.last_autopilot["waited"] = waited
+
+    # state writes are non-fatal
+    _run_tool("set_research_state", {"key": "last_autopilot_ran_at", "value": datetime.utcnow().isoformat()})
+    _run_tool("set_research_state", {"key": "last_job_id", "value": job_id})
+
+    if waited.get("status") != "done":
+        st.session_state.last_autopilot["stage"] = waited.get("status")
+        return
+
+    job = waited.get("job") or {}
+    result_path = job.get("result_path") or ""
+    result_json = waited.get("result") or {}
+
+    note = _structured_note(result_json, job_id, result_path)
+    _run_tool("append_research_note", {"note": note, "tags": "autopilot,worker,structured"})
+
+    # additional state helpful for “learning”
     try:
-        _save_chat_index(sb, idx)
+        picked = (result_json.get("result") or {}).get("picked") or {}
+        top = ((result_json.get("result") or {}).get("search") or {}).get("top_rules") or []
+        sig = ""
+        if top:
+            sig = "|".join(
+                [f"{c.get('col')}:[{c.get('min')},{c.get('max')}]" for c in (top[0].get("rule") or [])]
+            )
+        _run_tool("set_research_state", {"key": "last_market", "value": str(picked.get("pl_column", ""))})
+        _run_tool("set_research_state", {"key": "last_rule_signature", "value": sig})
+        _run_tool("set_research_state", {"key": "last_result_path", "value": result_path})
     except Exception:
         pass
-    return {"ok": True, "session_id": session_id, "title": title}
+
+    st.session_state.last_autopilot["stage"] = "done"
 
 
-def delete_chat(session_id: str) -> Dict[str, Any]:
-    sb = _sb()
-    bucket = _chat_bucket()
+# ============================================================
+# Sidebar UI
+# ============================================================
+
+with st.sidebar:
+    st.caption(f"Model: `{MODEL}`")
+    st.caption(f"Data: `{DEFAULT_STORAGE_BUCKET}/{DEFAULT_STORAGE_PATH}`")
+    st.caption(f"Results: `{DEFAULT_RESULTS_BUCKET}`")
+
+    st.radio("Agent mode", ["chat", "autopilot"], key="agent_mode")
+    st.divider()
+
+    # Chat bucket issues (non-fatal warning)
+    if st.session_state.get("last_chat_save_error"):
+        st.warning(f"Chat persistence warning: {st.session_state.last_chat_save_error}")
+        if st.button("Clear chat save warning"):
+            st.session_state.last_chat_save_error = None
+
+    # --- sessions ---
+    st.subheader("💾 Chat Sessions")
+    sessions = _load_sessions()
+    sessions_display = list(reversed(sessions))
+
+    options = [{"session_id": SESSION_ID, "title": f"(current) {SESSION_ID[:8]}"}] + [
+        {"session_id": s.get("session_id"), "title": s.get("title") or s.get("session_id")[:8]}
+        for s in sessions_display
+        if s.get("session_id") and s.get("session_id") != SESSION_ID
+    ]
+
+    labels = [f"{o['title']} — {o['session_id'][:8]}" for o in options]
+    chosen = st.selectbox("Select session", options=list(range(len(options))), format_func=lambda i: labels[i], index=0)
+
+    if options[chosen]["session_id"] != SESSION_ID:
+        _set_session(options[chosen]["session_id"])
+        st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        _try_load_chat(st.session_state.session_id)
+        st.rerun()
+
+    colA, colB = st.columns(2)
+    with colA:
+        if st.button("➕ New"):
+            sid = _new_session_id()
+            _set_session(sid)
+            st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+            _persist_chat(title=f"Session {sid[:8]}")
+            st.rerun()
+
+    with colB:
+        if st.button("💾 Save"):
+            _persist_chat()
+            st.success("Saved.")
+
+    new_title = st.text_input("Rename current session", value="")
+    if st.button("Rename"):
+        if new_title.strip():
+            _run_tool("rename_chat", {"session_id": SESSION_ID, "title": new_title.strip()})
+            _persist_chat(title=new_title.strip())
+            st.success("Renamed.")
+            st.rerun()
+
+    if st.button("🗑️ Delete current session"):
+        _run_tool("delete_chat", {"session_id": SESSION_ID})
+        sid = _new_session_id()
+        _set_session(sid)
+        st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        _persist_chat(title=f"Session {sid[:8]}")
+        st.success("Deleted + created new.")
+        st.rerun()
+
+    st.divider()
+
+    # --- autopilot ---
+    st.subheader("🤖 Autopilot")
+    if st.button("Run 1 autopilot cycle"):
+        _autopilot_one_cycle()
+        st.rerun()
+
+    st.divider()
+    st.subheader("🧪 Quick tools")
+    if st.button("Recent research_memory (10)"):
+        st.json(_run_tool("get_recent_research_notes", {"limit": 10}))
+
+    if st.button("Research state"):
+        st.json(_run_tool("get_research_state", {}))
+
+    if st.button("List CSV columns"):
+        loc = _dataset_locator()
+        st.json(_run_tool("list_columns", {**loc}))
+
+
+# ============================================================
+# Main panels: Autopilot receipt + Chat
+# ============================================================
+
+st.subheader("🧾 Autopilot Receipt")
+last = st.session_state.get("last_autopilot")
+if not last:
+    st.info("No autopilot run in this session yet.")
+else:
+    st.json(last)
     try:
-        sb.storage.from_(bucket).remove([f"sessions/{session_id}.json"])
+        waited = last.get("waited") or {}
+        if waited.get("status") == "done":
+            payload = waited.get("result") or {}
+            picked = (payload.get("result") or {}).get("picked") or {}
+            top_rules = ((payload.get("result") or {}).get("search") or {}).get("top_rules") or []
+            if top_rules:
+                st.markdown(
+                    f"**Picked:** `{picked.get('pl_column')}` (side={picked.get('side')}, odds_col={picked.get('odds_col')})  \n"
+                    f"**Top rule:** `{_format_rule(top_rules[0])}`  \n"
+                    f"**Test ROI:** `{top_rules[0].get('test', {}).get('roi')}` | **Test bets:** `{top_rules[0].get('test', {}).get('bets')}`  \n"
+                    f"**Game-level DD (pts):** `{top_rules[0].get('test_game_level', {}).get('max_dd')}` | "
+                    f"**Losing streak (bets/pts):** `{top_rules[0].get('test_game_level', {}).get('losing_streak', {}).get('bets')}` / "
+                    f"`{top_rules[0].get('test_game_level', {}).get('losing_streak', {}).get('pl')}`"
+                )
     except Exception:
         pass
 
-    idx = _load_chat_index(sb)
-    sessions = idx.get("sessions") or []
-    idx["sessions"] = [s for s in sessions if s.get("session_id") != session_id]
-    try:
-        _save_chat_index(sb, idx)
-    except Exception:
-        pass
 
-    return {"ok": True, "deleted": True, "session_id": session_id}
+st.subheader("💬 Chat")
+for m in st.session_state.messages:
+    if m["role"] == "system":
+        continue
+    with st.chat_message(m["role"]):
+        st.markdown(m.get("content", ""))
+
+user_msg = st.chat_input("Ask the researcher…")
+if user_msg:
+    _chat_with_tools(user_msg)
+    st.rerun()
