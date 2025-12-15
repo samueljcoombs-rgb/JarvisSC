@@ -1,5 +1,4 @@
 # modules/football_tools.py
-
 from __future__ import annotations
 
 import ast
@@ -19,9 +18,9 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 
-# =========================
-# Paths / Registry
-# =========================
+# ============================================================
+# Paths / Registry (guardrails for permanent code edits)
+# ============================================================
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 MODULES_DIR = BASE_DIR / "modules"
@@ -37,7 +36,6 @@ PROTECTED_FILES = {
     "__init__.py",
 }
 
-# Owned modules registry (football bot can edit what it creates)
 def _load_registry() -> Dict[str, Any]:
     if REGISTRY_PATH.exists():
         try:
@@ -59,9 +57,9 @@ def _add_owned(fname: str) -> None:
         _save_registry(reg)
 
 
-# =========================
+# ============================================================
 # Dataset loader (Google Drive CSV)
-# =========================
+# ============================================================
 
 # Your CSV file ID (already working)
 GDRIVE_FILE_ID = "1aYMC7YJ1qim-132aDc50hhNMdDm20WbC"
@@ -84,13 +82,10 @@ def _load_full_df() -> pd.DataFrame:
     return _load_full_df_cached(DATA_URL)
 
 
-# =========================
-# Google Sheets (Knowledge Base + Memory)
-# =========================
+# ============================================================
+# Google Sheets (Knowledge Base + Memory + State)
+# ============================================================
 
-# Reuse your existing secret pattern (same as todos_panel.py)
-# - GOOGLE_SERVICE_ACCOUNT_JSON: service account JSON as string
-# - FOOTBALL_MEMORY_SHEET_URL: URL of the Google Sheet doc (same doc that has multiple tabs)
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -114,41 +109,42 @@ def _ws(name: str):
     return _gs_doc().worksheet(name)
 
 
-# ---- Knowledge readers ----
+# ------------------------
+# Knowledge base readers
+# ------------------------
+
 def get_dataset_overview() -> Dict[str, Any]:
     try:
-        records = _ws("dataset_overview").get_all_records()
-        return {"dataset_overview": records}
+        return {"dataset_overview": _ws("dataset_overview").get_all_records()}
     except Exception as e:
         return {"error": f"Failed to load dataset_overview: {e}"}
 
 def get_column_definitions() -> Dict[str, Any]:
     try:
-        records = _ws("column_definitions").get_all_records()
-        return {"column_definitions": records}
+        return {"column_definitions": _ws("column_definitions").get_all_records()}
     except Exception as e:
         return {"error": f"Failed to load column_definitions: {e}"}
 
 def get_research_rules() -> Dict[str, Any]:
     try:
-        records = _ws("research_rules").get_all_records()
-        return {"research_rules": records}
+        return {"research_rules": _ws("research_rules").get_all_records()}
     except Exception as e:
         return {"error": f"Failed to load research_rules: {e}"}
 
 def get_evaluation_framework() -> Dict[str, Any]:
     try:
-        records = _ws("evaluation_framework").get_all_records()
-        return {"evaluation_framework": records}
+        return {"evaluation_framework": _ws("evaluation_framework").get_all_records()}
     except Exception as e:
         return {"error": f"Failed to load evaluation_framework: {e}"}
 
 
-# ---- Permanent research memory ----
+# ------------------------
+# Permanent research memory
+# ------------------------
+
 def append_research_note(note: str, tags: Optional[List[str]] = None) -> Dict[str, Any]:
     """
-    Appends to the 'research_memory' tab: [timestamp, note, tags]
-    Permanent storage in Google Sheets.
+    Appends to 'research_memory' tab: timestamp | note | tags
     """
     tags = tags or []
     ts = datetime.datetime.utcnow().isoformat()
@@ -166,101 +162,54 @@ def get_recent_research_notes(limit: int = 20) -> Dict[str, Any]:
         return {"error": f"Read failed: {e}"}
 
 
-# =========================
-# Module management tools
-# =========================
+# ------------------------
+# Research state (persistent autonomy)
+# ------------------------
 
-def list_modules() -> Dict[str, Any]:
-    modules = []
-    for p in MODULES_DIR.glob("*.py"):
-        name = p.name
-        modules.append({
-            "name": name,
-            "owned": _is_owned(name),
-            "protected": name in PROTECTED_FILES,
-        })
-    return {"modules": modules}
-
-def read_module(path: str) -> Dict[str, Any]:
-    name = Path(path).name
-    full = MODULES_DIR / name
-    if not full.exists():
-        return {"error": f"Module not found: {name}"}
+def get_research_state() -> Dict[str, Any]:
+    """
+    Reads 'research_state' tab (key/value) into a dict.
+    Expected headers: key | value
+    """
     try:
-        return {"path": str(full), "code": full.read_text(encoding="utf-8")}
+        rows = _ws("research_state").get_all_records()
+        state = {}
+        for r in rows:
+            k = str(r.get("key", "")).strip()
+            v = str(r.get("value", "")).strip()
+            if k:
+                state[k] = v
+        return {"research_state": state}
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": f"Failed to read research_state: {e}"}
 
-def write_module(path: str, code: str) -> Dict[str, Any]:
+def set_research_state(key: str, value: str) -> Dict[str, Any]:
     """
-    Creates or updates /modules/<path> but:
-      - blocks protected modules
-      - blocks editing non-owned existing modules
-      - backs up before overwrite
-      - validates syntax
+    Upserts key/value into 'research_state'.
     """
-    name = Path(path).name
-    if not name.endswith(".py"):
-        name += ".py"
-    full = MODULES_DIR / name
-
-    if name in PROTECTED_FILES:
-        return {"error": f"Blocked: {name} is protected."}
-
-    if full.exists() and not _is_owned(name):
-        return {"error": f"Blocked: {name} exists and is not owned by Football Bot."}
-
     try:
-        ast.parse(code)
-    except SyntaxError as e:
-        return {"error": f"Syntax error: {e}"}
+        sheet = _ws("research_state")
+        rows = sheet.get_all_records()  # list of dicts
+        # find row index (1-based in Sheets; +2 because header is row 1 and records start row 2)
+        target_row = None
+        for i, r in enumerate(rows, start=2):
+            if str(r.get("key", "")).strip() == key:
+                target_row = i
+                break
 
-    if full.exists():
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup = MODULES_DIR / f"{name}.bak_{ts}"
-        try:
-            backup.write_text(full.read_text(encoding="utf-8"), encoding="utf-8")
-        except Exception:
-            pass
-
-    try:
-        full.write_text(code, encoding="utf-8")
-        _add_owned(name)
-        return {"status": "success", "path": str(full), "owned": True}
-    except Exception as e:
-        return {"error": f"Write failed: {e}"}
-
-def run_module(path: str, function_name: str, args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """
-    Import a module under /modules and run function_name(**args).
-    """
-    args = args or {}
-    name = Path(path).name
-    if not name.endswith(".py"):
-        name += ".py"
-    full = MODULES_DIR / name
-    if not full.exists():
-        return {"error": f"Module not found: {name}"}
-
-    module_name = f"modules.{name[:-3]}"
-    try:
-        if module_name in importlib.sys.modules:
-            mod = importlib.reload(importlib.sys.modules[module_name])
+        if target_row is None:
+            sheet.append_row([key, value])
         else:
-            mod = importlib.import_module(module_name)
+            sheet.update(f"B{target_row}", value)
 
-        if not hasattr(mod, function_name):
-            return {"error": f"Function {function_name} not found in {name}"}
-
-        fn = getattr(mod, function_name)
-        return {"result": fn(**args)}
+        return {"status": "ok", "key": key, "value": value}
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": f"Failed to write research_state: {e}"}
 
 
-# =========================
-# Basic data inspection
-# =========================
+# ============================================================
+# Data inspection tools
+# ============================================================
 
 def load_data_basic(limit: int = 200) -> Dict[str, Any]:
     try:
@@ -281,9 +230,9 @@ def list_columns() -> Dict[str, Any]:
         return {"error": str(e)}
 
 
-# =========================
-# Strategy evaluation (correct ROI + streaks + time split)
-# =========================
+# ============================================================
+# Strategy evaluation (Back/Lay ROI + ID streaks + time split)
+# ============================================================
 
 # PL -> odds mapping (your confirmed mappings)
 PL_ODDS_MAP: Dict[str, str] = {
@@ -309,62 +258,51 @@ PL_SIDE_MAP: Dict[str, str] = {
 }
 
 def _to_datetime_safe(s: pd.Series) -> pd.Series:
-    # Handles DATE column that might be datetime-like already or string.
-    return pd.to_datetime(s, errors="coerce", utc=False)
+    return pd.to_datetime(s, errors="coerce")
+
+def _time_split(df: pd.DataFrame, split: float = 0.7) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    if "DATE" not in df.columns:
+        raise RuntimeError("DATE column missing; cannot time split.")
+    d = df.copy()
+    d["DATE"] = _to_datetime_safe(d["DATE"])
+    d = d[d["DATE"].notna()].sort_values("DATE").reset_index(drop=True)
+    if d.empty:
+        return d, d
+    idx = int(len(d) * split)
+    idx = max(1, min(idx, len(d) - 1)) if len(d) > 1 else 1
+    return d.iloc[:idx].copy(), d.iloc[idx:].copy()
 
 def _row_level_roi(df: pd.DataFrame, pl_col: str, side: str, odds_col: str) -> Dict[str, Any]:
     """
     ROI/exposure uses ROWS (bets). Duplicate IDs imply multiple bets.
     back: stake=1 per row -> ROI = PL / bets
     lay: risk per row = (odds-1) -> ROI = PL / sum(risk)
+    Units: points
     """
     d = df[df[pl_col].notna()].copy()
-    d = d[d[pl_col].apply(lambda x: pd.notna(x))]
     bets = int(len(d))
     if bets == 0:
-        return {
-            "bets": 0,
-            "total_pl": 0.0,
-            "roi": None,
-            "total_stake": 0.0,
-            "total_liability": 0.0,
-            "avg_pl_per_bet": None,
-        }
+        return {"bets": 0, "total_pl": 0.0, "roi": None, "total_stake": 0.0, "total_liability": 0.0, "avg_pl_per_bet": None}
 
-    total_pl = float(pd.to_numeric(d[pl_col], errors="coerce").fillna(0.0).sum())
+    d[pl_col] = pd.to_numeric(d[pl_col], errors="coerce").fillna(0.0)
+    total_pl = float(d[pl_col].sum())
     avg_pl = total_pl / bets
 
     if side == "back":
         total_stake = float(bets)  # 1pt each
         roi = total_pl / total_stake if total_stake > 0 else None
-        return {
-            "bets": bets,
-            "total_pl": total_pl,
-            "total_stake": total_stake,
-            "total_liability": 0.0,
-            "roi": roi,
-            "avg_pl_per_bet": avg_pl,
-        }
+        return {"bets": bets, "total_pl": total_pl, "total_stake": total_stake, "total_liability": 0.0, "roi": roi, "avg_pl_per_bet": avg_pl}
 
-    # lay
-    # risk = sum(odds - 1) for each row, assuming 1pt stake liability
     odds = pd.to_numeric(d.get(odds_col), errors="coerce")
     risk = (odds - 1.0).clip(lower=0.0)
     total_liability = float(risk.fillna(0.0).sum())
     roi = total_pl / total_liability if total_liability > 0 else None
-    return {
-        "bets": bets,
-        "total_pl": total_pl,
-        "total_stake": 0.0,
-        "total_liability": total_liability,
-        "roi": roi,
-        "avg_pl_per_bet": avg_pl,
-    }
+    return {"bets": bets, "total_pl": total_pl, "total_stake": 0.0, "total_liability": total_liability, "roi": roi, "avg_pl_per_bet": avg_pl}
 
 def _id_aggregated_series(df: pd.DataFrame, pl_col: str) -> pd.DataFrame:
     """
     For losing streak / drawdown:
-      - aggregate by ID to avoid double-counting same game in streak logic
+      - aggregate by ID to avoid double-counting same game
       - pl_id = sum(pl_col)
       - date_id = min(DATE)
     """
@@ -374,7 +312,6 @@ def _id_aggregated_series(df: pd.DataFrame, pl_col: str) -> pd.DataFrame:
 
     if "ID" not in d.columns:
         raise RuntimeError("ID column missing; cannot compute streaks/drawdown.")
-
     if "DATE" not in d.columns:
         raise RuntimeError("DATE column missing; cannot compute streaks/drawdown.")
 
@@ -385,14 +322,14 @@ def _id_aggregated_series(df: pd.DataFrame, pl_col: str) -> pd.DataFrame:
         DATE=("DATE", "min"),
         pl_id=(pl_col, "sum"),
     )
-    g = g.sort_values("DATE").reset_index(drop=True)
+    g = g[g["DATE"].notna()].sort_values("DATE").reset_index(drop=True)
     return g
 
 def _longest_losing_streak(pl_series: List[float]) -> Dict[str, Any]:
     """
-    Losing streak on a sequence of per-game PL values:
-      - losing bet defined as PL < 0
-      - track longest consecutive losing run by count and by cumulative PL
+    Losing streak based on per-game PL series (points):
+      - losing game defined as PL < 0
+      - track longest consecutive losing run by count and cumulative points
     """
     best_count = 0
     best_pl = 0.0  # most negative cumulative run
@@ -403,20 +340,18 @@ def _longest_losing_streak(pl_series: List[float]) -> Dict[str, Any]:
         if pl < 0:
             cur_count += 1
             cur_pl += float(pl)
-            if cur_count > best_count:
-                best_count = cur_count
-            # best_pl is most negative
+            best_count = max(best_count, cur_count)
             if cur_pl < best_pl:
                 best_pl = cur_pl
         else:
             cur_count = 0
             cur_pl = 0.0
 
-    return {"longest_losing_streak_bets": int(best_count), "longest_losing_streak_pl": float(best_pl)}
+    return {"longest_losing_streak_bets": int(best_count), "longest_losing_streak_pts": float(best_pl)}
 
 def _max_drawdown(pl_series: List[float]) -> Dict[str, Any]:
     """
-    Max drawdown on cumulative PL series (per-game aggregated).
+    Max drawdown on cumulative PL (points) for the per-game series.
     """
     cum = 0.0
     peak = 0.0
@@ -428,23 +363,7 @@ def _max_drawdown(pl_series: List[float]) -> Dict[str, Any]:
         dd = cum - peak
         if dd < max_dd:
             max_dd = dd
-    return {"max_drawdown": float(max_dd)}
-
-def _time_split(df: pd.DataFrame, split: float = 0.7) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Split chronologically by DATE (train first, test last).
-    """
-    if "DATE" not in df.columns:
-        raise RuntimeError("DATE column missing; cannot time split.")
-    d = df.copy()
-    d["DATE"] = _to_datetime_safe(d["DATE"])
-    d = d[d["DATE"].notna()].sort_values("DATE").reset_index(drop=True)
-    if d.empty:
-        return d, d
-
-    idx = int(len(d) * split)
-    idx = max(1, min(idx, len(d) - 1)) if len(d) > 1 else 1
-    return d.iloc[:idx].copy(), d.iloc[idx:].copy()
+    return {"max_drawdown_pts": float(max_dd)}
 
 def strategy_performance_summary(
     pl_column: str,
@@ -459,10 +378,7 @@ def strategy_performance_summary(
       - losing streak / drawdown at GAME level (ID aggregated): duplicates collapsed
       - train/test comparison by DATE split
 
-    Inputs:
-      pl_column: PL column name
-      side: "back" or "lay" (optional; inferred if omitted)
-      odds_column: corresponding odds column (optional; inferred if omitted)
+    Units: points
     """
     try:
         df = _load_full_df()
@@ -480,17 +396,13 @@ def strategy_performance_summary(
 
     if side_use not in {"back", "lay"}:
         return {"error": f"side must be 'back' or 'lay'. Got: {side}. (Could not infer)"}
-
     if not odds_use:
         return {"error": f"odds_column missing and could not infer for {pl_column}."}
-
     if odds_use not in df.columns:
         return {"error": f"Odds column not found: {odds_use} (for {pl_column})"}
 
-    # Overall bet-level ROI/exposure
     overall = _row_level_roi(df, pl_column, side_use, odds_use)
 
-    # Train/Test bet-level
     try:
         train_df, test_df = _time_split(df, split=time_split_ratio)
         train = _row_level_roi(train_df, pl_column, side_use, odds_use)
@@ -505,8 +417,9 @@ def strategy_performance_summary(
         "overall_bet_level": overall,
         "train_bet_level": train,
         "test_bet_level": test,
+        "units": "points",
         "notes": {
-            "roi_definition": "back: PL / bets (1pt each); lay: PL / sum(odds-1) liability",
+            "roi_definition": "back: PL/bets (1pt each); lay: PL/sum(odds-1) liability",
             "duplicate_id_handling": "ROI uses rows (duplicates count as multiple bets). Streaks/drawdown aggregate by ID.",
         },
     }
@@ -515,24 +428,15 @@ def strategy_performance_summary(
         try:
             g = _id_aggregated_series(df, pl_column)
             pl_series = g["pl_id"].astype(float).tolist()
-            out["game_level"] = {
-                "games": int(len(g)),
-                **_longest_losing_streak(pl_series),
-                **_max_drawdown(pl_series),
-            }
+            out["game_level"] = {"games": int(len(g)), **_longest_losing_streak(pl_series), **_max_drawdown(pl_series)}
         except Exception as e:
             out["game_level_error"] = str(e)
 
-        # Streaks / drawdown on test only (most important)
         try:
             _, test_df2 = _time_split(df, split=time_split_ratio)
             g2 = _id_aggregated_series(test_df2, pl_column)
             pl_series2 = g2["pl_id"].astype(float).tolist()
-            out["test_game_level"] = {
-                "games": int(len(g2)),
-                **_longest_losing_streak(pl_series2),
-                **_max_drawdown(pl_series2),
-            }
+            out["test_game_level"] = {"games": int(len(g2)), **_longest_losing_streak(pl_series2), **_max_drawdown(pl_series2)}
         except Exception as e:
             out["test_game_level_error"] = str(e)
 
@@ -543,16 +447,102 @@ def strategy_performance_batch(
     time_split_ratio: float = 0.7,
     compute_streaks: bool = True,
 ) -> Dict[str, Any]:
-    """
-    Evaluate multiple PL columns in one call (prevents the bot trying to do parallel tool spam).
-    """
     results = []
     for c in pl_columns:
-        results.append(strategy_performance_summary(
-            pl_column=c,
-            side=PL_SIDE_MAP.get(c),
-            odds_column=PL_ODDS_MAP.get(c),
-            time_split_ratio=time_split_ratio,
-            compute_streaks=compute_streaks,
-        ))
+        results.append(
+            strategy_performance_summary(
+                pl_column=c,
+                side=PL_SIDE_MAP.get(c),
+                odds_column=PL_ODDS_MAP.get(c),
+                time_split_ratio=time_split_ratio,
+                compute_streaks=compute_streaks,
+            )
+        )
     return {"results": results}
+
+
+# ============================================================
+# Permanent code tools (guardrailed)
+# ============================================================
+
+def list_modules() -> Dict[str, Any]:
+    modules = []
+    for p in MODULES_DIR.glob("*.py"):
+        name = p.name
+        modules.append({"name": name, "owned": _is_owned(name), "protected": name in PROTECTED_FILES})
+    return {"modules": modules}
+
+def read_module(path: str) -> Dict[str, Any]:
+    name = Path(path).name
+    if not name.endswith(".py"):
+        name += ".py"
+    full = MODULES_DIR / name
+    if not full.exists():
+        return {"error": f"Module not found: {name}"}
+    try:
+        return {"path": str(full), "code": full.read_text(encoding="utf-8")}
+    except Exception as e:
+        return {"error": str(e)}
+
+def write_module(path: str, code: str) -> Dict[str, Any]:
+    """
+    Creates/updates /modules/<path> but:
+      - blocks protected modules
+      - blocks editing non-owned existing modules
+      - backs up before overwrite
+      - validates syntax
+    """
+    name = Path(path).name
+    if not name.endswith(".py"):
+        name += ".py"
+    full = MODULES_DIR / name
+
+    if name in PROTECTED_FILES:
+        return {"error": f"Blocked: {name} is protected."}
+
+    if full.exists() and not _is_owned(name):
+        return {"error": f"Blocked: {name} exists and is not owned by Football Bot."}
+
+    try:
+        ast.parse(code)
+    except SyntaxError as e:
+        return {"error": f"Syntax error: {e}"}
+
+    if full.exists():
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup = MODULES_DIR / f"{name}.bak_{ts}"
+        try:
+            backup.write_text(full.read_text(encoding='utf-8'), encoding="utf-8")
+        except Exception:
+            pass
+
+    try:
+        full.write_text(code, encoding="utf-8")
+        _add_owned(name)
+        return {"status": "success", "path": str(full), "owned": True}
+    except Exception as e:
+        return {"error": f"Write failed: {e}"}
+
+def run_module(path: str, function_name: str, args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    args = args or {}
+    name = Path(path).name
+    if not name.endswith(".py"):
+        name += ".py"
+    full = MODULES_DIR / name
+    if not full.exists():
+        return {"error": f"Module not found: {name}"}
+
+    module_name = f"modules.{name[:-3]}"
+    try:
+        if module_name in importlib.sys.modules:
+            mod = importlib.reload(importlib.sys.modules[module_name])
+        else:
+            mod = importlib.import_module(module_name)
+
+        if not hasattr(mod, function_name):
+            return {"error": f"Function {function_name} not found in {name}"}
+
+        fn = getattr(mod, function_name)
+        return {"result": fn(**args)}
+    except Exception as e:
+        return {"error": str(e)}
