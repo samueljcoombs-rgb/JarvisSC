@@ -4,7 +4,7 @@ import os
 import json
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import streamlit as st
 from openai import OpenAI
@@ -31,12 +31,15 @@ MODEL = PREFERRED or "gpt-5.2-thinking"  # pinned
 
 
 # ============================================================
-# Data / results defaults (Supabase Storage)
+# Defaults
 # ============================================================
 
 DEFAULT_STORAGE_BUCKET = os.getenv("DATA_STORAGE_BUCKET") or st.secrets.get("DATA_STORAGE_BUCKET", "football-data")
 DEFAULT_STORAGE_PATH = os.getenv("DATA_STORAGE_PATH") or st.secrets.get("DATA_STORAGE_PATH", "football_ai_NNIA.csv")
 DEFAULT_RESULTS_BUCKET = os.getenv("RESULTS_BUCKET") or st.secrets.get("RESULTS_BUCKET", "football-results")
+
+# Prevent giant conversations (browser crashes)
+MAX_MESSAGES_TO_KEEP = int(os.getenv("MAX_CHAT_MESSAGES") or st.secrets.get("MAX_CHAT_MESSAGES", 220))
 
 
 def _dataset_locator() -> Dict[str, str]:
@@ -56,7 +59,6 @@ def _run_tool(name: str, args: Dict[str, Any]) -> Any:
 
 # ============================================================
 # Tools schema for OpenAI function calling
-# (must include tools=TOOLS in request)
 # ============================================================
 
 TOOLS = [
@@ -88,7 +90,7 @@ TOOLS = [
 
 
 # ============================================================
-# System prompt (autonomous researcher)
+# System prompt
 # ============================================================
 
 SYSTEM_PROMPT = """You are FootballResearcher — an autonomous research agent that discovers profitable, robust football trading strategy criteria.
@@ -107,8 +109,9 @@ Objective:
 - Strategies must be explicit filters: MARKET/PL column + ranges on numeric fields + optional categorical constraints.
 - Be decisive: pick what to test next. Only ask user if blocked by missing config.
 
-You may use tools. When you log, prefer structured notes that include:
-picked market, rule ranges, train/test ROI, test bets, game-level drawdown & losing streak, and an overfit risk summary.
+Important:
+- In CHAT mode you must reply conversationally and should not call tools unless explicitly asked.
+- In AUTOPILOT mode you may call tools and run jobs, but still write a short explanation of what you did.
 """
 
 
@@ -121,11 +124,14 @@ st.title("⚽ Football Researcher")
 
 
 # ============================================================
-# Session management (restored)
+# Session management
 # ============================================================
 
 def _load_sessions() -> List[Dict[str, Any]]:
     out = _run_tool("list_chats", {"limit": 200})
+    if not out.get("ok", True):
+        # non-fatal: show later in sidebar
+        return []
     return out.get("sessions") or []
 
 
@@ -134,7 +140,6 @@ def _new_session_id() -> str:
 
 
 if "session_id" not in st.session_state:
-    # persist via query param if present
     qp = st.query_params.get("sid")
     st.session_state.session_id = qp if qp else _new_session_id()
 
@@ -151,33 +156,63 @@ def _init_messages_if_needed():
         st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
 
+def _trim_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if len(messages) <= MAX_MESSAGES_TO_KEEP:
+        return messages
+    # keep first system message + last N-1 messages
+    system = messages[0:1]
+    tail = messages[-(MAX_MESSAGES_TO_KEEP - 1):]
+    return system + tail
+
+
 def _persist_chat(title: str = ""):
-    _run_tool("save_chat", {"session_id": SESSION_ID, "messages": st.session_state.messages, "title": title})
+    st.session_state.messages = _trim_messages(st.session_state.messages)
+    out = _run_tool("save_chat", {"session_id": SESSION_ID, "messages": st.session_state.messages, "title": title})
+    # non-fatal storage failures shouldn’t crash app
+    if isinstance(out, dict) and out.get("ok") is False:
+        st.session_state.last_chat_save_error = out
 
 
 def _try_load_chat(sid: str) -> bool:
     loaded = _run_tool("load_chat", {"session_id": sid})
     if loaded.get("ok") and loaded.get("data", {}).get("messages"):
         st.session_state.messages = loaded["data"]["messages"]
+        st.session_state.messages = _trim_messages(st.session_state.messages)
         return True
     return False
 
 
 _init_messages_if_needed()
 
-# Auto-load once per session id
 if "loaded_for_sid" not in st.session_state or st.session_state.loaded_for_sid != SESSION_ID:
     st.session_state.loaded_for_sid = SESSION_ID
     if not _try_load_chat(SESSION_ID):
-        # first time: save initial
         _persist_chat(title=f"Session {SESSION_ID[:8]}")
 
 
 # ============================================================
-# LLM call + tool loop (FIXED properly)
+# Agent mode (restores “mind”)
+# ============================================================
+
+if "agent_mode" not in st.session_state:
+    st.session_state.agent_mode = "chat"  # chat | autopilot
+
+
+# ============================================================
+# LLM call + tool loop
 # ============================================================
 
 def _call_llm(messages: List[Dict[str, Any]]):
+    mode = st.session_state.agent_mode
+    if mode == "chat":
+        # Chat mode: always speak, no tools.
+        return client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            tool_choice="none",
+        )
+
+    # Autopilot mode: tools enabled.
     return client.chat.completions.create(
         model=MODEL,
         messages=messages,
@@ -188,29 +223,43 @@ def _call_llm(messages: List[Dict[str, Any]]):
 
 def _chat_with_tools(user_text: str, max_rounds: int = 6):
     st.session_state.messages.append({"role": "user", "content": user_text})
+    st.session_state.messages = _trim_messages(st.session_state.messages)
 
     for _ in range(max_rounds):
         resp = _call_llm(st.session_state.messages)
         msg = resp.choices[0].message
 
-        # assistant message
+        # Always append assistant message, even if empty (so UI doesn’t feel “dead”)
         if msg.content:
             st.session_state.messages.append({"role": "assistant", "content": msg.content})
+        else:
+            # In chat mode, empty content is undesirable; add a friendly fallback
+            if st.session_state.agent_mode == "chat":
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": "I’m here — ask me anything about the model, the system, or strategies. What do you want to do next?"}
+                )
 
-        # tool calls?
         tool_calls = getattr(msg, "tool_calls", None)
+
+        # In chat mode we explicitly disabled tools, so we stop here.
+        if st.session_state.agent_mode == "chat":
+            break
+
         if not tool_calls:
             break
 
+        # Execute tool calls
         for tc in tool_calls:
             name = tc.function.name
             args = json.loads(tc.function.arguments or "{}")
             out = _run_tool(name, args)
 
-            # IMPORTANT: tool role must be response to a tool_call_id
+            # MUST be response to tool_call_id
             st.session_state.messages.append(
                 {"role": "tool", "tool_call_id": tc.id, "content": json.dumps(out, ensure_ascii=False)}
             )
+
+        st.session_state.messages = _trim_messages(st.session_state.messages)
 
     _persist_chat()
 
@@ -227,7 +276,6 @@ def _format_rule(rule_obj: Dict[str, Any]) -> str:
 
 
 def _structured_note(worker_payload: Dict[str, Any], job_id: str, result_path: str) -> str:
-    # worker_payload = JSON downloaded from results bucket (root object)
     result = worker_payload.get("result", {}) if isinstance(worker_payload, dict) else {}
     picked = result.get("picked") or {}
     search = result.get("search") or {}
@@ -250,13 +298,13 @@ def _autopilot_one_cycle():
         "storage_path": DEFAULT_STORAGE_PATH,
         "_results_bucket": DEFAULT_RESULTS_BUCKET,
         "time_split_ratio": 0.7,
-        # no market specified: worker chooses
     }
 
     submitted = _run_tool("submit_job", {"task_type": "strategy_search", "params": params})
     job_id = submitted.get("job_id")
 
     st.session_state.last_autopilot = {"stage": "submitted", "submitted": submitted}
+
     if not job_id:
         st.session_state.last_autopilot["stage"] = "error"
         st.session_state.last_autopilot["error"] = "No job_id returned from submit_job"
@@ -265,7 +313,7 @@ def _autopilot_one_cycle():
     waited = _run_tool("wait_for_job", {"job_id": job_id, "timeout_s": 900, "poll_s": 5, "auto_download": True})
     st.session_state.last_autopilot["waited"] = waited
 
-    # record state (non-fatal)
+    # state writes are non-fatal
     _run_tool("set_research_state", {"key": "last_autopilot_ran_at", "value": datetime.utcnow().isoformat()})
     _run_tool("set_research_state", {"key": "last_job_id", "value": job_id})
 
@@ -277,17 +325,18 @@ def _autopilot_one_cycle():
     result_path = job.get("result_path") or ""
     result_json = waited.get("result") or {}
 
-    # Save structured research memory (non-fatal)
     note = _structured_note(result_json, job_id, result_path)
     _run_tool("append_research_note", {"note": note, "tags": "autopilot,worker,structured"})
 
-    # Update more state to help “learning”
+    # additional state helpful for “learning”
     try:
         picked = (result_json.get("result") or {}).get("picked") or {}
         top = ((result_json.get("result") or {}).get("search") or {}).get("top_rules") or []
         sig = ""
         if top:
-            sig = "|".join([f"{c.get('col')}:[{c.get('min')},{c.get('max')}]" for c in (top[0].get("rule") or [])])
+            sig = "|".join(
+                [f"{c.get('col')}:[{c.get('min')},{c.get('max')}]" for c in (top[0].get("rule") or [])]
+            )
         _run_tool("set_research_state", {"key": "last_market", "value": str(picked.get("pl_column", ""))})
         _run_tool("set_research_state", {"key": "last_rule_signature", "value": sig})
         _run_tool("set_research_state", {"key": "last_result_path", "value": result_path})
@@ -298,28 +347,36 @@ def _autopilot_one_cycle():
 
 
 # ============================================================
-# Sidebar UI (sessions + autopilot + tools)
+# Sidebar UI
 # ============================================================
 
 with st.sidebar:
     st.caption(f"Model: `{MODEL}`")
     st.caption(f"Data: `{DEFAULT_STORAGE_BUCKET}/{DEFAULT_STORAGE_PATH}`")
     st.caption(f"Results: `{DEFAULT_RESULTS_BUCKET}`")
+
+    st.radio("Agent mode", ["chat", "autopilot"], key="agent_mode")
     st.divider()
+
+    # Chat bucket issues (non-fatal warning)
+    if st.session_state.get("last_chat_save_error"):
+        st.warning(f"Chat persistence warning: {st.session_state.last_chat_save_error}")
+        if st.button("Clear chat save warning"):
+            st.session_state.last_chat_save_error = None
 
     # --- sessions ---
     st.subheader("💾 Chat Sessions")
     sessions = _load_sessions()
-    # show newest last
     sessions_display = list(reversed(sessions))
+
     options = [{"session_id": SESSION_ID, "title": f"(current) {SESSION_ID[:8]}"}] + [
-        {"session_id": s.get("session_id"), "title": s.get("title") or s.get("session_id")[:8]} for s in sessions_display
+        {"session_id": s.get("session_id"), "title": s.get("title") or s.get("session_id")[:8]}
+        for s in sessions_display
         if s.get("session_id") and s.get("session_id") != SESSION_ID
     ]
 
     labels = [f"{o['title']} — {o['session_id'][:8]}" for o in options]
-    selected_idx = 0
-    chosen = st.selectbox("Select session", options=list(range(len(options))), format_func=lambda i: labels[i], index=selected_idx)
+    chosen = st.selectbox("Select session", options=list(range(len(options))), format_func=lambda i: labels[i], index=0)
 
     if options[chosen]["session_id"] != SESSION_ID:
         _set_session(options[chosen]["session_id"])
@@ -389,7 +446,6 @@ if not last:
     st.info("No autopilot run in this session yet.")
 else:
     st.json(last)
-    # also summarize top rule if available
     try:
         waited = last.get("waited") or {}
         if waited.get("status") == "done":
@@ -415,7 +471,6 @@ for m in st.session_state.messages:
         continue
     with st.chat_message(m["role"]):
         st.markdown(m.get("content", ""))
-
 
 user_msg = st.chat_input("Ask the researcher…")
 if user_msg:
