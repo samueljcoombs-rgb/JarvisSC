@@ -58,7 +58,7 @@ def _coerce_params_to_dict(params: Any) -> Dict[str, Any]:
 
 
 # ============================================================
-# Google Sheets helpers
+# Google Sheets helpers (fault tolerant)
 # ============================================================
 
 def _gs_creds() -> Credentials:
@@ -150,6 +150,8 @@ def _read_table_tab(tab_name: str) -> List[Dict[str, str]]:
     return rows
 
 
+# ---------------- Public getters ----------------
+
 def get_dataset_overview() -> Dict[str, Any]:
     return {"tab": TAB_DATASET_OVERVIEW, "data": _read_kv_tab(TAB_DATASET_OVERVIEW)}
 
@@ -203,6 +205,7 @@ def set_research_state(key: str, value: str) -> Dict[str, Any]:
     try:
         ws = _ws(TAB_RESEARCH_STATE)
         vals = ws.get_all_values() or []
+
         for idx, row in enumerate(vals[1:], start=2):
             if len(row) >= 1 and (row[0] or "").strip() == key:
                 try:
@@ -217,6 +220,7 @@ def set_research_state(key: str, value: str) -> Dict[str, Any]:
 
         ws.append_row([key, value], value_input_option="RAW")
         return {"ok": True, "key": key, "value": value, "created": True}
+
     except APIError as e:
         return {"ok": False, "error": f"set_research_state APIError: {e}"}
     except Exception as e:
@@ -241,7 +245,7 @@ def _sb():
 
 
 # ============================================================
-# CSV loading
+# CSV loading (Supabase Storage preferred)
 # ============================================================
 
 def _download_from_storage(bucket: str, path: str) -> bytes:
@@ -287,7 +291,7 @@ def list_columns(storage_bucket: str = "", storage_path: str = "", csv_url: str 
 
 
 # ============================================================
-# ROI
+# ROI (row-level)
 # ============================================================
 
 def _mapping() -> Dict[str, Tuple[str, str]]:
@@ -324,22 +328,45 @@ def basic_roi_for_pl_column(pl_column: str, storage_bucket: str = "", storage_pa
         liability = (odds - 1.0).clip(lower=0.0)
         denom = float(liability.sum())
         roi = (total_pl / denom) if denom > 0 else 0.0
-        return {"ok": True, "pl_column": pl_column, "side": "lay", "odds_col": odds_col, "bets": n, "total_pl": total_pl, "denom_liability": denom, "roi": float(roi)}
-    return {"ok": True, "pl_column": pl_column, "side": "back", "bets": n, "total_pl": total_pl, "denom_stake": float(n), "roi": float(total_pl / float(n))}
+        return {
+            "ok": True,
+            "pl_column": pl_column,
+            "side": "lay",
+            "odds_col": odds_col,
+            "bets": n,
+            "total_pl": total_pl,
+            "denom_liability": denom,
+            "roi": float(roi),
+            "avg_pl_per_bet": float(total_pl / n),
+        }
+
+    denom = float(n)
+    return {
+        "ok": True,
+        "pl_column": pl_column,
+        "side": "back",
+        "odds_col": odds_col or None,
+        "bets": n,
+        "total_pl": total_pl,
+        "denom_stake": denom,
+        "roi": float(total_pl / denom),
+        "avg_pl_per_bet": float(total_pl / denom),
+    }
 
 
 # ============================================================
-# Background jobs
+# Background jobs (Supabase table + Storage results)
 # ============================================================
 
 def submit_job(task_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
     sb = _sb()
+
     params_dict = _coerce_params_to_dict(params)
 
     row = {
         "status": "queued",
-        "task_type": task_type,
-        "params": params_dict,  # ✅ always a dict
+        "task_type": str(task_type),
+        "params": params_dict,  # ✅ always a dict / json object
         "created_at": _now_iso(),
         "updated_at": _now_iso(),
     }
@@ -354,6 +381,32 @@ def submit_job(task_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
         return job
     except Exception as e:
         return {"ok": False, "error": f"submit_job failed: {e}"}
+
+
+def submit_strategy_search(
+    storage_bucket: str = "",
+    storage_path: str = "",
+    results_bucket: str = "",
+    time_split_ratio: float = 0.7,
+    target_pl_column: str = "",
+) -> Dict[str, Any]:
+    """
+    SAFE wrapper so the LLM cannot invent task_type or break params schema.
+    """
+    b = (storage_bucket or st.secrets.get("DATA_STORAGE_BUCKET") or os.getenv("DATA_STORAGE_BUCKET") or "football-data").strip()
+    p = (storage_path or st.secrets.get("DATA_STORAGE_PATH") or os.getenv("DATA_STORAGE_PATH") or "football_ai_NNIA.csv").strip()
+    rb = (results_bucket or st.secrets.get("RESULTS_BUCKET") or os.getenv("RESULTS_BUCKET") or "football-results").strip()
+
+    params: Dict[str, Any] = {
+        "storage_bucket": b,
+        "storage_path": p,
+        "_results_bucket": rb,
+        "time_split_ratio": float(time_split_ratio or 0.7),
+    }
+    if (target_pl_column or "").strip():
+        params["target_pl_column"] = target_pl_column.strip()
+
+    return submit_job("strategy_search", params)
 
 
 def get_job(job_id: str) -> Dict[str, Any]:
@@ -409,7 +462,7 @@ def wait_for_job(job_id: str, timeout_s: int = 300, poll_s: int = 5, auto_downlo
 
 
 # ============================================================
-# Chat sessions (unchanged)
+# Chat sessions (Supabase Storage)
 # ============================================================
 
 def _chat_bucket() -> str:
@@ -449,7 +502,11 @@ def save_chat(session_id: str, messages: List[Dict[str, Any]], title: str = "") 
     bucket = _chat_bucket()
     path = f"sessions/{session_id}.json"
 
-    payload = json.dumps({"session_id": session_id, "title": title or "", "messages": messages, "saved_at": _now_iso()}, ensure_ascii=False, indent=2).encode("utf-8")
+    payload = json.dumps(
+        {"session_id": session_id, "title": title or "", "messages": messages, "saved_at": _now_iso()},
+        ensure_ascii=False,
+        indent=2,
+    ).encode("utf-8")
 
     try:
         sb.storage.from_(bucket).upload(path=path, file=payload, file_options={"content-type": "application/json", "upsert": "true"})
