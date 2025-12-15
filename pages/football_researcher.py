@@ -26,10 +26,6 @@ def _init_client() -> OpenAI:
 client = _init_client()
 
 def _select_best_model(c: OpenAI) -> str:
-    """
-    Prefer GPT-5 if available, otherwise fall back.
-    Exact '5.2 Thinking' string may not be exposed; we prefer gpt-5 / gpt-latest.
-    """
     preferred = (os.getenv("PREFERRED_OPENAI_MODEL", "").strip()
                  or st.secrets.get("PREFERRED_OPENAI_MODEL", ""))
     if preferred:
@@ -73,186 +69,65 @@ TOOL_FUNCS: Dict[str, Any] = {
     "strategy_performance_summary": functions.strategy_performance_summary,
     "strategy_performance_batch": functions.strategy_performance_batch,
 
-    # Offloaded compute (Supabase queue + results)
+    # Offloaded compute
     "submit_job": functions.submit_job,
     "get_job": functions.get_job,
     "download_result": functions.download_result,
 }
 
 def _tool_schema(name: str, description: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": description,
-            "parameters": parameters,
-        },
-    }
+    return {"type": "function", "function": {"name": name, "description": description, "parameters": parameters}}
 
 TOOLS_SCHEMA: List[Dict[str, Any]] = [
-    # ---- KB ----
-    _tool_schema(
-        "get_dataset_overview",
-        "Load dataset_overview sheet (key/value style rows).",
-        {"type": "object", "properties": {}, "required": []},
-    ),
-    _tool_schema(
-        "get_column_definitions",
-        "Load column_definitions sheet.",
-        {"type": "object", "properties": {}, "required": []},
-    ),
-    _tool_schema(
-        "get_research_rules",
-        "Load research_rules sheet.",
-        {"type": "object", "properties": {}, "required": []},
-    ),
-    _tool_schema(
-        "get_evaluation_framework",
-        "Load evaluation_framework sheet.",
-        {"type": "object", "properties": {}, "required": []},
-    ),
+    _tool_schema("get_dataset_overview", "Load dataset_overview sheet.", {"type": "object", "properties": {}, "required": []}),
+    _tool_schema("get_column_definitions", "Load column_definitions sheet.", {"type": "object", "properties": {}, "required": []}),
+    _tool_schema("get_research_rules", "Load research_rules sheet.", {"type": "object", "properties": {}, "required": []}),
+    _tool_schema("get_evaluation_framework", "Load evaluation_framework sheet.", {"type": "object", "properties": {}, "required": []}),
 
-    # ---- memory/state ----
-    _tool_schema(
-        "append_research_note",
-        "Append a research note into research_memory sheet. Provide note and optional tags.",
-        {
-            "type": "object",
-            "properties": {
-                "note": {"type": "string"},
-                "tags": {"type": "array", "items": {"type": "string"}},
-            },
-            "required": ["note"],
-        },
-    ),
-    _tool_schema(
-        "get_recent_research_notes",
-        "Fetch last N research notes from research_memory.",
-        {
-            "type": "object",
-            "properties": {
-                "limit": {"type": "integer", "minimum": 1, "maximum": 200},
-            },
-            "required": [],
-        },
-    ),
-    _tool_schema(
-        "get_research_state",
-        "Fetch key/value state dictionary from research_state sheet.",
-        {"type": "object", "properties": {}, "required": []},
-    ),
-    _tool_schema(
-        "set_research_state",
-        "Upsert a key/value into research_state.",
-        {
-            "type": "object",
-            "properties": {
-                "key": {"type": "string"},
-                "value": {"type": "string"},
-            },
-            "required": ["key", "value"],
-        },
-    ),
+    _tool_schema("append_research_note", "Append a research note (note + optional tags).",
+                 {"type": "object", "properties": {"note": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}}, "required": ["note"]}),
+    _tool_schema("get_recent_research_notes", "Fetch last N research notes.",
+                 {"type": "object", "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 200}}, "required": []}),
+    _tool_schema("get_research_state", "Fetch research_state key/value map.", {"type": "object", "properties": {}, "required": []}),
+    _tool_schema("set_research_state", "Upsert key/value into research_state.",
+                 {"type": "object", "properties": {"key": {"type": "string"}, "value": {"type": "string"}}, "required": ["key", "value"]}),
 
-    # ---- data ----
-    _tool_schema(
-        "load_data_basic",
-        "Load dataset preview + column list.",
-        {
-            "type": "object",
-            "properties": {"limit": {"type": "integer", "minimum": 10, "maximum": 2000}},
-            "required": [],
-        },
-    ),
-    _tool_schema(
-        "list_columns",
-        "List all columns in the dataset.",
-        {"type": "object", "properties": {}, "required": []},
-    ),
+    _tool_schema("load_data_basic", "Load dataset preview.", {"type": "object", "properties": {"limit": {"type": "integer", "minimum": 10, "maximum": 2000}}, "required": []}),
+    _tool_schema("list_columns", "List all dataset columns.", {"type": "object", "properties": {}, "required": []}),
 
-    # ---- evaluation ----
-    _tool_schema(
-        "strategy_performance_summary",
-        "Compute bet-level ROI and ID-aggregated streak/drawdown for a PL column.",
-        {
-            "type": "object",
-            "properties": {
-                "pl_column": {"type": "string"},
-                "side": {"type": "string", "enum": ["back", "lay"]},
-                "odds_column": {"type": "string"},
-                "time_split_ratio": {"type": "number", "minimum": 0.5, "maximum": 0.95},
-                "compute_streaks": {"type": "boolean"},
-            },
-            "required": ["pl_column"],
-        },
-    ),
-    _tool_schema(
-        "strategy_performance_batch",
-        "Compute performance summaries for multiple PL columns.",
-        {
-            "type": "object",
-            "properties": {
-                "pl_columns": {"type": "array", "items": {"type": "string"}},
-                "time_split_ratio": {"type": "number", "minimum": 0.5, "maximum": 0.95},
-                "compute_streaks": {"type": "boolean"},
-            },
-            "required": ["pl_columns"],
-        },
-    ),
+    _tool_schema("strategy_performance_summary", "ROI + streak/drawdown for a PL column.",
+                 {"type": "object",
+                  "properties": {"pl_column": {"type": "string"},
+                                 "side": {"type": "string", "enum": ["back", "lay"]},
+                                 "odds_column": {"type": "string"},
+                                 "time_split_ratio": {"type": "number", "minimum": 0.5, "maximum": 0.95},
+                                 "compute_streaks": {"type": "boolean"}},
+                  "required": ["pl_column"]}),
+    _tool_schema("strategy_performance_batch", "Batch performance summaries.",
+                 {"type": "object",
+                  "properties": {"pl_columns": {"type": "array", "items": {"type": "string"}},
+                                 "time_split_ratio": {"type": "number", "minimum": 0.5, "maximum": 0.95},
+                                 "compute_streaks": {"type": "boolean"}},
+                  "required": ["pl_columns"]}),
 
-    # ---- offloaded compute ----
-    _tool_schema(
-        "submit_job",
-        "Submit a heavy compute job to Supabase queue (processed by Modal worker).",
-        {
-            "type": "object",
-            "properties": {
-                "task_type": {"type": "string"},
-                "params": {"type": "object"},
-            },
-            "required": ["task_type", "params"],
-        },
-    ),
-    _tool_schema(
-        "get_job",
-        "Get status + fields for a Supabase job_id.",
-        {
-            "type": "object",
-            "properties": {"job_id": {"type": "string"}},
-            "required": ["job_id"],
-        },
-    ),
-    _tool_schema(
-        "download_result",
-        "Download a JSON result from Supabase Storage path.",
-        {
-            "type": "object",
-            "properties": {"result_path": {"type": "string"}},
-            "required": ["result_path"],
-        },
-    ),
+    _tool_schema("submit_job", "Submit heavy job to Supabase queue (Modal worker).",
+                 {"type": "object", "properties": {"task_type": {"type": "string"}, "params": {"type": "object"}}, "required": ["task_type", "params"]}),
+    _tool_schema("get_job", "Fetch job status for job_id.",
+                 {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]}),
+    _tool_schema("download_result", "Download JSON result from Supabase Storage path.",
+                 {"type": "object", "properties": {"result_path": {"type": "string"}}, "required": ["result_path"]}),
 ]
 
-
-# ---------------------------
-# Agent prompt
-# ---------------------------
 
 SYSTEM_PROMPT = """You are Football Researcher, an autonomous research agent.
 
 Mission:
 - Find strategy criteria (explicit filters/ranges) that generalise to future matches and produce profit.
-- Use strict anti-overfitting rules: time-based splits, minimum sample sizes, simple rules first.
+- Apply anti-overfitting rules (time split, minimum samples, simple rules first).
 - Never use outcome columns as predictive features.
 
-You have tools to:
-- load dataset overview/definitions/rules/framework from Google Sheets
-- evaluate strategies on PL columns (bet-level ROI; game-level streak/drawdown in points)
-- submit heavy jobs to a Supabase queue (processed by a Modal worker), then poll+download results
-- store persistent research notes and state in Google Sheets
-
-When you need heavy computation, submit via submit_job then poll get_job until done, then download_result.
-Always log key findings via append_research_note and update research_state.
+Use tools when needed. For heavy computation: submit_job -> poll get_job -> download_result.
+Log key findings with append_research_note and update research_state.
 """
 
 
@@ -269,12 +144,6 @@ def _call_llm(messages: List[Dict[str, Any]]) -> Any:
     )
 
 def _run_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Robust tool runner:
-    - Filters args to match function signature
-    - Never calls a function with missing required args
-    - Returns clear errors instead of crashing Streamlit
-    """
     fn = TOOL_FUNCS.get(name)
     if not fn:
         return {"error": f"Tool not found: {name}"}
@@ -284,7 +153,6 @@ def _run_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     try:
         sig = inspect.signature(fn)
         params = sig.parameters
-
         accepted = {k: v for k, v in args.items() if k in params}
 
         missing_required = []
@@ -295,16 +163,22 @@ def _run_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 missing_required.append(p_name)
 
         if missing_required:
-            return {
-                "error": f"Missing required args for {name}: {missing_required}",
-                "provided_args": list(args.keys()),
-                "accepted_args": list(accepted.keys()),
-            }
+            return {"error": f"Missing required args for {name}: {missing_required}", "provided_args": list(args.keys())}
 
         return fn(**accepted)
-
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}", "tool": name, "args": args}
+
+def _minimal_tool_call_dict(tc: Any) -> Dict[str, Any]:
+    # Strict minimal shape OpenAI expects in messages history
+    return {
+        "id": tc.id,
+        "type": "function",
+        "function": {
+            "name": tc.function.name,
+            "arguments": tc.function.arguments or "{}",
+        },
+    }
 
 def _chat_with_tools(user_text: str, max_rounds: int = 6) -> None:
     if "messages" not in st.session_state:
@@ -313,27 +187,33 @@ def _chat_with_tools(user_text: str, max_rounds: int = 6) -> None:
     st.session_state.messages.append({"role": "user", "content": user_text})
 
     for _ in range(max_rounds):
-        resp = _call_llm(st.session_state.messages)
-        msg = resp.choices[0].message
+        try:
+            resp = _call_llm(st.session_state.messages)
+        except Exception as e:
+            # Show something useful in Streamlit instead of just "redacted"
+            st.session_state.messages.append({"role": "assistant", "content": f"OpenAI request failed: {type(e).__name__}: {e}"})
+            return
 
+        msg = resp.choices[0].message
         tool_calls = getattr(msg, "tool_calls", None)
+
         if tool_calls:
+            # IMPORTANT: store tool_calls in the strict minimal format
             st.session_state.messages.append({
                 "role": "assistant",
                 "content": msg.content or "",
-                "tool_calls": [tc.model_dump() for tc in tool_calls],
+                "tool_calls": [_minimal_tool_call_dict(tc) for tc in tool_calls],
             })
 
             for tc in tool_calls:
                 tool_name = tc.function.name
                 tool_args = json.loads(tc.function.arguments or "{}")
-
                 out = _run_tool(tool_name, tool_args)
 
+                # IMPORTANT: tool message should be only tool_call_id + content
                 st.session_state.messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
-                    "name": tool_name,
                     "content": json.dumps(out, ensure_ascii=False),
                 })
 
@@ -354,12 +234,11 @@ st.caption(f"Model: {MODEL}")
 if "messages" not in st.session_state:
     st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-# Render chat
 for m in st.session_state.messages:
     if m["role"] == "system":
         continue
     if m["role"] == "tool":
-        with st.expander(f"🛠 Tool output: {m.get('name')}", expanded=False):
+        with st.expander("🛠 Tool output", expanded=False):
             st.code(m.get("content", ""), language="json")
         continue
     with st.chat_message(m["role"]):
