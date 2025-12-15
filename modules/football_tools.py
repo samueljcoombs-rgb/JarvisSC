@@ -57,6 +57,18 @@ def _coerce_params_to_dict(params: Any) -> Dict[str, Any]:
     return {}
 
 
+def _norm_col(s: str) -> str:
+    # Case/format insensitive comparison for columns
+    return (
+        (s or "")
+        .strip()
+        .lower()
+        .replace(" ", "")
+        .replace("_", "")
+        .replace("-", "")
+    )
+
+
 # ============================================================
 # Google Sheets helpers (fault tolerant)
 # ============================================================
@@ -280,6 +292,27 @@ def _load_csv(storage_bucket: Optional[str] = None, storage_path: Optional[str] 
     return pd.read_csv(StringIO(text), low_memory=False)
 
 
+@st.cache_data(show_spinner=False, ttl=3600)
+def _cached_columns(storage_bucket: str, storage_path: str) -> List[str]:
+    # reads only header if possible; still downloads file, but cached
+    raw = _download_from_storage(storage_bucket, storage_path)
+    try:
+        text = raw.decode("utf-8")
+    except Exception:
+        text = raw.decode("latin-1", errors="replace")
+    df0 = pd.read_csv(StringIO(text), nrows=0, low_memory=False)
+    return df0.columns.tolist()
+
+
+def _resolve_column_name(storage_bucket: str, storage_path: str, requested: str) -> Optional[str]:
+    cols = _cached_columns(storage_bucket, storage_path)
+    if requested in cols:
+        return requested
+    req_n = _norm_col(requested)
+    lookup = {_norm_col(c): c for c in cols}
+    return lookup.get(req_n)
+
+
 def load_data_basic(storage_bucket: str = "", storage_path: str = "", csv_url: str = "") -> Dict[str, Any]:
     df = _load_csv(storage_bucket or None, storage_path or None, csv_url or None)
     return {"ok": True, "rows": int(df.shape[0]), "cols": int(df.shape[1]), "head": df.head(5).to_dict(orient="records")}
@@ -360,13 +393,12 @@ def basic_roi_for_pl_column(pl_column: str, storage_bucket: str = "", storage_pa
 
 def submit_job(task_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
     sb = _sb()
-
     params_dict = _coerce_params_to_dict(params)
 
     row = {
         "status": "queued",
         "task_type": str(task_type),
-        "params": params_dict,  # ✅ always a dict / json object
+        "params": params_dict,  # must be json object (dict)
         "created_at": _now_iso(),
         "updated_at": _now_iso(),
     }
@@ -391,7 +423,10 @@ def submit_strategy_search(
     target_pl_column: str = "",
 ) -> Dict[str, Any]:
     """
-    SAFE wrapper so the LLM cannot invent task_type or break params schema.
+    SAFE wrapper:
+      - never allows inventing task_type
+      - guarantees params is a dict
+      - resolves target_pl_column to exact CSV header (case/space/_ insensitive)
     """
     b = (storage_bucket or st.secrets.get("DATA_STORAGE_BUCKET") or os.getenv("DATA_STORAGE_BUCKET") or "football-data").strip()
     p = (storage_path or st.secrets.get("DATA_STORAGE_PATH") or os.getenv("DATA_STORAGE_PATH") or "football_ai_NNIA.csv").strip()
@@ -403,8 +438,23 @@ def submit_strategy_search(
         "_results_bucket": rb,
         "time_split_ratio": float(time_split_ratio or 0.7),
     }
+
+    # ✅ canonicalise PL column if provided
     if (target_pl_column or "").strip():
-        params["target_pl_column"] = target_pl_column.strip()
+        requested = target_pl_column.strip()
+        resolved = _resolve_column_name(b, p, requested)
+        if not resolved:
+            # give a helpful error payload with candidates
+            cols = _cached_columns(b, p)
+            pl_like = [c for c in cols if c.strip().lower().endswith("pl") or " pl" in c.lower()]
+            return {
+                "ok": False,
+                "error": f"target_pl_column '{requested}' not found in CSV columns.",
+                "hint": "Use the exact column name (or any casing/spacing variant).",
+                "example": "BTTS PL",
+                "pl_candidates_sample": pl_like[:50],
+            }
+        params["target_pl_column"] = resolved
 
     return submit_job("strategy_search", params)
 
@@ -462,7 +512,7 @@ def wait_for_job(job_id: str, timeout_s: int = 300, poll_s: int = 5, auto_downlo
 
 
 # ============================================================
-# Chat sessions (Supabase Storage)
+# Chat sessions (Supabase Storage) - used by UI (not LLM)
 # ============================================================
 
 def _chat_bucket() -> str:
@@ -485,7 +535,11 @@ def _load_chat_index(sb) -> Dict[str, Any]:
 def _save_chat_index(sb, index: Dict[str, Any]) -> None:
     bucket = _chat_bucket()
     payload = json.dumps(index, ensure_ascii=False, indent=2).encode("utf-8")
-    sb.storage.from_(bucket).upload(path=_chat_index_path(), file=payload, file_options={"content-type": "application/json", "upsert": "true"})
+    sb.storage.from_(bucket).upload(
+        path=_chat_index_path(),
+        file=payload,
+        file_options={"content-type": "application/json", "upsert": "true"},
+    )
 
 
 def list_chats(limit: int = 200) -> Dict[str, Any]:
@@ -509,9 +563,18 @@ def save_chat(session_id: str, messages: List[Dict[str, Any]], title: str = "") 
     ).encode("utf-8")
 
     try:
-        sb.storage.from_(bucket).upload(path=path, file=payload, file_options={"content-type": "application/json", "upsert": "true"})
+        sb.storage.from_(bucket).upload(
+            path=path,
+            file=payload,
+            file_options={"content-type": "application/json", "upsert": "true"},
+        )
     except StorageException as e:
-        return {"ok": False, "error": f"Storage upload failed. Create bucket '{bucket}' and ensure the service role key has access. Details: {e}", "bucket": bucket, "path": path}
+        return {
+            "ok": False,
+            "error": f"Storage upload failed. Create bucket '{bucket}' and ensure the service role key has access. Details: {e}",
+            "bucket": bucket,
+            "path": path,
+        }
     except Exception as e:
         return {"ok": False, "error": f"save_chat failed: {e}", "bucket": bucket, "path": path}
 
