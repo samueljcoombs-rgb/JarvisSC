@@ -1,17 +1,20 @@
-# pages/football_researcher.py
 from __future__ import annotations
 
 import os
 import json
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import streamlit as st
 from openai import OpenAI
 
 from modules import football_tools as functions
 
+
+# ============================================================
+# OpenAI client + model
+# ============================================================
 
 def _init_client() -> OpenAI:
     api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY")
@@ -24,7 +27,12 @@ def _init_client() -> OpenAI:
 client = _init_client()
 
 PREFERRED = (os.getenv("PREFERRED_OPENAI_MODEL") or st.secrets.get("PREFERRED_OPENAI_MODEL") or "").strip()
-MODEL = PREFERRED or "gpt-5.2-thinking"
+MODEL = PREFERRED or "gpt-5.2-thinking"  # pinned
+
+
+# ============================================================
+# Data / results defaults (Supabase Storage)
+# ============================================================
 
 DEFAULT_STORAGE_BUCKET = os.getenv("DATA_STORAGE_BUCKET") or st.secrets.get("DATA_STORAGE_BUCKET", "football-data")
 DEFAULT_STORAGE_PATH = os.getenv("DATA_STORAGE_PATH") or st.secrets.get("DATA_STORAGE_PATH", "football_ai_NNIA.csv")
@@ -35,6 +43,10 @@ def _dataset_locator() -> Dict[str, str]:
     return {"storage_bucket": DEFAULT_STORAGE_BUCKET, "storage_path": DEFAULT_STORAGE_PATH}
 
 
+# ============================================================
+# Tool runner
+# ============================================================
+
 def _run_tool(name: str, args: Dict[str, Any]) -> Any:
     fn = getattr(functions, name, None)
     if not fn:
@@ -42,63 +54,194 @@ def _run_tool(name: str, args: Dict[str, Any]) -> Any:
     return fn(**args)
 
 
+# ============================================================
+# Tools schema for OpenAI function calling
+# (must include tools=TOOLS in request)
+# ============================================================
+
+TOOLS = [
+    {"type": "function", "function": {"name": "get_dataset_overview", "description": "Get dataset_overview tab.", "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {"name": "get_research_rules", "description": "Get research_rules tab.", "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {"name": "get_column_definitions", "description": "Get column_definitions tab.", "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {"name": "get_evaluation_framework", "description": "Get evaluation_framework tab.", "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {"name": "get_recent_research_notes", "description": "Get recent research_memory rows.", "parameters": {"type": "object", "properties": {"limit": {"type": "integer"}}, "required": []}}},
+    {"type": "function", "function": {"name": "append_research_note", "description": "Append to research_memory.", "parameters": {"type": "object", "properties": {"note": {"type": "string"}, "tags": {"type": "string"}}, "required": ["note"]}}},
+    {"type": "function", "function": {"name": "get_research_state", "description": "Get research_state KV.", "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {"name": "set_research_state", "description": "Set research_state KV.", "parameters": {"type": "object", "properties": {"key": {"type": "string"}, "value": {"type": "string"}}, "required": ["key", "value"]}}},
+
+    {"type": "function", "function": {"name": "load_data_basic", "description": "Load CSV preview.", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "csv_url": {"type": "string"}}, "required": []}}},
+    {"type": "function", "function": {"name": "list_columns", "description": "List CSV columns.", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "csv_url": {"type": "string"}}, "required": []}}},
+    {"type": "function", "function": {"name": "basic_roi_for_pl_column", "description": "Row-level ROI for PL column.", "parameters": {"type": "object", "properties": {"pl_column": {"type": "string"}, "storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "csv_url": {"type": "string"}}, "required": ["pl_column"]}}},
+
+    {"type": "function", "function": {"name": "submit_job", "description": "Submit Modal worker job.", "parameters": {"type": "object", "properties": {"task_type": {"type": "string"}, "params": {"type": "object"}}, "required": ["task_type", "params"]}}},
+    {"type": "function", "function": {"name": "get_job", "description": "Get job status by job_id.", "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]}}},
+    {"type": "function", "function": {"name": "wait_for_job", "description": "Wait for completion; optionally downloads results.", "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}, "timeout_s": {"type": "integer"}, "poll_s": {"type": "integer"}, "auto_download": {"type": "boolean"}}, "required": ["job_id"]}}},
+    {"type": "function", "function": {"name": "download_result", "description": "Download a result JSON from storage by path.", "parameters": {"type": "object", "properties": {"result_path": {"type": "string"}, "bucket": {"type": "string"}}, "required": ["result_path"]}}},
+
+    # chat sessions (restored)
+    {"type": "function", "function": {"name": "list_chats", "description": "List saved chat sessions.", "parameters": {"type": "object", "properties": {"limit": {"type": "integer"}}, "required": []}}},
+    {"type": "function", "function": {"name": "save_chat", "description": "Save chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}, "messages": {"type": "array"}, "title": {"type": "string"}}, "required": ["session_id", "messages"]}}},
+    {"type": "function", "function": {"name": "load_chat", "description": "Load chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}}, "required": ["session_id"]}}},
+    {"type": "function", "function": {"name": "rename_chat", "description": "Rename chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}, "title": {"type": "string"}}, "required": ["session_id", "title"]}}},
+    {"type": "function", "function": {"name": "delete_chat", "description": "Delete chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}}, "required": ["session_id"]}}},
+]
+
+
+# ============================================================
+# System prompt (autonomous researcher)
+# ============================================================
+
 SYSTEM_PROMPT = """You are FootballResearcher — an autonomous research agent that discovers profitable, robust football trading strategy criteria.
 
+Source of truth:
+- Use Google Sheet tabs: dataset_overview, research_rules, column_definitions, evaluation_framework, research_state, research_memory.
+
 Hard constraints:
-- Use the Google Sheet tabs as your source of truth: dataset_overview, research_rules, column_definitions, evaluation_framework.
 - PL columns are outcomes only and MUST NOT be used as predictive features.
-- Avoid overfitting: use time splits; do not tune thresholds on final test.
-- Always report sample sizes and stability (train vs test gap).
-- Prefer simple rules that generalise.
+- Avoid overfitting: time-based splits; never tune thresholds on final test.
+- Always report sample sizes and stability (train vs test gap) and drawdown/losing streak in POINTS.
+- Prefer simple rules that generalise; penalise fragile, tiny samples.
 
 Objective:
-- Propose explicit strategy criteria usable on future matches (ranges + categorical filters).
-- When needed, submit background jobs to the Modal worker for heavy evaluation.
-- Log significant findings into research_memory with structured JSON.
-- Be decisive: choose what to test next; do not ask the user what to do unless blocked by missing config.
+- When user asks to “design a strategy”, you should plan, run experiments (using worker jobs when needed), log results into research_memory, and present progress updates.
+- Strategies must be explicit filters: MARKET/PL column + ranges on numeric fields + optional categorical constraints.
+- Be decisive: pick what to test next. Only ask user if blocked by missing config.
+
+You may use tools. When you log, prefer structured notes that include:
+picked market, rule ranges, train/test ROI, test bets, game-level drawdown & losing streak, and an overfit risk summary.
 """
 
+
+# ============================================================
+# Streamlit UI setup
+# ============================================================
 
 st.set_page_config(page_title="Football Researcher", layout="wide")
 st.title("⚽ Football Researcher")
 
-if "football_session_id" not in st.session_state:
-    st.session_state.football_session_id = str(uuid.uuid4())
-SESSION_ID = st.session_state.football_session_id
 
-if "messages" not in st.session_state:
-    st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+# ============================================================
+# Session management (restored)
+# ============================================================
 
-if "loaded_from_storage" not in st.session_state:
-    st.session_state.loaded_from_storage = True
-    loaded = _run_tool("load_chat", {"session_id": SESSION_ID})
+def _load_sessions() -> List[Dict[str, Any]]:
+    out = _run_tool("list_chats", {"limit": 200})
+    return out.get("sessions") or []
+
+
+def _new_session_id() -> str:
+    return str(uuid.uuid4())
+
+
+if "session_id" not in st.session_state:
+    # persist via query param if present
+    qp = st.query_params.get("sid")
+    st.session_state.session_id = qp if qp else _new_session_id()
+
+SESSION_ID = st.session_state.session_id
+
+
+def _set_session(sid: str):
+    st.session_state.session_id = sid
+    st.query_params["sid"] = sid
+
+
+def _init_messages_if_needed():
+    if "messages" not in st.session_state:
+        st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+
+def _persist_chat(title: str = ""):
+    _run_tool("save_chat", {"session_id": SESSION_ID, "messages": st.session_state.messages, "title": title})
+
+
+def _try_load_chat(sid: str) -> bool:
+    loaded = _run_tool("load_chat", {"session_id": sid})
     if loaded.get("ok") and loaded.get("data", {}).get("messages"):
         st.session_state.messages = loaded["data"]["messages"]
+        return True
+    return False
 
 
-def _persist_chat():
-    _run_tool("save_chat", {"session_id": SESSION_ID, "messages": st.session_state.messages})
+_init_messages_if_needed()
 
+# Auto-load once per session id
+if "loaded_for_sid" not in st.session_state or st.session_state.loaded_for_sid != SESSION_ID:
+    st.session_state.loaded_for_sid = SESSION_ID
+    if not _try_load_chat(SESSION_ID):
+        # first time: save initial
+        _persist_chat(title=f"Session {SESSION_ID[:8]}")
+
+
+# ============================================================
+# LLM call + tool loop (FIXED properly)
+# ============================================================
 
 def _call_llm(messages: List[Dict[str, Any]]):
-    # keep tool calling enabled
     return client.chat.completions.create(
         model=MODEL,
         messages=messages,
+        tools=TOOLS,
         tool_choice="auto",
     )
 
 
-def _structured_note(worker_result: Dict[str, Any], job_id: str) -> str:
-    payload = {
+def _chat_with_tools(user_text: str, max_rounds: int = 6):
+    st.session_state.messages.append({"role": "user", "content": user_text})
+
+    for _ in range(max_rounds):
+        resp = _call_llm(st.session_state.messages)
+        msg = resp.choices[0].message
+
+        # assistant message
+        if msg.content:
+            st.session_state.messages.append({"role": "assistant", "content": msg.content})
+
+        # tool calls?
+        tool_calls = getattr(msg, "tool_calls", None)
+        if not tool_calls:
+            break
+
+        for tc in tool_calls:
+            name = tc.function.name
+            args = json.loads(tc.function.arguments or "{}")
+            out = _run_tool(name, args)
+
+            # IMPORTANT: tool role must be response to a tool_call_id
+            st.session_state.messages.append(
+                {"role": "tool", "tool_call_id": tc.id, "content": json.dumps(out, ensure_ascii=False)}
+            )
+
+    _persist_chat()
+
+
+# ============================================================
+# Autopilot receipt + structured logging
+# ============================================================
+
+def _format_rule(rule_obj: Dict[str, Any]) -> str:
+    parts = []
+    for cond in rule_obj.get("rule", []):
+        parts.append(f"{cond.get('col')} in [{cond.get('min')}, {cond.get('max')}]")
+    return " AND ".join(parts) if parts else "(no rule)"
+
+
+def _structured_note(worker_payload: Dict[str, Any], job_id: str, result_path: str) -> str:
+    # worker_payload = JSON downloaded from results bucket (root object)
+    result = worker_payload.get("result", {}) if isinstance(worker_payload, dict) else {}
+    picked = result.get("picked") or {}
+    search = result.get("search") or {}
+    top_rules = (search.get("top_rules") or [])[:3]
+
+    note = {
         "ts": datetime.utcnow().isoformat(),
         "kind": "strategy_search_result",
         "job_id": job_id,
-        "picked": worker_result.get("result", {}).get("picked"),
-        "top_rules": (worker_result.get("result", {}).get("search", {}).get("top_rules") or [])[:3],
-        "note": "Stored top rules + stability metrics.",
+        "result_path": result_path,
+        "picked": picked,
+        "top_rules": top_rules,
     }
-    return json.dumps(payload, ensure_ascii=False)
+    return json.dumps(note, ensure_ascii=False)
 
 
 def _autopilot_one_cycle():
@@ -107,52 +250,163 @@ def _autopilot_one_cycle():
         "storage_path": DEFAULT_STORAGE_PATH,
         "_results_bucket": DEFAULT_RESULTS_BUCKET,
         "time_split_ratio": 0.7,
+        # no market specified: worker chooses
     }
 
     submitted = _run_tool("submit_job", {"task_type": "strategy_search", "params": params})
-    st.success("Autopilot: submitted strategy_search.")
-    st.json(submitted)
-
     job_id = submitted.get("job_id")
+
+    st.session_state.last_autopilot = {"stage": "submitted", "submitted": submitted}
     if not job_id:
-        st.error("No job_id returned.")
+        st.session_state.last_autopilot["stage"] = "error"
+        st.session_state.last_autopilot["error"] = "No job_id returned from submit_job"
         return
 
     waited = _run_tool("wait_for_job", {"job_id": job_id, "timeout_s": 900, "poll_s": 5, "auto_download": True})
-    st.info("Autopilot: wait_for_job output.")
-    st.json(waited)
+    st.session_state.last_autopilot["waited"] = waited
 
-    # ✅ DO NOT LET GOOGLE SHEETS WRITE CRASH THE APP
-    state_out = _run_tool("set_research_state", {"key": "last_autopilot_ran_at", "value": datetime.utcnow().isoformat()})
-    if not state_out.get("ok", True):
-        st.warning(f"research_state write failed (non-fatal): {state_out}")
+    # record state (non-fatal)
+    _run_tool("set_research_state", {"key": "last_autopilot_ran_at", "value": datetime.utcnow().isoformat()})
+    _run_tool("set_research_state", {"key": "last_job_id", "value": job_id})
 
     if waited.get("status") != "done":
-        st.warning("Job not done yet (or error).")
+        st.session_state.last_autopilot["stage"] = waited.get("status")
         return
 
-    worker_result = waited.get("result") or {}
-    # store structured memory (also non-fatal)
-    note = _structured_note(worker_result, job_id)
-    mem_out = _run_tool("append_research_note", {"note": note, "tags": "autopilot,worker,structured"})
-    if not mem_out.get("ok", True):
-        st.warning(f"research_memory write failed (non-fatal): {mem_out}")
-    else:
-        st.success("Saved structured research_memory row.")
+    job = waited.get("job") or {}
+    result_path = job.get("result_path") or ""
+    result_json = waited.get("result") or {}
 
+    # Save structured research memory (non-fatal)
+    note = _structured_note(result_json, job_id, result_path)
+    _run_tool("append_research_note", {"note": note, "tags": "autopilot,worker,structured"})
+
+    # Update more state to help “learning”
+    try:
+        picked = (result_json.get("result") or {}).get("picked") or {}
+        top = ((result_json.get("result") or {}).get("search") or {}).get("top_rules") or []
+        sig = ""
+        if top:
+            sig = "|".join([f"{c.get('col')}:[{c.get('min')},{c.get('max')}]" for c in (top[0].get("rule") or [])])
+        _run_tool("set_research_state", {"key": "last_market", "value": str(picked.get("pl_column", ""))})
+        _run_tool("set_research_state", {"key": "last_rule_signature", "value": sig})
+        _run_tool("set_research_state", {"key": "last_result_path", "value": result_path})
+    except Exception:
+        pass
+
+    st.session_state.last_autopilot["stage"] = "done"
+
+
+# ============================================================
+# Sidebar UI (sessions + autopilot + tools)
+# ============================================================
 
 with st.sidebar:
     st.caption(f"Model: `{MODEL}`")
-    st.caption(f"Session: `{SESSION_ID}`")
     st.caption(f"Data: `{DEFAULT_STORAGE_BUCKET}/{DEFAULT_STORAGE_PATH}`")
-    st.caption(f"Results bucket: `{DEFAULT_RESULTS_BUCKET}`")
+    st.caption(f"Results: `{DEFAULT_RESULTS_BUCKET}`")
+    st.divider()
 
-    if st.button("Run 1 autopilot cycle"):
-        _autopilot_one_cycle()
+    # --- sessions ---
+    st.subheader("💾 Chat Sessions")
+    sessions = _load_sessions()
+    # show newest last
+    sessions_display = list(reversed(sessions))
+    options = [{"session_id": SESSION_ID, "title": f"(current) {SESSION_ID[:8]}"}] + [
+        {"session_id": s.get("session_id"), "title": s.get("title") or s.get("session_id")[:8]} for s in sessions_display
+        if s.get("session_id") and s.get("session_id") != SESSION_ID
+    ]
+
+    labels = [f"{o['title']} — {o['session_id'][:8]}" for o in options]
+    selected_idx = 0
+    chosen = st.selectbox("Select session", options=list(range(len(options))), format_func=lambda i: labels[i], index=selected_idx)
+
+    if options[chosen]["session_id"] != SESSION_ID:
+        _set_session(options[chosen]["session_id"])
+        st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        _try_load_chat(st.session_state.session_id)
+        st.rerun()
+
+    colA, colB = st.columns(2)
+    with colA:
+        if st.button("➕ New"):
+            sid = _new_session_id()
+            _set_session(sid)
+            st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+            _persist_chat(title=f"Session {sid[:8]}")
+            st.rerun()
+
+    with colB:
+        if st.button("💾 Save"):
+            _persist_chat()
+            st.success("Saved.")
+
+    new_title = st.text_input("Rename current session", value="")
+    if st.button("Rename"):
+        if new_title.strip():
+            _run_tool("rename_chat", {"session_id": SESSION_ID, "title": new_title.strip()})
+            _persist_chat(title=new_title.strip())
+            st.success("Renamed.")
+            st.rerun()
+
+    if st.button("🗑️ Delete current session"):
+        _run_tool("delete_chat", {"session_id": SESSION_ID})
+        sid = _new_session_id()
+        _set_session(sid)
+        st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        _persist_chat(title=f"Session {sid[:8]}")
+        st.success("Deleted + created new.")
+        st.rerun()
 
     st.divider()
-    if st.button("Recent research_memory"):
+
+    # --- autopilot ---
+    st.subheader("🤖 Autopilot")
+    if st.button("Run 1 autopilot cycle"):
+        _autopilot_one_cycle()
+        st.rerun()
+
+    st.divider()
+    st.subheader("🧪 Quick tools")
+    if st.button("Recent research_memory (10)"):
         st.json(_run_tool("get_recent_research_notes", {"limit": 10}))
+
+    if st.button("Research state"):
+        st.json(_run_tool("get_research_state", {}))
+
+    if st.button("List CSV columns"):
+        loc = _dataset_locator()
+        st.json(_run_tool("list_columns", {**loc}))
+
+
+# ============================================================
+# Main panels: Autopilot receipt + Chat
+# ============================================================
+
+st.subheader("🧾 Autopilot Receipt")
+last = st.session_state.get("last_autopilot")
+if not last:
+    st.info("No autopilot run in this session yet.")
+else:
+    st.json(last)
+    # also summarize top rule if available
+    try:
+        waited = last.get("waited") or {}
+        if waited.get("status") == "done":
+            payload = waited.get("result") or {}
+            picked = (payload.get("result") or {}).get("picked") or {}
+            top_rules = ((payload.get("result") or {}).get("search") or {}).get("top_rules") or []
+            if top_rules:
+                st.markdown(
+                    f"**Picked:** `{picked.get('pl_column')}` (side={picked.get('side')}, odds_col={picked.get('odds_col')})  \n"
+                    f"**Top rule:** `{_format_rule(top_rules[0])}`  \n"
+                    f"**Test ROI:** `{top_rules[0].get('test', {}).get('roi')}` | **Test bets:** `{top_rules[0].get('test', {}).get('bets')}`  \n"
+                    f"**Game-level DD (pts):** `{top_rules[0].get('test_game_level', {}).get('max_dd')}` | "
+                    f"**Losing streak (bets/pts):** `{top_rules[0].get('test_game_level', {}).get('losing_streak', {}).get('bets')}` / "
+                    f"`{top_rules[0].get('test_game_level', {}).get('losing_streak', {}).get('pl')}`"
+                )
+    except Exception:
+        pass
 
 
 st.subheader("💬 Chat")
@@ -162,8 +416,8 @@ for m in st.session_state.messages:
     with st.chat_message(m["role"]):
         st.markdown(m.get("content", ""))
 
+
 user_msg = st.chat_input("Ask the researcher…")
 if user_msg:
-    st.session_state.messages.append({"role": "user", "content": user_msg})
-    _persist_chat()
+    _chat_with_tools(user_msg)
     st.rerun()
