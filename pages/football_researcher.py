@@ -32,7 +32,7 @@ MODEL = PREFERRED or "gpt-5.1"
 
 
 # ============================================================
-# Defaults
+# Defaults (Supabase Storage dataset location)
 # ============================================================
 
 DEFAULT_STORAGE_BUCKET = os.getenv("DATA_STORAGE_BUCKET") or st.secrets.get("DATA_STORAGE_BUCKET", "football-data")
@@ -40,6 +40,9 @@ DEFAULT_STORAGE_PATH = os.getenv("DATA_STORAGE_PATH") or st.secrets.get("DATA_ST
 DEFAULT_RESULTS_BUCKET = os.getenv("RESULTS_BUCKET") or st.secrets.get("RESULTS_BUCKET", "football-results")
 
 MAX_MESSAGES_TO_KEEP = int(os.getenv("MAX_CHAT_MESSAGES") or st.secrets.get("MAX_CHAT_MESSAGES", 220))
+
+
+DATA_TOOLS = {"load_data_basic", "list_columns", "basic_roi_for_pl_column"}
 
 
 # ============================================================
@@ -55,8 +58,6 @@ def _run_tool(name: str, args: Dict[str, Any]) -> Any:
 
 # ============================================================
 # Tools schema for OpenAI function calling
-# IMPORTANT: only include tools the LLM should call.
-# (Never include chat persistence tools here)
 # ============================================================
 
 LLM_TOOLS = [
@@ -70,9 +71,9 @@ LLM_TOOLS = [
     {"type": "function", "function": {"name": "set_research_state", "description": "Set research_state KV.", "parameters": {"type": "object", "properties": {"key": {"type": "string"}, "value": {"type": "string"}}, "required": ["key", "value"]}}},
 
     # Dataset (Supabase Storage only)
-    {"type": "function", "function": {"name": "load_data_basic", "description": "Load CSV preview from Supabase Storage.", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}}, "required": ["storage_bucket", "storage_path"]}}},
-    {"type": "function", "function": {"name": "list_columns", "description": "List CSV columns from Supabase Storage.", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}}, "required": ["storage_bucket", "storage_path"]}}},
-    {"type": "function", "function": {"name": "basic_roi_for_pl_column", "description": "Row-level ROI for PL column (outcome only).", "parameters": {"type": "object", "properties": {"pl_column": {"type": "string"}, "storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}}, "required": ["pl_column", "storage_bucket", "storage_path"]}}},
+    {"type": "function", "function": {"name": "load_data_basic", "description": "Load CSV preview from Supabase Storage.", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}}, "required": []}}},
+    {"type": "function", "function": {"name": "list_columns", "description": "List CSV columns from Supabase Storage.", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}}, "required": []}}},
+    {"type": "function", "function": {"name": "basic_roi_for_pl_column", "description": "Row-level ROI for PL column (outcome only).", "parameters": {"type": "object", "properties": {"pl_column": {"type": "string"}, "storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}}, "required": ["pl_column"]}}},
 
     # Jobs
     {"type": "function", "function": {"name": "submit_job", "description": "Submit Modal worker job.", "parameters": {"type": "object", "properties": {"task_type": {"type": "string"}, "params": {"type": "object"}}, "required": ["task_type", "params"]}}},
@@ -86,7 +87,7 @@ LLM_TOOLS = [
 # System prompt
 # ============================================================
 
-SYSTEM_PROMPT = """You are FootballResearcher — an autonomous research agent that discovers profitable, robust football trading strategy criteria.
+SYSTEM_PROMPT = f"""You are FootballResearcher — an autonomous research agent that discovers profitable, robust football trading strategy criteria.
 
 Source of truth:
 - Use Google Sheet tabs: dataset_overview, research_rules, column_definitions, evaluation_framework, research_state, research_memory.
@@ -97,14 +98,14 @@ Hard constraints:
 - Always report sample sizes and stability (train vs test gap) and drawdown/losing streak in POINTS.
 - Prefer simple rules that generalise; penalise fragile, tiny samples.
 
-Objective:
-- When user asks to “design a strategy”, you should plan, run experiments (using worker jobs when needed), log results into research_memory, and present progress updates.
-- Be decisive: pick what to test next. Only ask user if blocked by missing config.
+Data access:
+- Dataset MUST be loaded from Supabase Storage ONLY.
+- Default dataset is: bucket="{DEFAULT_STORAGE_BUCKET}", path="{DEFAULT_STORAGE_PATH}".
+- Do NOT invent bucket/path like "dataset/master.csv". If user doesn’t specify bucket/path, always use the default dataset.
 
-Important:
-- In CHAT mode: reply conversationally (no tools).
-- In AUTOPILOT mode: tools enabled, but still explain briefly.
-- Dataset must be loaded from Supabase Storage ONLY (bucket/path). Never use URLs.
+Mode rules:
+- In CHAT mode: conversational; do not call tools unless explicitly asked.
+- In AUTOPILOT mode: tools enabled; still explain briefly.
 """
 
 
@@ -153,14 +154,11 @@ def _trim_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         return messages
     system = messages[0:1]
     tail = messages[-(MAX_MESSAGES_TO_KEEP - 1):]
-
-    # Avoid trimming into an orphaned tool message
     while tail and tail[0].get("role") == "tool":
         idx_start = len(messages) - len(tail) - 1
         if idx_start <= 0:
             break
         tail = [messages[idx_start]] + tail
-
     return system + tail
 
 
@@ -261,7 +259,7 @@ def _repair_tool_call_chains(messages: List[Dict[str, Any]]) -> List[Dict[str, A
                 if not pending_ids:
                     pending_assistant_index = None
                     pending_tool_indices = []
-            continue  # drop orphans
+            continue
 
         if role == "user":
             if pending_ids:
@@ -276,15 +274,7 @@ def _repair_tool_call_chains(messages: List[Dict[str, Any]]) -> List[Dict[str, A
 
 
 def _sanitize_history_for_llm(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    repaired = _repair_tool_call_chains(messages)
-    out: List[Dict[str, Any]] = []
-    first = repaired[0] if repaired else {"role": "system", "content": SYSTEM_PROMPT}
-    out.append({"role": "system", "content": first.get("content", SYSTEM_PROMPT)})
-
-    for m in repaired[1:]:
-        if m.get("role") in ("user", "assistant", "tool"):
-            out.append(m)
-    return out
+    return _repair_tool_call_chains(messages)
 
 
 # ============================================================
@@ -293,7 +283,6 @@ def _sanitize_history_for_llm(messages: List[Dict[str, Any]]) -> List[Dict[str, 
 
 def _call_llm(messages: List[Dict[str, Any]]):
     st.session_state.messages = _repair_tool_call_chains(st.session_state.messages)
-
     mode = st.session_state.agent_mode
     safe_messages = _sanitize_history_for_llm(st.session_state.messages)
 
@@ -311,6 +300,39 @@ def _call_llm(messages: List[Dict[str, Any]]):
         return client.chat.completions.create(model=MODEL, messages=chat_only)
 
     return client.chat.completions.create(model=MODEL, messages=safe_messages, tools=LLM_TOOLS, tool_choice="auto")
+
+
+# ============================================================
+# Tool argument guard: force correct dataset location
+# ============================================================
+
+def _apply_default_dataset_args(tool_name: str, args: Dict[str, Any], user_text: str) -> Dict[str, Any]:
+    """
+    If the model calls dataset tools with missing/incorrect bucket/path,
+    force the configured DEFAULT_STORAGE_BUCKET/DEFAULT_STORAGE_PATH.
+    Only allow override if the user explicitly mentions a bucket/path in the message.
+    """
+    if tool_name not in DATA_TOOLS:
+        return args
+
+    user_lower = (user_text or "").lower()
+    user_specified = ("storage_bucket" in user_lower) or ("storage_path" in user_lower) or (DEFAULT_STORAGE_BUCKET.lower() in user_lower) or (DEFAULT_STORAGE_PATH.lower() in user_lower)
+
+    sb = (args.get("storage_bucket") or "").strip()
+    sp = (args.get("storage_path") or "").strip()
+
+    if user_specified:
+        # user is intentionally controlling location; just fill blanks if missing
+        if not sb:
+            args["storage_bucket"] = DEFAULT_STORAGE_BUCKET
+        if not sp:
+            args["storage_path"] = DEFAULT_STORAGE_PATH
+        return args
+
+    # otherwise: force defaults (prevents dataset/master.csv mistakes)
+    args["storage_bucket"] = DEFAULT_STORAGE_BUCKET
+    args["storage_path"] = DEFAULT_STORAGE_PATH
+    return args
 
 
 # ============================================================
@@ -353,7 +375,9 @@ def _chat_with_tools(user_text: str, max_rounds: int = 6):
             name = tc.function.name
             args = json.loads(tc.function.arguments or "{}")
 
-            # ✅ CRITICAL: tool exceptions must NEVER crash the whole app
+            # ✅ enforce correct dataset location
+            args = _apply_default_dataset_args(name, args, user_text)
+
             try:
                 out = _run_tool(name, args)
             except Exception as e:
@@ -405,7 +429,7 @@ with st.sidebar:
     colA, colB = st.columns(2)
     with colA:
         if st.button("➕ New"):
-            sid = _new_session_id()
+            sid = str(uuid.uuid4())
             _set_session(sid)
             st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
             _persist_chat(title=f"Session {sid[:8]}")
@@ -425,7 +449,7 @@ with st.sidebar:
 
     if st.button("🗑️ Delete current session"):
         _run_tool("delete_chat", {"session_id": SESSION_ID})
-        sid = _new_session_id()
+        sid = str(uuid.uuid4())
         _set_session(sid)
         st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         _persist_chat(title=f"Session {sid[:8]}")
