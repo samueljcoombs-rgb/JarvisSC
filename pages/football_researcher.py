@@ -60,7 +60,8 @@ def _run_tool(name: str, args: Dict[str, Any]) -> Any:
 
 # ============================================================
 # Tools schema for OpenAI function calling
-# NOTE: OpenAI now requires array schemas to define "items".
+# IMPORTANT: Only include tools the LLM should use.
+# Do NOT include app-internal tools like save_chat/load_chat/etc.
 # ============================================================
 
 TOOLS = [
@@ -84,51 +85,6 @@ TOOLS = [
     {"type": "function", "function": {"name": "get_job", "description": "Get job status by job_id.", "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]}}},
     {"type": "function", "function": {"name": "wait_for_job", "description": "Wait for completion; optionally downloads results.", "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}, "timeout_s": {"type": "integer"}, "poll_s": {"type": "integer"}, "auto_download": {"type": "boolean"}}, "required": ["job_id"]}}},
     {"type": "function", "function": {"name": "download_result", "description": "Download a result JSON from storage by path.", "parameters": {"type": "object", "properties": {"result_path": {"type": "string"}, "bucket": {"type": "string"}}, "required": ["result_path"]}}},
-
-    # ---- Chat sessions (Supabase Storage)
-    {"type": "function", "function": {"name": "list_chats", "description": "List saved chat sessions.", "parameters": {"type": "object", "properties": {"limit": {"type": "integer"}}, "required": []}}},
-
-    # ✅ FIXED: messages is an array, so it MUST have "items"
-    {
-        "type": "function",
-        "function": {
-            "name": "save_chat",
-            "description": "Save chat session.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "session_id": {"type": "string"},
-                    "messages": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "role": {"type": "string"},
-                                "content": {"type": "string"},
-                                "tool_call_id": {"type": "string"},
-                                "tool_calls": {
-                                    "type": "array",
-                                    "items": {"type": "object"},
-                                },
-                            },
-                            "required": ["role"],
-                            "additionalProperties": True,
-                        },
-                    },
-                    "title": {"type": "string"},
-                },
-                "required": ["session_id", "messages"],
-            },
-        },
-    },
-
-    {"type": "function", "function": {"name": "load_chat", "description": "Load chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}}, "required": ["session_id"]}}},
-    {"type": "function", "function": {"name": "rename_chat", "description": "Rename chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}, "title": {"type": "string"}}, "required": ["session_id", "title"]}}},
-    {"type": "function", "function": {"name": "delete_chat", "description": "Delete chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}}, "required": ["session_id"]}}},
-
-    # ---- Code ops (manual workflow via UI)
-    {"type": "function", "function": {"name": "run_py_checks", "description": "Run python syntax/import checks for project files.", "parameters": {"type": "object", "properties": {"paths": {"type": "array", "items": {"type": "string"}}}, "required": ["paths"]}}},
-    {"type": "function", "function": {"name": "github_commit_files", "description": "Commit full file contents to GitHub (PUT contents API).", "parameters": {"type": "object", "properties": {"message": {"type": "string"}, "files": {"type": "array", "items": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}}, "required": ["message", "files"]}}},
 ]
 
 
@@ -170,7 +126,7 @@ st.title("⚽ Football Researcher")
 
 
 # ============================================================
-# Session management
+# Session management (chat persistence is APP-INTERNAL, not LLM tools)
 # ============================================================
 
 def _load_sessions() -> List[Dict[str, Any]]:
@@ -507,7 +463,7 @@ with st.sidebar:
     colA, colB = st.columns(2)
     with colA:
         if st.button("➕ New"):
-            sid = str(uuid.uuid4())
+            sid = _new_session_id()
             _set_session(sid)
             st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
             _persist_chat(title=f"Session {sid[:8]}")
@@ -528,7 +484,7 @@ with st.sidebar:
 
     if st.button("🗑️ Delete current session"):
         _run_tool("delete_chat", {"session_id": SESSION_ID})
-        sid = str(uuid.uuid4())
+        sid = _new_session_id()
         _set_session(sid)
         st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         _persist_chat(title=f"Session {sid[:8]}")
@@ -548,42 +504,6 @@ with st.sidebar:
         receipt = _poll_latest_job_and_log_if_done(rs2)
         st.session_state.last_autopilot = {"stage": "polled", "receipt": receipt}
         st.rerun()
-
-    st.divider()
-
-    with st.expander("🛠 Developer: Checks + Commit to GitHub", expanded=False):
-        st.caption("Edits in Streamlit are ephemeral. Use this panel to validate and commit to GitHub safely.")
-        st.caption("Requires secrets/env: GITHUB_PAT, GITHUB_USERNAME, GITHUB_REPO, optional GITHUB_BRANCH.")
-
-        allowed = tools_code.allowed_paths()
-        target_path = st.selectbox("Target file path", options=allowed, index=0)
-        new_content = st.text_area("New FULL file content (paste entire file)", height=250)
-
-        check_paths = st.multiselect(
-            "Run checks on (recommended: all changed files)",
-            options=allowed,
-            default=[target_path],
-        )
-
-        if st.button("✅ Run Python checks"):
-            res = _run_tool("run_py_checks", {"paths": check_paths})
-            st.session_state.last_dev_checks = res
-            st.json(res)
-
-        commit_msg = st.text_input("Commit message", value="Fix tools schema + updates")
-
-        if st.button("🚀 Commit to GitHub (only if checks OK)"):
-            checks = st.session_state.get("last_dev_checks") or {}
-            if not checks or not checks.get("ok"):
-                st.error("Checks not OK (or not run). Run checks first and ensure ok=true.")
-            elif not new_content.strip():
-                st.error("Paste the full file content first.")
-            else:
-                res = _run_tool(
-                    "github_commit_files",
-                    {"message": commit_msg, "files": [{"path": target_path, "content": new_content}]},
-                )
-                st.json(res)
 
 
 # ============================================================
