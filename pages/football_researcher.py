@@ -26,10 +26,6 @@ def _init_client() -> OpenAI:
 client = _init_client()
 
 def _select_best_model(c: OpenAI) -> str:
-    """
-    Prefer GPT-5. If you set Streamlit secret PREFERRED_OPENAI_MODEL="gpt-5",
-    this will lock it.
-    """
     preferred = (os.getenv("PREFERRED_OPENAI_MODEL", "").strip()
                  or st.secrets.get("PREFERRED_OPENAI_MODEL", ""))
     if preferred:
@@ -53,27 +49,22 @@ MODEL = _select_best_model(client)
 # ---------------------------
 
 TOOL_FUNCS: Dict[str, Any] = {
-    # definitions / rules / framework
     "get_dataset_overview": functions.get_dataset_overview,
     "get_column_definitions": functions.get_column_definitions,
     "get_research_rules": functions.get_research_rules,
     "get_evaluation_framework": functions.get_evaluation_framework,
 
-    # memory/state
     "append_research_note": functions.append_research_note,
     "get_recent_research_notes": functions.get_recent_research_notes,
     "get_research_state": functions.get_research_state,
     "set_research_state": functions.set_research_state,
 
-    # data
     "load_data_basic": functions.load_data_basic,
     "list_columns": functions.list_columns,
 
-    # evaluation
     "strategy_performance_summary": functions.strategy_performance_summary,
     "strategy_performance_batch": functions.strategy_performance_batch,
 
-    # offloaded compute
     "submit_job": functions.submit_job,
     "get_job": functions.get_job,
     "download_result": functions.download_result,
@@ -114,7 +105,7 @@ TOOLS_SCHEMA: List[Dict[str, Any]] = [
                                  "compute_streaks": {"type": "boolean"}},
                   "required": ["pl_columns"]}),
 
-    # submit_job params OPTIONAL (prevents model failing by omission)
+    # params optional
     _tool_schema("submit_job", "Submit heavy job to Supabase queue (Modal worker).",
                  {"type": "object", "properties": {"task_type": {"type": "string"}, "params": {"type": "object"}}, "required": ["task_type"]}),
     _tool_schema("get_job", "Fetch job status for job_id.",
@@ -132,12 +123,44 @@ Mission:
 - Never use outcome columns (PL, RETURN, BET RESULT, etc.) as predictive features.
 
 Tools:
-- Google Sheets: definitions/rules/framework + persistent research notes/state
-- Evaluation: ROI (back=PL per 1pt bet, lay=PL per total liability using mapped odds column), plus game-level streak/drawdown in points
-- Offload heavy compute: submit_job -> poll get_job -> download_result (Modal worker)
+- Google Sheets memory/state/definitions
+- Strategy evaluation tools
+- Offload heavy compute: submit_job -> get_job -> download_result
 
-Always log meaningful conclusions using append_research_note and maintain progress in research_state.
+Always log meaningful conclusions with append_research_note and maintain progress in research_state.
 """
+
+
+# ---------------------------
+# Safety: remove orphan tool messages
+# ---------------------------
+
+def _sanitize_history(msgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Removes any 'tool' messages that are not valid responses to a preceding assistant tool_call.
+    This prevents OpenAI 400: "tool must be a response to preceding tool_calls".
+    """
+    cleaned: List[Dict[str, Any]] = []
+    last_assistant_had_tool_calls = False
+
+    for m in msgs:
+        role = m.get("role")
+        if role == "assistant":
+            last_assistant_had_tool_calls = bool(m.get("tool_calls"))
+            cleaned.append(m)
+            continue
+
+        if role == "tool":
+            if last_assistant_had_tool_calls and m.get("tool_call_id"):
+                cleaned.append(m)
+            # else: drop it
+            continue
+
+        # user/system/etc
+        cleaned.append(m)
+        last_assistant_had_tool_calls = False
+
+    return cleaned
 
 
 # ---------------------------
@@ -179,7 +202,6 @@ def _run_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         return {"error": f"{type(e).__name__}: {e}", "tool": name, "args": args}
 
 def _minimal_tool_call_dict(tc: Any) -> Dict[str, Any]:
-    # Strict minimal shape OpenAI expects in messages history
     return {
         "id": tc.id,
         "type": "function",
@@ -192,6 +214,9 @@ def _minimal_tool_call_dict(tc: Any) -> Dict[str, Any]:
 def _chat_with_tools(user_text: str, max_rounds: int = 6) -> None:
     if "messages" not in st.session_state:
         st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+    # sanitize first (fixes your current crash without forcing a full reset)
+    st.session_state.messages = _sanitize_history(st.session_state.messages)
 
     st.session_state.messages.append({"role": "user", "content": user_text})
 
@@ -218,7 +243,6 @@ def _chat_with_tools(user_text: str, max_rounds: int = 6) -> None:
 
                 out = _run_tool(tool_name, tool_args)
 
-                # Tool response MUST be: role=tool + tool_call_id + content
                 st.session_state.messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
@@ -242,7 +266,9 @@ st.caption(f"Model: {MODEL}")
 if "messages" not in st.session_state:
     st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-# Render chat
+# always sanitize on load too
+st.session_state.messages = _sanitize_history(st.session_state.messages)
+
 for m in st.session_state.messages:
     if m["role"] == "system":
         continue
@@ -253,13 +279,11 @@ for m in st.session_state.messages:
     with st.chat_message(m["role"]):
         st.write(m.get("content", ""))
 
-# Chat input
 user_msg = st.chat_input("Ask the researcher…")
 if user_msg:
     _chat_with_tools(user_msg)
     st.rerun()
 
-# Debug section
 with st.expander("Debug / Quick tests", expanded=False):
     c1, c2, c3 = st.columns(3)
 
@@ -270,10 +294,14 @@ with st.expander("Debug / Quick tests", expanded=False):
 
     with c2:
         if st.button("Test: submit ping job (DIRECT)"):
-            # bypass model so we ALWAYS get a job_id
             out = _run_tool("submit_job", {"task_type": "ping", "params": {"hello": "world"}})
-            st.session_state.messages.append({"role": "assistant", "content": "Submitted ping job (direct tool call)."})
-            st.session_state.messages.append({"role": "tool", "tool_call_id": "debug_submit_job", "content": json.dumps(out, ensure_ascii=False)})
+            # IMPORTANT: log as assistant message, NOT role=tool
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": "Submitted ping job (direct tool call). Output:\n\n```json\n"
+                           + json.dumps(out, ensure_ascii=False, indent=2) +
+                           "\n```"
+            })
             st.rerun()
 
     with c3:
