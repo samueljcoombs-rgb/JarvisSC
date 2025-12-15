@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Set
 
 import streamlit as st
 from openai import OpenAI
-from openai import BadRequestError  # IMPORTANT: surface real error details
+from openai import BadRequestError
 
 from modules import football_tools as functions
 
@@ -28,7 +28,7 @@ def _init_client() -> OpenAI:
 client = _init_client()
 
 PREFERRED = (os.getenv("PREFERRED_OPENAI_MODEL") or st.secrets.get("PREFERRED_OPENAI_MODEL") or "").strip()
-MODEL = PREFERRED or "gpt-5.1"  # pinned
+MODEL = PREFERRED or "gpt-5.1"
 
 
 # ============================================================
@@ -39,7 +39,6 @@ DEFAULT_STORAGE_BUCKET = os.getenv("DATA_STORAGE_BUCKET") or st.secrets.get("DAT
 DEFAULT_STORAGE_PATH = os.getenv("DATA_STORAGE_PATH") or st.secrets.get("DATA_STORAGE_PATH", "football_ai_NNIA.csv")
 DEFAULT_RESULTS_BUCKET = os.getenv("RESULTS_BUCKET") or st.secrets.get("RESULTS_BUCKET", "football-results")
 
-# Prevent giant conversations (browser crashes)
 MAX_MESSAGES_TO_KEEP = int(os.getenv("MAX_CHAT_MESSAGES") or st.secrets.get("MAX_CHAT_MESSAGES", 220))
 
 
@@ -81,7 +80,6 @@ TOOLS = [
     {"type": "function", "function": {"name": "wait_for_job", "description": "Wait for completion; optionally downloads results.", "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}, "timeout_s": {"type": "integer"}, "poll_s": {"type": "integer"}, "auto_download": {"type": "boolean"}}, "required": ["job_id"]}}},
     {"type": "function", "function": {"name": "download_result", "description": "Download a result JSON from storage by path.", "parameters": {"type": "object", "properties": {"result_path": {"type": "string"}, "bucket": {"type": "string"}}, "required": ["result_path"]}}},
 
-    # chat sessions
     {"type": "function", "function": {"name": "list_chats", "description": "List saved chat sessions.", "parameters": {"type": "object", "properties": {"limit": {"type": "integer"}}, "required": []}}},
     {"type": "function", "function": {"name": "save_chat", "description": "Save chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}, "messages": {"type": "array"}, "title": {"type": "string"}}, "required": ["session_id", "messages"]}}},
     {"type": "function", "function": {"name": "load_chat", "description": "Load chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}}, "required": ["session_id"]}}},
@@ -196,16 +194,13 @@ if "agent_mode" not in st.session_state:
 
 
 # ============================================================
-# CRITICAL: sanitize history before sending to OpenAI
-# - drops orphan tool messages
-# - preserves assistant.tool_calls so tool messages remain valid
+# Sanitise history for OpenAI (prevents invalid tool state)
 # ============================================================
 
 def _sanitize_history_for_llm(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if not messages:
         return [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    # Always ensure first message is system
     out: List[Dict[str, Any]] = []
     first = messages[0]
     if first.get("role") != "system":
@@ -215,20 +210,16 @@ def _sanitize_history_for_llm(messages: List[Dict[str, Any]]) -> List[Dict[str, 
 
     expecting_tool_ids: Set[str] = set()
 
-    # Walk through the rest
     for m in messages[1:]:
         role = (m.get("role") or "").strip()
 
         if role == "assistant":
-            # reset expectation on each assistant turn
             expecting_tool_ids = set()
-
             clean_assistant: Dict[str, Any] = {
                 "role": "assistant",
                 "content": m.get("content", "") or "",
             }
 
-            # preserve tool_calls if present and well-formed
             tc = m.get("tool_calls")
             if isinstance(tc, list) and tc:
                 cleaned_tool_calls = []
@@ -240,11 +231,7 @@ def _sanitize_history_for_llm(messages: List[Dict[str, Any]]) -> List[Dict[str, 
                         args = fn.get("arguments", "{}")
                         if cid and name:
                             cleaned_tool_calls.append(
-                                {
-                                    "id": cid,
-                                    "type": "function",
-                                    "function": {"name": name, "arguments": args},
-                                }
+                                {"id": cid, "type": "function", "function": {"name": name, "arguments": args}}
                             )
                             expecting_tool_ids.add(cid)
                     except Exception:
@@ -258,37 +245,30 @@ def _sanitize_history_for_llm(messages: List[Dict[str, Any]]) -> List[Dict[str, 
 
         if role == "tool":
             tcid = m.get("tool_call_id")
-            # ✅ FIX: Only keep tool messages if we are expecting tool IDs AND it matches.
             if tcid and expecting_tool_ids and tcid in expecting_tool_ids:
                 out.append({"role": "tool", "tool_call_id": tcid, "content": m.get("content", "") or ""})
-            # otherwise DROP orphan tool messages
             continue
 
         if role == "user":
             out.append({"role": "user", "content": m.get("content", "") or ""})
             continue
 
-        if role == "system":
-            # ignore extra system messages to keep things stable
-            continue
-
-        # drop unknown roles
+        # drop other roles
         continue
 
     return out
 
 
 # ============================================================
-# LLM call (CHAT strips tool stuff; AUTOPILOT allows tools)
+# LLM call (FIX: never send tool_choice unless tools is present)
 # ============================================================
 
 def _call_llm(messages: List[Dict[str, Any]]):
     mode = st.session_state.agent_mode
-
     safe_messages = _sanitize_history_for_llm(messages)
 
     if mode == "chat":
-        # Strip tool role messages + tool_calls entirely before sending
+        # CHAT MODE: no tools, no tool_choice
         chat_only: List[Dict[str, Any]] = []
         for m in safe_messages:
             if m.get("role") == "tool":
@@ -303,9 +283,9 @@ def _call_llm(messages: List[Dict[str, Any]]):
         return client.chat.completions.create(
             model=MODEL,
             messages=chat_only,
-            tool_choice="none",
         )
 
+    # AUTOPILOT: tools enabled
     return client.chat.completions.create(
         model=MODEL,
         messages=safe_messages,
@@ -315,7 +295,7 @@ def _call_llm(messages: List[Dict[str, Any]]):
 
 
 # ============================================================
-# Chat loop (persists tool_calls properly)
+# Chat loop
 # ============================================================
 
 def _chat_with_tools(user_text: str, max_rounds: int = 6):
@@ -326,7 +306,7 @@ def _chat_with_tools(user_text: str, max_rounds: int = 6):
         try:
             resp = _call_llm(st.session_state.messages)
         except BadRequestError as e:
-            st.error("OpenAI BadRequestError (full details below). This usually means message history is invalid.")
+            st.error("OpenAI BadRequestError (full details below).")
             try:
                 st.json(e.response.json())
             except Exception:
@@ -336,7 +316,6 @@ def _chat_with_tools(user_text: str, max_rounds: int = 6):
         msg = resp.choices[0].message
         tool_calls = getattr(msg, "tool_calls", None)
 
-        # Persist assistant message AND tool_calls (critical)
         assistant_msg: Dict[str, Any] = {"role": "assistant", "content": msg.content or ""}
 
         if tool_calls:
@@ -349,7 +328,6 @@ def _chat_with_tools(user_text: str, max_rounds: int = 6):
                 for tc in tool_calls
             ]
 
-        # Always append assistant message (so UI doesn’t feel dead)
         if assistant_msg["content"]:
             st.session_state.messages.append(assistant_msg)
         else:
@@ -360,11 +338,9 @@ def _chat_with_tools(user_text: str, max_rounds: int = 6):
             else:
                 st.session_state.messages.append(assistant_msg)
 
-        # In chat mode, tools are disabled: stop
         if st.session_state.agent_mode == "chat":
             break
 
-        # Autopilot mode: execute tool calls
         if not tool_calls:
             break
 
@@ -431,7 +407,6 @@ def _autopilot_one_cycle():
     waited = _run_tool("wait_for_job", {"job_id": job_id, "timeout_s": 900, "poll_s": 5, "auto_download": True})
     st.session_state.last_autopilot["waited"] = waited
 
-    # state writes are non-fatal
     _run_tool("set_research_state", {"key": "last_autopilot_ran_at", "value": datetime.utcnow().isoformat()})
     _run_tool("set_research_state", {"key": "last_job_id", "value": job_id})
 
@@ -445,21 +420,6 @@ def _autopilot_one_cycle():
 
     note = _structured_note(result_json, job_id, result_path)
     _run_tool("append_research_note", {"note": note, "tags": "autopilot,worker,structured"})
-
-    # additional state helpful for “learning”
-    try:
-        picked = (result_json.get("result") or {}).get("picked") or {}
-        top = ((result_json.get("result") or {}).get("search") or {}).get("top_rules") or []
-        sig = ""
-        if top:
-            sig = "|".join(
-                [f"{c.get('col')}:[{c.get('min')},{c.get('max')}]" for c in (top[0].get("rule") or [])]
-            )
-        _run_tool("set_research_state", {"key": "last_market", "value": str(picked.get("pl_column", ""))})
-        _run_tool("set_research_state", {"key": "last_rule_signature", "value": sig})
-        _run_tool("set_research_state", {"key": "last_result_path", "value": result_path})
-    except Exception:
-        pass
 
     st.session_state.last_autopilot["stage"] = "done"
 
@@ -532,26 +492,15 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
+
     st.subheader("🤖 Autopilot")
     if st.button("Run 1 autopilot cycle"):
         _autopilot_one_cycle()
         st.rerun()
 
-    st.divider()
-    st.subheader("🧪 Quick tools")
-    if st.button("Recent research_memory (10)"):
-        st.json(_run_tool("get_recent_research_notes", {"limit": 10}))
-
-    if st.button("Research state"):
-        st.json(_run_tool("get_research_state", {}))
-
-    if st.button("List CSV columns"):
-        loc = _dataset_locator()
-        st.json(_run_tool("list_columns", {**loc}))
-
 
 # ============================================================
-# Main panels: Autopilot receipt + Chat
+# Main: Autopilot receipt + Chat
 # ============================================================
 
 st.subheader("🧾 Autopilot Receipt")
@@ -560,24 +509,6 @@ if not last:
     st.info("No autopilot run in this session yet.")
 else:
     st.json(last)
-    try:
-        waited = last.get("waited") or {}
-        if waited.get("status") == "done":
-            payload = waited.get("result") or {}
-            picked = (payload.get("result") or {}).get("picked") or {}
-            top_rules = ((payload.get("result") or {}).get("search") or {}).get("top_rules") or []
-            if top_rules:
-                st.markdown(
-                    f"**Picked:** `{picked.get('pl_column')}` (side={picked.get('side')}, odds_col={picked.get('odds_col')})  \n"
-                    f"**Top rule:** `{_format_rule(top_rules[0])}`  \n"
-                    f"**Test ROI:** `{top_rules[0].get('test', {}).get('roi')}` | **Test bets:** `{top_rules[0].get('test', {}).get('bets')}`  \n"
-                    f"**Game-level DD (pts):** `{top_rules[0].get('test_game_level', {}).get('max_dd')}` | "
-                    f"**Losing streak (bets/pts):** `{top_rules[0].get('test_game_level', {}).get('losing_streak', {}).get('bets')}` / "
-                    f"`{top_rules[0].get('test_game_level', {}).get('losing_streak', {}).get('pl')}`"
-                )
-    except Exception:
-        pass
-
 
 st.subheader("💬 Chat")
 for m in st.session_state.messages:
@@ -585,7 +516,6 @@ for m in st.session_state.messages:
         continue
     with st.chat_message(m.get("role", "assistant")):
         st.markdown(m.get("content", ""))
-
 
 user_msg = st.chat_input("Ask the researcher…")
 if user_msg:
