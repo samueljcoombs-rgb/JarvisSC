@@ -4,13 +4,14 @@ import os
 import json
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import streamlit as st
 from openai import OpenAI
 from openai import BadRequestError
 
-from modules import football_tools as functions
+from modules import football_tools as tools_football
+from modules import code_ops as tools_code
 
 
 # ============================================================
@@ -47,14 +48,18 @@ def _dataset_locator() -> Dict[str, str]:
 
 
 # ============================================================
-# Tool runner
+# Tool runner (supports multiple tool modules)
 # ============================================================
 
+TOOL_MODULES = (tools_football, tools_code)
+
+
 def _run_tool(name: str, args: Dict[str, Any]) -> Any:
-    fn = getattr(functions, name, None)
-    if not fn:
-        raise RuntimeError(f"Unknown tool: {name}")
-    return fn(**args)
+    for mod in TOOL_MODULES:
+        fn = getattr(mod, name, None)
+        if fn:
+            return fn(**args)
+    raise RuntimeError(f"Unknown tool: {name}")
 
 
 # ============================================================
@@ -62,6 +67,7 @@ def _run_tool(name: str, args: Dict[str, Any]) -> Any:
 # ============================================================
 
 TOOLS = [
+    # ---- Google Sheets (source of truth)
     {"type": "function", "function": {"name": "get_dataset_overview", "description": "Get dataset_overview tab.", "parameters": {"type": "object", "properties": {}, "required": []}}},
     {"type": "function", "function": {"name": "get_research_rules", "description": "Get research_rules tab.", "parameters": {"type": "object", "properties": {}, "required": []}}},
     {"type": "function", "function": {"name": "get_column_definitions", "description": "Get column_definitions tab.", "parameters": {"type": "object", "properties": {}, "required": []}}},
@@ -71,20 +77,27 @@ TOOLS = [
     {"type": "function", "function": {"name": "get_research_state", "description": "Get research_state KV.", "parameters": {"type": "object", "properties": {}, "required": []}}},
     {"type": "function", "function": {"name": "set_research_state", "description": "Set research_state KV.", "parameters": {"type": "object", "properties": {"key": {"type": "string"}, "value": {"type": "string"}}, "required": ["key", "value"]}}},
 
-    {"type": "function", "function": {"name": "load_data_basic", "description": "Load CSV preview.", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "csv_url": {"type": "string"}}, "required": []}}},
-    {"type": "function", "function": {"name": "list_columns", "description": "List CSV columns.", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "csv_url": {"type": "string"}}, "required": []}}},
-    {"type": "function", "function": {"name": "basic_roi_for_pl_column", "description": "Row-level ROI for PL column.", "parameters": {"type": "object", "properties": {"pl_column": {"type": "string"}, "storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "csv_url": {"type": "string"}}, "required": ["pl_column"]}}},
+    # ---- Dataset access (SUPABASE ONLY — no csv_url)
+    {"type": "function", "function": {"name": "load_data_basic", "description": "Load CSV preview from Supabase Storage.", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}}, "required": ["storage_bucket", "storage_path"]}}},
+    {"type": "function", "function": {"name": "list_columns", "description": "List CSV columns from Supabase Storage.", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}}, "required": ["storage_bucket", "storage_path"]}}},
+    {"type": "function", "function": {"name": "basic_roi_for_pl_column", "description": "Row-level ROI for PL column (outcome only).", "parameters": {"type": "object", "properties": {"pl_column": {"type": "string"}, "storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}}, "required": ["pl_column", "storage_bucket", "storage_path"]}}},
 
+    # ---- Background jobs (Modal worker via Supabase jobs table)
     {"type": "function", "function": {"name": "submit_job", "description": "Submit Modal worker job.", "parameters": {"type": "object", "properties": {"task_type": {"type": "string"}, "params": {"type": "object"}}, "required": ["task_type", "params"]}}},
     {"type": "function", "function": {"name": "get_job", "description": "Get job status by job_id.", "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]}}},
     {"type": "function", "function": {"name": "wait_for_job", "description": "Wait for completion; optionally downloads results.", "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}, "timeout_s": {"type": "integer"}, "poll_s": {"type": "integer"}, "auto_download": {"type": "boolean"}}, "required": ["job_id"]}}},
     {"type": "function", "function": {"name": "download_result", "description": "Download a result JSON from storage by path.", "parameters": {"type": "object", "properties": {"result_path": {"type": "string"}, "bucket": {"type": "string"}}, "required": ["result_path"]}}},
 
+    # ---- Chat sessions (Supabase Storage)
     {"type": "function", "function": {"name": "list_chats", "description": "List saved chat sessions.", "parameters": {"type": "object", "properties": {"limit": {"type": "integer"}}, "required": []}}},
     {"type": "function", "function": {"name": "save_chat", "description": "Save chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}, "messages": {"type": "array"}, "title": {"type": "string"}}, "required": ["session_id", "messages"]}}},
     {"type": "function", "function": {"name": "load_chat", "description": "Load chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}}, "required": ["session_id"]}}},
     {"type": "function", "function": {"name": "rename_chat", "description": "Rename chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}, "title": {"type": "string"}}, "required": ["session_id", "title"]}}},
     {"type": "function", "function": {"name": "delete_chat", "description": "Delete chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}}, "required": ["session_id"]}}},
+
+    # ---- Code ops (manual workflow via UI, but tools exist for future automation)
+    {"type": "function", "function": {"name": "run_py_checks", "description": "Run python syntax/import checks for project files.", "parameters": {"type": "object", "properties": {"paths": {"type": "array", "items": {"type": "string"}}}, "required": ["paths"]}}},
+    {"type": "function", "function": {"name": "github_commit_files", "description": "Commit full file contents to GitHub (PUT contents API).", "parameters": {"type": "object", "properties": {"message": {"type": "string"}, "files": {"type": "array", "items": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}}, "required": ["message", "files"]}}},
 ]
 
 
@@ -109,8 +122,14 @@ Objective:
 - Be decisive: pick what to test next. Only ask user if blocked by missing config.
 
 Important:
-- In CHAT mode you must reply conversationally and should not call tools unless explicitly asked.
+- In CHAT mode you must reply conversationally and must not call tools unless explicitly asked.
 - In AUTOPILOT mode you may call tools and run jobs, but still write a short explanation of what you did.
+
+Data access:
+- Dataset must be loaded from Supabase Storage ONLY (bucket/path). Never use URLs.
+
+Code changes:
+- Do not attempt to commit code unless the user explicitly asks to commit.
 """
 
 
@@ -215,10 +234,7 @@ def _sanitize_history_for_llm(messages: List[Dict[str, Any]]) -> List[Dict[str, 
 
         if role == "assistant":
             expecting_tool_ids = set()
-            clean_assistant: Dict[str, Any] = {
-                "role": "assistant",
-                "content": m.get("content", "") or "",
-            }
+            clean_assistant: Dict[str, Any] = {"role": "assistant", "content": m.get("content", "") or ""}
 
             tc = m.get("tool_calls")
             if isinstance(tc, list) and tc:
@@ -253,7 +269,6 @@ def _sanitize_history_for_llm(messages: List[Dict[str, Any]]) -> List[Dict[str, 
             out.append({"role": "user", "content": m.get("content", "") or ""})
             continue
 
-        # drop other roles
         continue
 
     return out
@@ -280,18 +295,10 @@ def _call_llm(messages: List[Dict[str, Any]]):
             else:
                 chat_only.append(m)
 
-        return client.chat.completions.create(
-            model=MODEL,
-            messages=chat_only,
-        )
+        return client.chat.completions.create(model=MODEL, messages=chat_only)
 
     # AUTOPILOT: tools enabled
-    return client.chat.completions.create(
-        model=MODEL,
-        messages=safe_messages,
-        tools=TOOLS,
-        tool_choice="auto",
-    )
+    return client.chat.completions.create(model=MODEL, messages=safe_messages, tools=TOOLS, tool_choice="auto")
 
 
 # ============================================================
@@ -320,11 +327,7 @@ def _chat_with_tools(user_text: str, max_rounds: int = 6):
 
         if tool_calls:
             assistant_msg["tool_calls"] = [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
-                }
+                {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
                 for tc in tool_calls
             ]
 
@@ -348,10 +351,7 @@ def _chat_with_tools(user_text: str, max_rounds: int = 6):
             name = tc.function.name
             args = json.loads(tc.function.arguments or "{}")
             out = _run_tool(name, args)
-
-            st.session_state.messages.append(
-                {"role": "tool", "tool_call_id": tc.id, "content": json.dumps(out, ensure_ascii=False)}
-            )
+            st.session_state.messages.append({"role": "tool", "tool_call_id": tc.id, "content": json.dumps(out, ensure_ascii=False)})
 
         st.session_state.messages = _trim_messages(st.session_state.messages)
 
@@ -359,22 +359,14 @@ def _chat_with_tools(user_text: str, max_rounds: int = 6):
 
 
 # ============================================================
-# Autopilot receipt + structured logging
+# Autopilot receipt + structured logging (NON-BLOCKING)
 # ============================================================
-
-def _format_rule(rule_obj: Dict[str, Any]) -> str:
-    parts = []
-    for cond in rule_obj.get("rule", []):
-        parts.append(f"{cond.get('col')} in [{cond.get('min')}, {cond.get('max')}]")
-    return " AND ".join(parts) if parts else "(no rule)"
-
 
 def _structured_note(worker_payload: Dict[str, Any], job_id: str, result_path: str) -> str:
     result = worker_payload.get("result", {}) if isinstance(worker_payload, dict) else {}
     picked = result.get("picked") or {}
     search = result.get("search") or {}
     top_rules = (search.get("top_rules") or [])[:3]
-
     note = {
         "ts": datetime.utcnow().isoformat(),
         "kind": "strategy_search_result",
@@ -386,42 +378,53 @@ def _structured_note(worker_payload: Dict[str, Any], job_id: str, result_path: s
     return json.dumps(note, ensure_ascii=False)
 
 
-def _autopilot_one_cycle():
+def _submit_autopilot_job() -> Dict[str, Any]:
     params = {
         "storage_bucket": DEFAULT_STORAGE_BUCKET,
         "storage_path": DEFAULT_STORAGE_PATH,
         "_results_bucket": DEFAULT_RESULTS_BUCKET,
         "time_split_ratio": 0.7,
     }
-
     submitted = _run_tool("submit_job", {"task_type": "strategy_search", "params": params})
     job_id = submitted.get("job_id")
 
-    st.session_state.last_autopilot = {"stage": "submitted", "submitted": submitted}
+    # Persist job id into research_state so it survives reruns/restarts
+    if job_id:
+        _run_tool("set_research_state", {"key": "last_job_id", "value": job_id})
+        _run_tool("set_research_state", {"key": "last_job_submitted_at", "value": datetime.utcnow().isoformat()})
+    return {"submitted": submitted, "job_id": job_id}
 
+
+def _poll_latest_job_and_log_if_done(state: Dict[str, str]) -> Dict[str, Any]:
+    job_id = (state.get("last_job_id") or "").strip()
     if not job_id:
-        st.session_state.last_autopilot["stage"] = "error"
-        st.session_state.last_autopilot["error"] = "No job_id returned from submit_job"
-        return
+        return {"ok": True, "note": "No last_job_id in research_state."}
 
-    waited = _run_tool("wait_for_job", {"job_id": job_id, "timeout_s": 900, "poll_s": 5, "auto_download": True})
-    st.session_state.last_autopilot["waited"] = waited
+    job = _run_tool("get_job", {"job_id": job_id})
+    if job.get("error"):
+        return {"ok": False, "error": job.get("error"), "job": job}
 
-    _run_tool("set_research_state", {"key": "last_autopilot_ran_at", "value": datetime.utcnow().isoformat()})
-    _run_tool("set_research_state", {"key": "last_job_id", "value": job_id})
+    status = (job.get("status") or "").lower()
+    out: Dict[str, Any] = {"ok": True, "job_id": job_id, "status": status, "job": job}
 
-    if waited.get("status") != "done":
-        st.session_state.last_autopilot["stage"] = waited.get("status")
-        return
+    # If done, log exactly once
+    if status == "done" and job.get("result_path"):
+        last_logged = (state.get("last_logged_job_id") or "").strip()
+        if last_logged == job_id:
+            out["logged"] = False
+            out["note"] = "Result already logged."
+            return out
 
-    job = waited.get("job") or {}
-    result_path = job.get("result_path") or ""
-    result_json = waited.get("result") or {}
+        res = _run_tool("download_result", {"result_path": job["result_path"], "bucket": DEFAULT_RESULTS_BUCKET})
+        result_json = res.get("result") if isinstance(res, dict) else None
 
-    note = _structured_note(result_json, job_id, result_path)
-    _run_tool("append_research_note", {"note": note, "tags": "autopilot,worker,structured"})
+        note = _structured_note(result_json or {}, job_id, job["result_path"])
+        _run_tool("append_research_note", {"note": note, "tags": "autopilot,worker,structured"})
+        _run_tool("set_research_state", {"key": "last_logged_job_id", "value": job_id})
+        _run_tool("set_research_state", {"key": "last_autopilot_logged_at", "value": datetime.utcnow().isoformat()})
+        out["logged"] = True
 
-    st.session_state.last_autopilot["stage"] = "done"
+    return out
 
 
 # ============================================================
@@ -440,6 +443,27 @@ with st.sidebar:
         st.warning(f"Chat persistence warning: {st.session_state.last_chat_save_error}")
         if st.button("Clear chat save warning"):
             st.session_state.last_chat_save_error = None
+
+    # --- Autopilot controls in research_state (Start/Stop flag)
+    st.subheader("🤖 Autopilot Controls")
+    rs = _run_tool("get_research_state", {}).get("data", {}) or {}
+    enabled = (rs.get("autopilot_enabled") or "").strip().lower() in ("1", "true", "yes", "on")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("▶ Start"):
+            _run_tool("set_research_state", {"key": "autopilot_enabled", "value": "true"})
+            st.success("Autopilot enabled in research_state.")
+            st.rerun()
+    with col2:
+        if st.button("■ Stop"):
+            _run_tool("set_research_state", {"key": "autopilot_enabled", "value": "false"})
+            st.warning("Autopilot disabled in research_state.")
+            st.rerun()
+
+    st.caption(f"Enabled: **{enabled}**")
+
+    st.divider()
 
     st.subheader("💾 Chat Sessions")
     sessions = _load_sessions()
@@ -493,10 +517,56 @@ with st.sidebar:
 
     st.divider()
 
-    st.subheader("🤖 Autopilot")
-    if st.button("Run 1 autopilot cycle"):
-        _autopilot_one_cycle()
+    st.subheader("🧪 Manual Autopilot (Non-blocking)")
+    if st.button("Submit 1 strategy_search job"):
+        submitted = _submit_autopilot_job()
+        st.session_state.last_autopilot = {"stage": "submitted", **submitted}
         st.rerun()
+
+    if st.button("Poll latest job + log if done"):
+        rs2 = _run_tool("get_research_state", {}).get("data", {}) or {}
+        receipt = _poll_latest_job_and_log_if_done(rs2)
+        st.session_state.last_autopilot = {"stage": "polled", "receipt": receipt}
+        st.rerun()
+
+    st.divider()
+
+    # ========================================================
+    # Developer panel: Safe checks + GitHub commit
+    # ========================================================
+    with st.expander("🛠 Developer: Checks + Commit to GitHub", expanded=False):
+        st.caption("Edits in Streamlit are ephemeral. Use this panel to validate and commit to GitHub safely.")
+        st.caption("Requires secrets/env: GITHUB_TOKEN, GITHUB_REPO (owner/repo), optional GITHUB_BRANCH.")
+
+        allowed = tools_code.allowed_paths()
+        target_path = st.selectbox("Target file path", options=allowed, index=0)
+        new_content = st.text_area("New FULL file content (paste entire file)", height=250)
+
+        check_paths = st.multiselect(
+            "Run checks on (recommended: all changed files)",
+            options=allowed,
+            default=[target_path],
+        )
+
+        if st.button("✅ Run Python checks"):
+            res = _run_tool("run_py_checks", {"paths": check_paths})
+            st.session_state.last_dev_checks = res
+            st.json(res)
+
+        commit_msg = st.text_input("Commit message", value="Update Football Researcher code")
+
+        if st.button("🚀 Commit to GitHub (only if checks OK)"):
+            checks = st.session_state.get("last_dev_checks") or {}
+            if not checks or not checks.get("ok"):
+                st.error("Checks not OK (or not run). Run checks first and ensure ok=true.")
+            elif not new_content.strip():
+                st.error("Paste the full file content first.")
+            else:
+                res = _run_tool(
+                    "github_commit_files",
+                    {"message": commit_msg, "files": [{"path": target_path, "content": new_content}]},
+                )
+                st.json(res)
 
 
 # ============================================================
@@ -504,11 +574,9 @@ with st.sidebar:
 # ============================================================
 
 st.subheader("🧾 Autopilot Receipt")
-last = st.session_state.get("last_autopilot")
-if not last:
-    st.info("No autopilot run in this session yet.")
-else:
-    st.json(last)
+rs_main = _run_tool("get_research_state", {}).get("data", {}) or {}
+receipt = _poll_latest_job_and_log_if_done(rs_main)
+st.json({"research_state": rs_main, "latest_job_poll": receipt})
 
 st.subheader("💬 Chat")
 for m in st.session_state.messages:
