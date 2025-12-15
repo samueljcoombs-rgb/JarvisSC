@@ -21,19 +21,33 @@ def _init_client() -> OpenAI:
 
 client = _init_client()
 
+
 def _select_best_model(c: OpenAI) -> str:
+    # Prefer GPT-5.2 Thinking explicitly, then GPT-5.2, then fallbacks
     preferred = (os.getenv("PREFERRED_OPENAI_MODEL", "").strip()
-                 or st.secrets.get("PREFERRED_OPENAI_MODEL", ""))
+                 or st.secrets.get("PREFERRED_OPENAI_MODEL", "")).strip()
     if preferred:
         return preferred
+
     try:
         names = {m.id for m in c.models.list().data}
-        for candidate in ["gpt-5", "gpt-latest", "gpt-4.1", "gpt-4o", "gpt-4.1-mini"]:
+        for candidate in [
+            "gpt-5.2-thinking",
+            "gpt-5.2",
+            "gpt-5",
+            "gpt-latest",
+            "gpt-4.1",
+            "gpt-4o",
+            "gpt-4.1-mini",
+        ]:
             if candidate in names:
                 return candidate
     except Exception:
         pass
+
+    # final fallback
     return "gpt-4o"
+
 
 MODEL = _select_best_model(client)
 
@@ -61,8 +75,10 @@ TOOL_FUNCS: Dict[str, Any] = {
     "wait_for_job": functions.wait_for_job,
 }
 
+
 def _tool_schema(name: str, description: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
     return {"type": "function", "function": {"name": name, "description": description, "parameters": parameters}}
+
 
 TOOLS_SCHEMA: List[Dict[str, Any]] = [
     _tool_schema("get_dataset_overview", "Load dataset_overview sheet.", {"type": "object", "properties": {}, "required": []}),
@@ -97,7 +113,7 @@ TOOLS_SCHEMA: List[Dict[str, Any]] = [
                   "required": ["pl_columns"]}),
 
     _tool_schema("submit_job", "Submit heavy job to Supabase queue (Modal worker).",
-                 {"type": "object", "properties": {"task_type": {"type": "string"}, "params": {"type": "object"}}, "required": ["task_type"]}),
+                 {"type": "object", "properties": {"task_type": {"type": "string"}, "params": {"type": "object"}}, "required": ["task_type", "params"]}),
     _tool_schema("get_job", "Fetch job status for job_id.",
                  {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]}),
     _tool_schema("download_result", "Download JSON result from Supabase Storage path.",
@@ -111,20 +127,17 @@ TOOLS_SCHEMA: List[Dict[str, Any]] = [
                   "required": ["job_id"]}),
 ]
 
+
 SYSTEM_PROMPT = """You are Football Researcher, an autonomous research agent.
 
 Mission:
 - Find explicit strategy criteria (filters/ranges) that generalise to future matches and produce profit.
 - Apply anti-overfitting rules (time split, minimum sample sizes, simple rules first).
 - Never use outcome columns (PL, RETURN, BET RESULT, etc.) as predictive features.
-
-Tools:
-- Google Sheets memory/state/definitions
-- Strategy evaluation tools
-- Offload heavy compute: submit_job -> wait_for_job (preferred) -> download_result
-
-Always log meaningful conclusions with append_research_note and maintain progress in research_state.
+- When offloading compute: submit_job -> wait_for_job -> download_result.
+- Always log meaningful conclusions (append_research_note) and keep progress (set_research_state).
 """
+
 
 def _sanitize_history(msgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     cleaned: List[Dict[str, Any]] = []
@@ -143,6 +156,7 @@ def _sanitize_history(msgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         last_assistant_had_tool_calls = False
     return cleaned
 
+
 def _call_llm(messages: List[Dict[str, Any]]) -> Any:
     return client.chat.completions.create(
         model=MODEL,
@@ -150,6 +164,7 @@ def _call_llm(messages: List[Dict[str, Any]]) -> Any:
         tools=TOOLS_SCHEMA,
         tool_choice="auto",
     )
+
 
 def _run_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     fn = TOOL_FUNCS.get(name)
@@ -174,8 +189,6 @@ def _run_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}", "tool": name, "args": args}
 
-def _minimal_tool_call_dict(tc: Any) -> Dict[str, Any]:
-    return {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments or "{}"}}
 
 def _chat_with_tools(user_text: str, max_rounds: int = 6) -> None:
     if "messages" not in st.session_state:
@@ -197,7 +210,7 @@ def _chat_with_tools(user_text: str, max_rounds: int = 6) -> None:
             st.session_state.messages.append({
                 "role": "assistant",
                 "content": msg.content or "",
-                "tool_calls": [_minimal_tool_call_dict(tc) for tc in tool_calls],
+                "tool_calls": [{"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments or "{}"}} for tc in tool_calls],
             })
 
             for tc in tool_calls:
@@ -211,6 +224,77 @@ def _chat_with_tools(user_text: str, max_rounds: int = 6) -> None:
         st.session_state.messages.append({"role": "assistant", "content": msg.content or ""})
         break
 
+
+def _autopilot_one_cycle():
+    """
+    One autonomous loop:
+      - submit strategy_search job (no market specified; worker picks)
+      - wait + download
+      - log note + update research_state
+    """
+    csv_url = os.getenv("DATA_CSV_URL") or st.secrets.get("DATA_CSV_URL", "")
+    if not csv_url:
+        st.session_state.messages.append({"role": "assistant", "content": "Missing DATA_CSV_URL in Streamlit secrets."})
+        return
+
+    # submit
+    submit_out = _run_tool("submit_job", {
+        "task_type": "strategy_search",
+        "params": {
+            "csv_url": csv_url,
+            "time_split_ratio": 0.7,
+            "_results_bucket": "football-results",
+        }
+    })
+    st.session_state.messages.append({"role": "assistant", "content": "Autopilot: submitted strategy_search.\n```json\n" + json.dumps(submit_out, indent=2) + "\n```"})
+
+    job_id = submit_out.get("job_id")
+    if not job_id:
+        return
+
+    # wait
+    waited = _run_tool("wait_for_job", {"job_id": job_id, "timeout_s": 240, "poll_s": 3, "auto_download": True})
+    st.session_state.messages.append({"role": "assistant", "content": "Autopilot: wait_for_job output.\n```json\n" + json.dumps(waited, indent=2) + "\n```"})
+
+    download = (waited.get("download") or {})
+    result = (download.get("result") or {})
+    payload = result.get("result") or {}
+
+    # log note (clean summary)
+    picked = payload.get("picked") or {}
+    search = payload.get("search") or {}
+    top = (search.get("top_rules") or [])[:5]
+
+    note_lines = []
+    note_lines.append("Autopilot cycle: strategy_search")
+    if picked:
+        note_lines.append(f"Picked market: {picked.get('pl_column')} (side={picked.get('side')}, odds_col={picked.get('odds_col')}).")
+        note_lines.append(f"Picked by best test ROI among mapped markets (current baseline).")
+    if search.get("error"):
+        note_lines.append(f"Search error: {search.get('error')}")
+    else:
+        note_lines.append(f"Searched rules tried: {search.get('searched_rules')}")
+        note_lines.append("Top candidate criteria (first 5):")
+        for idx, r in enumerate(top, start=1):
+            rule = r.get("rule", [])
+            tr = r.get("train", {})
+            te = r.get("test", {})
+            gl = r.get("test_game_level", {})
+            note_lines.append(
+                f"{idx}) {rule} | test_roi={te.get('roi'):.4f} | train_roi={tr.get('roi'):.4f} | "
+                f"gap={r.get('gap_train_minus_test'):.4f} | test_bets={te.get('bets')} | "
+                f"test_dd={gl.get('max_dd')} | test_ls_bets={((gl.get('losing_streak') or {}).get('bets'))}"
+            )
+
+    note = "\n".join(note_lines)
+    _run_tool("append_research_note", {"note": note, "tags": ["autopilot", "strategy_search"]})
+    _run_tool("set_research_state", {"key": "last_autopilot_job_id", "value": str(job_id)})
+    _run_tool("set_research_state", {"key": "last_autopilot_ran_at", "value": datetime.utcnow().isoformat()})
+
+
+# -----------------------------
+# UI
+# -----------------------------
 
 st.set_page_config(page_title="Football Researcher", layout="wide")
 st.title("⚽ Football Researcher (Autonomous)")
@@ -235,29 +319,19 @@ if user_msg:
     _chat_with_tools(user_msg)
     st.rerun()
 
-with st.expander("Debug / Quick tests", expanded=False):
-    c1, c2, c3, c4 = st.columns(4)
+with st.expander("Autopilot", expanded=False):
+    st.write("Runs one autonomous cycle: submit heavy strategy search, wait, download, log conclusions.")
+    if st.button("🤖 Autopilot: run 1 cycle"):
+        _autopilot_one_cycle()
+        st.rerun()
 
+with st.expander("Debug / Quick tests", expanded=False):
+    c1, c2 = st.columns(2)
     with c1:
         if st.button("Test: list_columns"):
             _chat_with_tools("Call list_columns and show the result.")
             st.rerun()
-
     with c2:
-        if st.button("Test: submit ping job (DIRECT)"):
-            out = _run_tool("submit_job", {"task_type": "ping", "params": {"hello": "world"}})
-            st.session_state.messages.append({"role": "assistant", "content": "Submitted ping job (direct). Output:\n```json\n" + json.dumps(out, indent=2) + "\n```"})
-            st.rerun()
-
-    with c3:
-        jid = st.text_input("Poll job_id", value="", placeholder="paste job_id here")
-        if st.button("Poll until done"):
-            if jid.strip():
-                out = _run_tool("wait_for_job", {"job_id": jid.strip(), "timeout_s": 120, "poll_s": 3, "auto_download": True})
-                st.session_state.messages.append({"role": "assistant", "content": "wait_for_job output:\n```json\n" + json.dumps(out, indent=2) + "\n```"})
-                st.rerun()
-
-    with c4:
         if st.button("Clear chat"):
             st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
             st.rerun()
