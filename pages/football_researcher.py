@@ -4,10 +4,11 @@ import os
 import json
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Set
 
 import streamlit as st
-from openai import OpenAI, BadRequestError
+from openai import OpenAI
+from openai import BadRequestError
 
 from modules import football_tools as functions
 
@@ -36,9 +37,15 @@ MODEL = PREFERRED or "gpt-5.1"
 
 DEFAULT_STORAGE_BUCKET = os.getenv("DATA_STORAGE_BUCKET") or st.secrets.get("DATA_STORAGE_BUCKET", "football-data")
 DEFAULT_STORAGE_PATH = os.getenv("DATA_STORAGE_PATH") or st.secrets.get("DATA_STORAGE_PATH", "football_ai_NNIA.csv")
+
+# results bucket should come from env/secrets; model cannot override if you only expose submit_strategy_search
 DEFAULT_RESULTS_BUCKET = os.getenv("RESULTS_BUCKET") or st.secrets.get("RESULTS_BUCKET", "football-results")
 
 MAX_MESSAGES_TO_KEEP = int(os.getenv("MAX_CHAT_MESSAGES") or st.secrets.get("MAX_CHAT_MESSAGES", 220))
+
+
+def _dataset_locator() -> Dict[str, str]:
+    return {"storage_bucket": DEFAULT_STORAGE_BUCKET, "storage_path": DEFAULT_STORAGE_PATH}
 
 
 # ============================================================
@@ -49,14 +56,18 @@ def _run_tool(name: str, args: Dict[str, Any]) -> Any:
     fn = getattr(functions, name, None)
     if not fn:
         raise RuntimeError(f"Unknown tool: {name}")
-    return fn(**(args or {}))
+    return fn(**args)
 
 
 # ============================================================
-# Tools exposed to the LLM (SAFE SET ONLY)
+# Tools schema for OpenAI function calling
+# NOTE:
+# - Only expose tools the MODEL should call.
+# - Do NOT expose chat persistence tools (save_chat/load_chat/etc).
+# - Do NOT expose raw submit_job (model was overriding _results_bucket).
 # ============================================================
 
-LLM_TOOLS = [
+TOOLS = [
     {"type": "function", "function": {"name": "get_dataset_overview", "description": "Get dataset_overview tab.", "parameters": {"type": "object", "properties": {}, "required": []}}},
     {"type": "function", "function": {"name": "get_research_rules", "description": "Get research_rules tab.", "parameters": {"type": "object", "properties": {}, "required": []}}},
     {"type": "function", "function": {"name": "get_column_definitions", "description": "Get column_definitions tab.", "parameters": {"type": "object", "properties": {}, "required": []}}},
@@ -66,12 +77,23 @@ LLM_TOOLS = [
     {"type": "function", "function": {"name": "get_research_state", "description": "Get research_state KV.", "parameters": {"type": "object", "properties": {}, "required": []}}},
     {"type": "function", "function": {"name": "set_research_state", "description": "Set research_state KV.", "parameters": {"type": "object", "properties": {"key": {"type": "string"}, "value": {"type": "string"}}, "required": ["key", "value"]}}},
 
-    {"type": "function", "function": {"name": "load_data_basic", "description": "Load CSV preview (Supabase Storage).", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}}, "required": []}}},
-    {"type": "function", "function": {"name": "list_columns", "description": "List CSV columns (Supabase Storage).", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}}, "required": []}}},
-    {"type": "function", "function": {"name": "basic_roi_for_pl_column", "description": "ROI for a PL column (outcome only).", "parameters": {"type": "object", "properties": {"pl_column": {"type": "string"}, "storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}}, "required": ["pl_column"]}}},
+    {"type": "function", "function": {"name": "load_data_basic", "description": "Load CSV preview.", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "csv_url": {"type": "string"}}, "required": []}}},
+    {"type": "function", "function": {"name": "list_columns", "description": "List CSV columns.", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "csv_url": {"type": "string"}}, "required": []}}},
+    {"type": "function", "function": {"name": "basic_roi_for_pl_column", "description": "Row-level ROI for PL column.", "parameters": {"type": "object", "properties": {"pl_column": {"type": "string"}, "storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "csv_url": {"type": "string"}}, "required": ["pl_column"]}}},
 
-    # ✅ SAFE job tools
-    {"type": "function", "function": {"name": "submit_strategy_search", "description": "Submit a strategy_search job safely. Optional target_pl_column; otherwise worker picks best market.", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "results_bucket": {"type": "string"}, "time_split_ratio": {"type": "number"}, "target_pl_column": {"type": "string"}}, "required": []}}},
+    # ✅ SAFE job wrapper (forces correct buckets + resolves target_pl_column to exact CSV header)
+    {"type": "function", "function": {
+        "name": "submit_strategy_search",
+        "description": "Submit a strategy_search job safely (forces correct buckets; canonicalises target PL column).",
+        "parameters": {"type": "object", "properties": {
+            "storage_bucket": {"type": "string"},
+            "storage_path": {"type": "string"},
+            "results_bucket": {"type": "string"},
+            "time_split_ratio": {"type": "number"},
+            "target_pl_column": {"type": "string"},
+        }, "required": []}
+    }},
+
     {"type": "function", "function": {"name": "get_job", "description": "Get job status by job_id.", "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]}}},
     {"type": "function", "function": {"name": "wait_for_job", "description": "Wait for completion; optionally downloads results.", "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}, "timeout_s": {"type": "integer"}, "poll_s": {"type": "integer"}, "auto_download": {"type": "boolean"}}, "required": ["job_id"]}}},
     {"type": "function", "function": {"name": "download_result", "description": "Download a result JSON from storage by path.", "parameters": {"type": "object", "properties": {"result_path": {"type": "string"}, "bucket": {"type": "string"}}, "required": ["result_path"]}}},
@@ -82,27 +104,25 @@ LLM_TOOLS = [
 # System prompt
 # ============================================================
 
-SYSTEM_PROMPT = f"""You are FootballResearcher — an autonomous research agent that discovers profitable, robust football trading strategy criteria.
-
-Hard constraints:
-- PL columns are outcomes only and MUST NOT be used as predictive features.
-- Avoid overfitting: time-based splits; never tune thresholds on final test.
-- Always report sample sizes, train vs test gap, and drawdown/losing streak in POINTS.
-- Prefer simple rules that generalise; penalise fragile, tiny samples.
+SYSTEM_PROMPT = """You are FootballResearcher — an autonomous research agent that discovers profitable, robust football trading strategy criteria.
 
 Source of truth:
 - Use Google Sheet tabs: dataset_overview, research_rules, column_definitions, evaluation_framework, research_state, research_memory.
 
-Data access:
-- Default dataset is bucket="{DEFAULT_STORAGE_BUCKET}", path="{DEFAULT_STORAGE_PATH}".
-- Do NOT invent bucket/path.
+Hard constraints:
+- PL columns are outcomes only and MUST NOT be used as predictive features.
+- Avoid overfitting: time-based splits; never tune thresholds on final test.
+- Always report sample sizes and stability (train vs test gap) and drawdown/losing streak in POINTS.
+- Prefer simple rules that generalise; penalise fragile, tiny samples.
 
-Jobs:
-- Only submit worker jobs using submit_strategy_search (do NOT invent task types).
+Objective:
+- When user asks to “design a strategy”, you should plan, run experiments (using worker jobs when needed), log results into research_memory, and present progress updates.
+- Strategies must be explicit filters: MARKET/PL column + ranges on numeric fields + optional categorical constraints.
+- Be decisive: pick what to test next. Only ask user if blocked by missing config.
 
-Mode rules:
-- CHAT mode: conversational (no tools).
-- AUTOPILOT mode: tools enabled; keep explanations short.
+Important:
+- In CHAT mode you must reply conversationally and should not call tools unless explicitly asked.
+- In AUTOPILOT mode you may call tools and run jobs, but still write a short explanation of what you did.
 """
 
 
@@ -115,12 +135,12 @@ st.title("⚽ Football Researcher")
 
 
 # ============================================================
-# Session management
+# Session management (UI persists chats via tools directly; NOT exposed to LLM)
 # ============================================================
 
 def _load_sessions() -> List[Dict[str, Any]]:
     out = _run_tool("list_chats", {"limit": 200})
-    if not isinstance(out, dict) or not out.get("ok", True):
+    if not out.get("ok", True):
         return []
     return out.get("sessions") or []
 
@@ -163,7 +183,7 @@ def _persist_chat(title: str = ""):
 
 def _try_load_chat(sid: str) -> bool:
     loaded = _run_tool("load_chat", {"session_id": sid})
-    if isinstance(loaded, dict) and loaded.get("ok") and loaded.get("data", {}).get("messages"):
+    if loaded.get("ok") and loaded.get("data", {}).get("messages"):
         st.session_state.messages = _trim_messages(loaded["data"]["messages"])
         return True
     return False
@@ -186,15 +206,76 @@ if "agent_mode" not in st.session_state:
 
 
 # ============================================================
-# LLM call (chat mode has no tools)
+# Sanitise history for OpenAI (prevents invalid tool state)
+# ============================================================
+
+def _sanitize_history_for_llm(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not messages:
+        return [{"role": "system", "content": SYSTEM_PROMPT}]
+
+    out: List[Dict[str, Any]] = []
+    first = messages[0]
+    if first.get("role") != "system":
+        out.append({"role": "system", "content": SYSTEM_PROMPT})
+    else:
+        out.append({"role": "system", "content": first.get("content", SYSTEM_PROMPT)})
+
+    expecting_tool_ids: Set[str] = set()
+
+    for m in messages[1:]:
+        role = (m.get("role") or "").strip()
+
+        if role == "assistant":
+            expecting_tool_ids = set()
+            clean_assistant: Dict[str, Any] = {"role": "assistant", "content": m.get("content", "") or ""}
+
+            tc = m.get("tool_calls")
+            if isinstance(tc, list) and tc:
+                cleaned_tool_calls = []
+                for call in tc:
+                    try:
+                        cid = call.get("id")
+                        fn = call.get("function") or {}
+                        name = fn.get("name")
+                        args = fn.get("arguments", "{}")
+                        if cid and name:
+                            cleaned_tool_calls.append({"id": cid, "type": "function", "function": {"name": name, "arguments": args}})
+                            expecting_tool_ids.add(cid)
+                    except Exception:
+                        continue
+
+                if cleaned_tool_calls:
+                    clean_assistant["tool_calls"] = cleaned_tool_calls
+
+            out.append(clean_assistant)
+            continue
+
+        if role == "tool":
+            tcid = m.get("tool_call_id")
+            if tcid and expecting_tool_ids and tcid in expecting_tool_ids:
+                out.append({"role": "tool", "tool_call_id": tcid, "content": m.get("content", "") or ""})
+            continue
+
+        if role == "user":
+            out.append({"role": "user", "content": m.get("content", "") or ""})
+            continue
+
+        continue
+
+    return out
+
+
+# ============================================================
+# LLM call
 # ============================================================
 
 def _call_llm(messages: List[Dict[str, Any]]):
     mode = st.session_state.agent_mode
+    safe_messages = _sanitize_history_for_llm(messages)
 
     if mode == "chat":
-        chat_only = []
-        for m in messages:
+        chat_only: List[Dict[str, Any]] = []
+        for m in safe_messages:
             if m.get("role") == "tool":
                 continue
             if m.get("role") == "assistant" and "tool_calls" in m:
@@ -206,23 +287,12 @@ def _call_llm(messages: List[Dict[str, Any]]):
 
         return client.chat.completions.create(model=MODEL, messages=chat_only)
 
-    return client.chat.completions.create(model=MODEL, messages=messages, tools=LLM_TOOLS, tool_choice="auto")
+    return client.chat.completions.create(model=MODEL, messages=safe_messages, tools=TOOLS, tool_choice="auto")
 
 
-def _apply_default_dataset_args(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
-    args = dict(args or {})
-    # Default dataset for data tools + strategy submission
-    if tool_name in {"load_data_basic", "list_columns", "basic_roi_for_pl_column", "submit_strategy_search"}:
-        if not (args.get("storage_bucket") and args.get("storage_path")):
-            args["storage_bucket"] = DEFAULT_STORAGE_BUCKET
-            args["storage_path"] = DEFAULT_STORAGE_PATH
-    if tool_name == "submit_strategy_search":
-        if not args.get("results_bucket"):
-            args["results_bucket"] = DEFAULT_RESULTS_BUCKET
-        if args.get("time_split_ratio") is None:
-            args["time_split_ratio"] = 0.7
-    return args
-
+# ============================================================
+# Chat loop
+# ============================================================
 
 def _chat_with_tools(user_text: str, max_rounds: int = 6):
     st.session_state.messages.append({"role": "user", "content": user_text})
@@ -231,6 +301,10 @@ def _chat_with_tools(user_text: str, max_rounds: int = 6):
     for _ in range(max_rounds):
         try:
             resp = _call_llm(st.session_state.messages)
+
+            # ✅ DEBUG: capture what OpenAI ACTUALLY returned
+            st.session_state.last_openai_model_used = getattr(resp, "model", None)
+
         except BadRequestError as e:
             st.error("OpenAI BadRequestError (full details below).")
             try:
@@ -243,13 +317,20 @@ def _chat_with_tools(user_text: str, max_rounds: int = 6):
         tool_calls = getattr(msg, "tool_calls", None)
 
         assistant_msg: Dict[str, Any] = {"role": "assistant", "content": msg.content or ""}
+
         if tool_calls:
             assistant_msg["tool_calls"] = [
                 {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
                 for tc in tool_calls
             ]
 
-        st.session_state.messages.append(assistant_msg)
+        if assistant_msg["content"]:
+            st.session_state.messages.append(assistant_msg)
+        else:
+            if st.session_state.agent_mode == "chat":
+                st.session_state.messages.append({"role": "assistant", "content": "I’m here — what do you want to do next (strategy, debugging, or analysis)?"})
+            else:
+                st.session_state.messages.append(assistant_msg)
 
         if st.session_state.agent_mode == "chat":
             break
@@ -260,12 +341,7 @@ def _chat_with_tools(user_text: str, max_rounds: int = 6):
         for tc in tool_calls:
             name = tc.function.name
             args = json.loads(tc.function.arguments or "{}")
-            args = _apply_default_dataset_args(name, args)
-
-            try:
-                out = _run_tool(name, args)
-            except Exception as e:
-                out = {"ok": False, "tool": name, "args": args, "error": str(e)}
+            out = _run_tool(name, args)
 
             st.session_state.messages.append({"role": "tool", "tool_call_id": tc.id, "content": json.dumps(out, ensure_ascii=False)})
 
@@ -275,13 +351,92 @@ def _chat_with_tools(user_text: str, max_rounds: int = 6):
 
 
 # ============================================================
+# Autopilot receipt + structured logging
+# ============================================================
+
+def _structured_note(worker_payload: Dict[str, Any], job_id: str, result_path: str) -> str:
+    result = worker_payload.get("result", {}) if isinstance(worker_payload, dict) else {}
+    picked = result.get("picked") or {}
+    search = result.get("search") or {}
+    top_rules = (search.get("top_rules") or [])[:3]
+
+    note = {
+        "ts": datetime.utcnow().isoformat(),
+        "kind": "strategy_search_result",
+        "job_id": job_id,
+        "result_path": result_path,
+        "picked": picked,
+        "top_rules": top_rules,
+    }
+    return json.dumps(note, ensure_ascii=False)
+
+
+def _autopilot_one_cycle():
+    submitted = _run_tool(
+        "submit_strategy_search",
+        {
+            "storage_bucket": DEFAULT_STORAGE_BUCKET,
+            "storage_path": DEFAULT_STORAGE_PATH,
+            "results_bucket": DEFAULT_RESULTS_BUCKET,
+            "time_split_ratio": 0.7,
+        },
+    )
+
+    job_id = submitted.get("job_id")
+    st.session_state.last_autopilot = {"stage": "submitted", "submitted": submitted}
+
+    if not job_id:
+        st.session_state.last_autopilot["stage"] = "error"
+        st.session_state.last_autopilot["error"] = "No job_id returned from submit_strategy_search"
+        return
+
+    waited = _run_tool("wait_for_job", {"job_id": job_id, "timeout_s": 900, "poll_s": 5, "auto_download": True})
+    st.session_state.last_autopilot["waited"] = waited
+
+    _run_tool("set_research_state", {"key": "last_autopilot_ran_at", "value": datetime.utcnow().isoformat()})
+    _run_tool("set_research_state", {"key": "last_job_id", "value": job_id})
+
+    if waited.get("status") != "done":
+        st.session_state.last_autopilot["stage"] = waited.get("status")
+        return
+
+    job = waited.get("job") or {}
+    result_path = job.get("result_path") or ""
+    result_json = waited.get("result") or {}
+
+    note = _structured_note(result_json, job_id, result_path)
+    _run_tool("append_research_note", {"note": note, "tags": "autopilot,worker,structured"})
+
+    st.session_state.last_autopilot["stage"] = "done"
+
+
+# ============================================================
 # Sidebar UI
 # ============================================================
 
 with st.sidebar:
-    st.caption(f"Model: `{MODEL}`")
+    st.caption(f"Requested MODEL var: `{MODEL}`")
     st.caption(f"Data: `{DEFAULT_STORAGE_BUCKET}/{DEFAULT_STORAGE_PATH}`")
     st.caption(f"Results: `{DEFAULT_RESULTS_BUCKET}`")
+
+    # ✅ DEBUG: show where MODEL is coming from
+    env_pref = os.getenv("PREFERRED_OPENAI_MODEL")
+    sec_pref = st.secrets.get("PREFERRED_OPENAI_MODEL", None)
+    st.caption(f"Env PREFERRED_OPENAI_MODEL: `{env_pref}`")
+    st.caption(f"Secrets PREFERRED_OPENAI_MODEL: `{sec_pref}`")
+
+    used = st.session_state.get("last_openai_model_used")
+    if used:
+        st.caption(f"OpenAI returned model: `{used}`")
+
+        # ✅ HARD FAIL if not GPT-5.* (you can relax this later)
+        if not str(used).startswith("gpt-5"):
+            st.error(f"❌ Not running GPT-5. OpenAI returned: {used}")
+            st.stop()
+    else:
+        st.caption("OpenAI returned model: `(no call yet)`")
+
+    st.divider()
 
     st.radio("Agent mode", ["chat", "autopilot"], key="agent_mode")
     st.divider()
@@ -310,49 +465,55 @@ with st.sidebar:
         _try_load_chat(st.session_state.session_id)
         st.rerun()
 
-    if st.button("➕ New session"):
+    colA, colB = st.columns(2)
+    with colA:
+        if st.button("➕ New"):
+            sid = _new_session_id()
+            _set_session(sid)
+            st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+            _persist_chat(title=f"Session {sid[:8]}")
+            st.rerun()
+
+    with colB:
+        if st.button("💾 Save"):
+            _persist_chat()
+            st.success("Saved.")
+
+    new_title = st.text_input("Rename current session", value="")
+    if st.button("Rename"):
+        if new_title.strip():
+            _run_tool("rename_chat", {"session_id": SESSION_ID, "title": new_title.strip()})
+            _persist_chat(title=new_title.strip())
+            st.success("Renamed.")
+            st.rerun()
+
+    if st.button("🗑️ Delete current session"):
+        _run_tool("delete_chat", {"session_id": SESSION_ID})
         sid = _new_session_id()
         _set_session(sid)
         st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         _persist_chat(title=f"Session {sid[:8]}")
+        st.success("Deleted + created new.")
         st.rerun()
 
     st.divider()
-    st.subheader("🤖 Quick Test Buttons")
 
-    if st.button("Test: load_data_basic"):
-        out = _run_tool("load_data_basic", {"storage_bucket": DEFAULT_STORAGE_BUCKET, "storage_path": DEFAULT_STORAGE_PATH})
-        st.session_state.last_test = {"tool": "load_data_basic", "out": out}
-        st.rerun()
-
-    if st.button("Test: submit strategy_search (no target)"):
-        out = _run_tool("submit_strategy_search", {"storage_bucket": DEFAULT_STORAGE_BUCKET, "storage_path": DEFAULT_STORAGE_PATH, "results_bucket": DEFAULT_RESULTS_BUCKET, "time_split_ratio": 0.7})
-        st.session_state.last_test = {"tool": "submit_strategy_search", "out": out}
-        st.session_state.last_job_id = (out or {}).get("job_id")
-        st.rerun()
-
-    if st.button("Test: submit strategy_search (BTTS PL)"):
-        out = _run_tool("submit_strategy_search", {"storage_bucket": DEFAULT_STORAGE_BUCKET, "storage_path": DEFAULT_STORAGE_PATH, "results_bucket": DEFAULT_RESULTS_BUCKET, "time_split_ratio": 0.7, "target_pl_column": "BTTS PL"})
-        st.session_state.last_test = {"tool": "submit_strategy_search", "out": out}
-        st.session_state.last_job_id = (out or {}).get("job_id")
-        st.rerun()
-
-    if st.button("Test: wait last job (10 min)"):
-        job_id = st.session_state.get("last_job_id")
-        if not job_id:
-            st.session_state.last_test = {"error": "No last_job_id in session."}
-        else:
-            waited = _run_tool("wait_for_job", {"job_id": job_id, "timeout_s": 600, "poll_s": 3, "auto_download": True})
-            st.session_state.last_test = {"tool": "wait_for_job", "job_id": job_id, "out": waited}
+    st.subheader("🤖 Autopilot")
+    if st.button("Run 1 autopilot cycle"):
+        _autopilot_one_cycle()
         st.rerun()
 
 
 # ============================================================
-# Main UI
+# Main: Autopilot receipt + Chat
 # ============================================================
 
-st.subheader("🧾 Last test output")
-st.json(st.session_state.get("last_test") or {"note": "No tests run yet in this session."})
+st.subheader("🧾 Autopilot Receipt")
+last = st.session_state.get("last_autopilot")
+if not last:
+    st.info("No autopilot run in this session yet.")
+else:
+    st.json(last)
 
 st.subheader("💬 Chat")
 for m in st.session_state.messages:
