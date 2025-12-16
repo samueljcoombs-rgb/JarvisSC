@@ -344,6 +344,21 @@ def get_job(job_id: str) -> Dict[str, Any]:
     except Exception as e:
         return {"error": f"get_job failed: {e}", "job_id": job_id}
 
+
+
+def get_job_events(job_id: str, since_ts: Optional[str] = None, limit: int = 200) -> Dict[str, Any]:
+    """
+    Fetch narrated worker events for a job from Supabase `job_events`.
+    since_ts: ISO timestamp string; if provided, only events with ts > since_ts are returned.
+    """
+    sb = _sb()
+    q = sb.table("job_events").select("event_id,job_id,ts,level,message,payload").eq("job_id", job_id).order("ts", desc=False).limit(limit)
+    if since_ts:
+        q = q.gt("ts", since_ts)
+    res = q.execute()
+    rows = res.data or []
+    return {"job_id": job_id, "events": rows}
+
 def download_result(result_path: str, bucket: str = "") -> Dict[str, Any]:
     sb = _sb()
     b = (bucket or st.secrets.get("RESULTS_BUCKET") or os.getenv("RESULTS_BUCKET") or "football-results").strip()
