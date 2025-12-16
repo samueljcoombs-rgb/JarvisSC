@@ -5,7 +5,7 @@ import json
 import uuid
 import re
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set
 
 import streamlit as st
 from openai import OpenAI
@@ -43,10 +43,6 @@ DEFAULT_RESULTS_BUCKET = os.getenv("RESULTS_BUCKET") or st.secrets.get("RESULTS_
 MAX_MESSAGES_TO_KEEP = int(os.getenv("MAX_CHAT_MESSAGES") or st.secrets.get("MAX_CHAT_MESSAGES", 220))
 
 
-def _dataset_locator() -> Dict[str, str]:
-    return {"storage_bucket": DEFAULT_STORAGE_BUCKET, "storage_path": DEFAULT_STORAGE_PATH}
-
-
 # ============================================================
 # Tool runner
 # ============================================================
@@ -60,7 +56,7 @@ def _run_tool(name: str, args: Dict[str, Any]) -> Any:
 
 # ============================================================
 # Tools schema for OpenAI function calling
-# (Fix: arrays must declare items)
+# (arrays MUST declare items)
 # ============================================================
 
 TOOLS = [
@@ -75,7 +71,6 @@ TOOLS = [
 
     {"type": "function", "function": {"name": "load_data_basic", "description": "Load CSV preview.", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "csv_url": {"type": "string"}}, "required": []}}},
     {"type": "function", "function": {"name": "list_columns", "description": "List CSV columns.", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "csv_url": {"type": "string"}}, "required": []}}},
-    {"type": "function", "function": {"name": "basic_roi_for_pl_column", "description": "Row-level ROI for PL column.", "parameters": {"type": "object", "properties": {"pl_column": {"type": "string"}, "storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "csv_url": {"type": "string"}}, "required": ["pl_column"]}}},
 
     # SAFE wrappers
     {"type": "function", "function": {"name": "submit_strategy_search", "description": "Submit strategy_search job (safe pl_column resolution).", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "results_bucket": {"type": "string"}, "time_split_ratio": {"type": "number"}, "target_pl_column": {"type": "string"}}, "required": ["target_pl_column"]}}},
@@ -121,7 +116,7 @@ Important:
 
 Critical:
 - Never pass raw user sentences as a column name.
-- Always resolve target_pl_column to an exact CSV column (e.g. 'BTTS PL') before submitting jobs.
+- Always resolve the target to an exact CSV column (e.g. 'BTTS PL') before submitting jobs.
 """
 
 
@@ -301,35 +296,69 @@ def _call_llm(messages: List[Dict[str, Any]]):
 
 
 # ============================================================
-# Local PL resolver (never pass raw user text)
+# Local PL resolver (FIXED: avoid generic 'PL' and pick best match)
 # ============================================================
 
 def _resolve_pl_from_user_text(user_text: str) -> Optional[str]:
-    # pull columns once
     cols_out = _run_tool("list_columns", {"storage_bucket": DEFAULT_STORAGE_BUCKET, "storage_path": DEFAULT_STORAGE_PATH})
     cols = cols_out.get("columns") or []
-    t = (user_text or "").lower()
+    t = (user_text or "").strip().lower()
 
-    # prefer exact column matches present in the user text
-    for c in cols:
-        if c and c.lower() in t:
-            return c
+    if not cols or not t:
+        return None
 
-    # fuzzy keywords -> canonical
+    # Build case-insensitive lookup
+    lower_to_actual = {(c or "").strip().lower(): c for c in cols if c}
+
+    # 1) Canonical priority: if user mentions BTTS -> force BTTS PL if present
     if "btts" in t:
-        for c in cols:
-            if c.lower().strip() == "btts pl":
-                return c
+        if "btts pl" in lower_to_actual:
+            return lower_to_actual["btts pl"]
 
-    if ("2.5" in t or "o2.5" in t or "over 2.5" in t) and "pl" in t:
-        for c in cols:
-            if c.lower().strip() == "bo 2.5 pl":
-                return c
+    # 2) Prefer full exact phrase matches for known PL columns
+    known_pl = [
+        "BTTS PL",
+        "BO 2.5 PL",
+        "BO1.5 FHG PL",
+        "SHG PL",
+        "SHG 2+ PL",
+        "LU1.5 PL",
+        "LFGHU0.5 PL",
+    ]
+    for k in known_pl:
+        if k.lower() in t and k.lower() in lower_to_actual:
+            return lower_to_actual[k.lower()]
 
-    # last resort: any column containing 'pl' and keyword
+    # 3) Longest column-name substring match, but DO NOT allow ultra-generic columns
+    banned = {"pl", "p&l", "profit", "profit/loss"}
+    matches: List[Tuple[int, str]] = []
+    for c in cols:
+        cl = (c or "").strip().lower()
+        if not cl or cl in banned:
+            continue
+        # prevent "PL" being selected
+        if cl == "pl":
+            continue
+        # ignore very short column names that are likely generic
+        if len(cl) < 5:
+            continue
+        if cl in t:
+            score = len(cl)
+            # bonus if it looks like a PL market column
+            if "pl" in cl:
+                score += 5
+            if "btts" in cl and "btts" in t:
+                score += 50
+            matches.append((score, c))
+
+    if matches:
+        matches.sort(key=lambda x: x[0], reverse=True)
+        return matches[0][1]
+
+    # 4) Fallback: if user says "... PL" try to find any column containing that phrase
     if "pl" in t:
         for c in cols:
-            cl = c.lower()
+            cl = (c or "").strip().lower()
             if "pl" in cl and ("btts" in t and "btts" in cl):
                 return c
 
@@ -337,11 +366,10 @@ def _resolve_pl_from_user_text(user_text: str) -> Optional[str]:
 
 
 # ============================================================
-# One-shot pipeline runner (BTTS etc)
+# One-shot pipeline runner
 # ============================================================
 
 def _run_strategy_pipeline(pl_column: str, split_ratio: float = 0.7) -> Dict[str, Any]:
-    # 1) run strategy_search (safe wrapper resolves mapping properly)
     submitted = _run_tool(
         "submit_strategy_search",
         {
@@ -363,39 +391,44 @@ def _run_strategy_pipeline(pl_column: str, split_ratio: float = 0.7) -> Dict[str
 
     job = waited.get("job") or {}
     result_path = job.get("result_path") or ""
-    # fetch full result (wait_for_job may or may not include parsed)
     result = _run_tool("download_result", {"bucket": DEFAULT_RESULTS_BUCKET, "result_path": result_path})
-    return {"ok": True, "job_id": job_id, "result_path": result_path, "result": result}
+    return {"ok": True, "job_id": job_id, "result_path": result_path, "download": result}
 
 
-def _summarise_top3(result_obj: Dict[str, Any]) -> str:
+def _summarise_top3(download_payload: Dict[str, Any]) -> str:
+    """
+    download_result returns: {"ok": True, "result": <json>}
+    Modal output JSON includes: {"result": {"picked":..., "search":...}} (nested)
+    """
     try:
-        payload = (result_obj.get("result") or {}).get("result") or {}
-        inner = payload.get("result") or payload  # tolerate nesting
+        root = download_payload.get("result") or {}
+        inner = root.get("result") or {}
+
         picked = inner.get("picked") or {}
         search = inner.get("search") or {}
-        if "error" in search:
+
+        if not picked and not search:
+            return f"Picked: {picked}\n\n(No search output returned. Check worker output structure in result JSON.)"
+
+        if isinstance(search, dict) and search.get("error"):
             return f"Picked: {picked}\n\nERROR: {search.get('error')}"
-        top = (search.get("top_rules") or [])[:3]
-        lines = []
-        lines.append(f"Picked: {picked}")
-        lines.append("")
+
+        top = (search.get("top_rules") or [])[:3] if isinstance(search, dict) else []
+        if not top:
+            return f"Picked: {picked}\n\n(No rules produced. Either not enough stable numeric columns, or sample thresholds were not met.)"
+
+        lines = [f"Picked: {picked}", ""]
         for i, r in enumerate(top, start=1):
-            rule = r.get("rule")
-            te = r.get("test")
-            tr = r.get("train")
-            gap = r.get("gap_train_minus_test")
-            games = (r.get("test_game_level") or {})
             lines.append(f"Top #{i}")
-            lines.append(f"  Rule: {rule}")
-            lines.append(f"  Train: {tr}")
-            lines.append(f"  Test:  {te}")
-            lines.append(f"  Gap(train-test): {gap}")
-            lines.append(f"  Test drawdown/losing: {games}")
+            lines.append(f"  Rule: {r.get('rule')}")
+            lines.append(f"  Train: {r.get('train')}")
+            lines.append(f"  Test:  {r.get('test')}")
+            lines.append(f"  Gap(train-test): {r.get('gap_train_minus_test')}")
+            lines.append(f"  Test drawdown/losing: {r.get('test_game_level')}")
             lines.append("")
         return "\n".join(lines).strip()
     except Exception as e:
-        return f"Could not summarise result: {e}\nRaw: {result_obj}"
+        return f"Could not summarise result: {e}\nRaw download payload: {download_payload}"
 
 
 # ============================================================
@@ -403,20 +436,51 @@ def _summarise_top3(result_obj: Dict[str, Any]) -> str:
 # ============================================================
 
 def _chat_with_tools(user_text: str, max_rounds: int = 6):
-    # AUTOPILOT fast-path: if user asks for a strategy, resolve PL locally and run pipeline
+    # AUTOPILOT fast-path: resolve PL locally and run pipeline
     if st.session_state.agent_mode == "autopilot":
-        if re.search(r"\b(build|design|create)\b.*\bstrategy\b", user_text.lower()) or ("strategy" in user_text.lower() and "pl" in user_text.lower()):
+        lowered = user_text.lower()
+        if (
+            re.search(r"\b(build|design|create)\b.*\bstrategy\b", lowered)
+            or ("strategy" in lowered and "pl" in lowered)
+        ):
             pl = _resolve_pl_from_user_text(user_text)
             if not pl:
-                st.session_state.messages.append({"role": "assistant", "content": "I couldn’t resolve the PL column from your message. Try: `Build a strategy for BTTS PL` (exact)."})
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": "I couldn’t resolve the PL column. Try exactly: `Build a strategy for BTTS PL`."}
+                )
                 _persist_chat()
                 return
 
             st.session_state.messages.append({"role": "user", "content": user_text})
-            st.session_state.messages.append({"role": "assistant", "content": f"Running strategy_search pipeline for **{pl}** (time_split_ratio=0.7) using {DEFAULT_STORAGE_BUCKET}/{DEFAULT_STORAGE_PATH}…"})
+            st.session_state.messages.append(
+                {"role": "assistant", "content": f"Running strategy_search pipeline for **{pl}** (time_split_ratio=0.7) using {DEFAULT_STORAGE_BUCKET}/{DEFAULT_STORAGE_PATH}…"}
+            )
+
             out = _run_strategy_pipeline(pl_column=pl, split_ratio=0.7)
-            st.session_state.messages.append({"role": "assistant", "content": _summarise_top3(out.get("result", {}))})
-            _run_tool("append_research_note", {"note": json.dumps({"ts": datetime.utcnow().isoformat(), "kind": "strategy_pipeline", "pl_column": pl, "job_id": out.get("job_id"), "result_path": out.get("result_path")}, ensure_ascii=False), "tags": "pipeline,autopilot"})
+
+            if not out.get("ok"):
+                st.session_state.messages.append({"role": "assistant", "content": f"Pipeline failed: {out}"})
+                _persist_chat()
+                return
+
+            st.session_state.messages.append({"role": "assistant", "content": _summarise_top3(out.get("download", {}))})
+
+            _run_tool(
+                "append_research_note",
+                {
+                    "note": json.dumps(
+                        {
+                            "ts": datetime.utcnow().isoformat(),
+                            "kind": "strategy_pipeline",
+                            "pl_column": pl,
+                            "job_id": out.get("job_id"),
+                            "result_path": out.get("result_path"),
+                        },
+                        ensure_ascii=False,
+                    ),
+                    "tags": "pipeline,autopilot",
+                },
+            )
             _persist_chat()
             return
 
