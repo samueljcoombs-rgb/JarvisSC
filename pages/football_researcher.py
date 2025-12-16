@@ -5,7 +5,7 @@ import json
 import uuid
 import re
 from datetime import datetime
-from typing import Any, Dict, List, Set, Optional
+from typing import Any, Dict, List, Set
 
 import streamlit as st
 from openai import OpenAI
@@ -189,7 +189,7 @@ TOOLS = [
 
 
 # ============================================================
-# System prompt (updated to be “world class” explicit)
+# System prompt (world class explicit)
 # ============================================================
 SYSTEM_PROMPT = """You are FootballResearcher — an autonomous strategy R&D agent.
 
@@ -285,7 +285,7 @@ def _trim_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def _persist_chat(title: str = ""):
     st.session_state.messages = _trim_messages(st.session_state.messages)
-    out = _run_tool("save_chat", {"session_id": SESSION_ID, "messages": st.session_state.messages, "title": title})
+    out = _run_tool("save_chat", {"session_id": st.session_state.session_id, "messages": st.session_state.messages, "title": title})
     if isinstance(out, dict) and out.get("ok") is False:
         st.session_state.last_chat_save_error = out
 
@@ -296,6 +296,29 @@ def _try_load_chat(sid: str) -> bool:
         st.session_state.messages = _trim_messages(loaded["data"]["messages"])
         return True
     return False
+
+
+def _reset_to_new_chat(title: str = ""):
+    """
+    Creates a brand new chat session (new sid), resets messages, and persists immediately.
+    """
+    new_sid = _new_session_id()
+    _set_session(new_sid)
+    st.session_state.loaded_for_sid = new_sid
+    st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    _persist_chat(title=title or f"Session {new_sid[:8]}")
+
+
+def _duplicate_current_to_new_chat(title: str = ""):
+    """
+    Forks the current chat into a new session id (keeps current messages).
+    """
+    cur_msgs = st.session_state.get("messages") or [{"role": "system", "content": SYSTEM_PROMPT}]
+    new_sid = _new_session_id()
+    _set_session(new_sid)
+    st.session_state.loaded_for_sid = new_sid
+    st.session_state.messages = _trim_messages(list(cur_msgs))
+    _persist_chat(title=title or f"Fork {new_sid[:8]}")
 
 
 _init_messages_if_needed()
@@ -406,19 +429,10 @@ def _normalize(s: str) -> str:
 
 
 def _resolve_pl_column(user_text: str, ctx: Dict[str, Any]) -> str:
-    """
-    Resolve which PL column the user wants using sheet-derived outcome_columns.
-    Tries:
-      - obvious aliases (btts, over 2.5, etc)
-      - exact matches against outcome columns
-      - substring matches against outcome columns
-      - fallback default BTTS PL
-    """
     t = _normalize(user_text)
     derived = (ctx.get("derived") or {})
     outcomes: List[str] = derived.get("outcome_columns") or []
 
-    # common aliases → known PL columns
     aliases = {
         "btts": "BTTS PL",
         "both teams to score": "BTTS PL",
@@ -435,19 +449,16 @@ def _resolve_pl_column(user_text: str, ctx: Dict[str, Any]) -> str:
         if k in t:
             return v
 
-    # direct outcome mention (normalized exact)
     norm_map = {_normalize(c): c for c in outcomes}
     for c in outcomes:
         if _normalize(c) in t:
             return c
 
-    # looser: if user writes "bo2.5 pl" without spaces etc
     t_compact = t.replace(" ", "")
     for c in outcomes:
         if _normalize(c).replace(" ", "") in t_compact:
             return c
 
-    # pattern like "for X PL"
     m = re.search(r"\bfor\s+(.+?\bpl)\b", t)
     if m:
         guess = m.group(1).strip()
@@ -497,10 +508,6 @@ def _render_rule_spec(spec: Dict[str, Any]) -> str:
 
 
 def _render_distilled_top(result_obj: Dict[str, Any], top_n: int = 3) -> str:
-    """
-    result_obj is the full JSON saved by the worker:
-      { job_id, task_type, params, computed_at, result: {...} }
-    """
     payload = (result_obj or {}).get("result") or {}
     distilled = payload.get("distilled") or {}
     picked = payload.get("picked") or {}
@@ -558,9 +565,6 @@ def _context_snapshot_text(ctx: Dict[str, Any]) -> str:
 
 
 def _log_lab_to_sheet(job_id: str, result_obj: Dict[str, Any], tags: str):
-    """
-    Keep logs small: baselines + top distilled rules summary.
-    """
     try:
         payload = (result_obj or {}).get("result") or {}
         if not payload:
@@ -608,12 +612,6 @@ def _log_lab_to_sheet(job_id: str, result_obj: Dict[str, Any], tags: str):
 # Autopilot command intercepts
 # ============================================================
 def _maybe_start_pl_lab(user_text: str) -> bool:
-    """
-    Autopilot shortcut:
-      "Spend the next 2 hours building a strategy for BTTS PL"
-      "Build a strategy for BO 2.5 PL for 60 minutes"
-      "Build a strategy for over 2.5 for 90 minutes"
-    """
     if st.session_state.agent_mode != "autopilot":
         return False
 
@@ -622,7 +620,6 @@ def _maybe_start_pl_lab(user_text: str) -> bool:
     if not wants_strategy:
         return False
 
-    # load context first, always
     ctx = _run_tool("get_research_context", {"limit_notes": 10})
     st.session_state.last_context = ctx
 
@@ -695,16 +692,13 @@ def _maybe_handle_job_queries(user_text: str) -> bool:
         res = _run_tool("download_result", {"bucket": bucket, "result_path": rp})
         result_obj = res.get("result") or {}
 
-        # Render distilled strategies nicely if available
         md = _render_distilled_top(result_obj, top_n=3)
         st.session_state.messages.append({"role": "assistant", "content": md})
 
-        # Also include compact json (optional, truncated)
         st.session_state.messages.append(
             {"role": "assistant", "content": f"```json\n{json.dumps(result_obj, indent=2)[:12000]}\n```"}
         )
 
-        # Auto-log to sheet
         try:
             task_type = (result_obj.get("task_type") or "")
             if task_type in ("pl_lab", "btts_lab"):
@@ -781,6 +775,32 @@ with st.sidebar:
     st.radio("Agent mode", ["chat", "autopilot"], key="agent_mode")
     st.divider()
 
+    # --- NEW CHAT controls (restored) ---
+    st.subheader("🧠 Session Controls")
+
+    colA, colB = st.columns(2)
+    with colA:
+        if st.button("🆕 New chat", use_container_width=True):
+            _reset_to_new_chat()
+            st.rerun()
+    with colB:
+        if st.button("🧬 Fork chat", use_container_width=True, help="Duplicate current chat into a new session id"):
+            _duplicate_current_to_new_chat()
+            st.rerun()
+
+    with st.expander("Rename / Delete", expanded=False):
+        new_title = st.text_input("Rename this chat", value=f"Session {st.session_state.session_id[:8]}")
+        if st.button("Save title"):
+            _run_tool("rename_chat", {"session_id": st.session_state.session_id, "title": new_title})
+            _persist_chat(title=new_title)
+            st.success("Renamed.")
+        if st.button("Delete this chat", type="secondary"):
+            _run_tool("delete_chat", {"session_id": st.session_state.session_id})
+            _reset_to_new_chat()
+            st.rerun()
+
+    st.divider()
+
     if st.session_state.get("last_chat_save_error"):
         st.warning(f"Chat persistence warning: {st.session_state.last_chat_save_error}")
         if st.button("Clear chat save warning"):
@@ -790,16 +810,16 @@ with st.sidebar:
     sessions = _load_sessions()
     sessions_display = list(reversed(sessions))
 
-    options = [{"session_id": SESSION_ID, "title": f"(current) {SESSION_ID[:8]}"}] + [
+    options = [{"session_id": st.session_state.session_id, "title": f"(current) {st.session_state.session_id[:8]}"}] + [
         {"session_id": s.get("session_id"), "title": s.get("title") or s.get("session_id")[:8]}
         for s in sessions_display
-        if s.get("session_id") and s.get("session_id") != SESSION_ID
+        if s.get("session_id") and s.get("session_id") != st.session_state.session_id
     ]
 
     labels = [f"{o['title']} — {o['session_id'][:8]}" for o in options]
     chosen = st.selectbox("Select session", options=list(range(len(options))), format_func=lambda i: labels[i], index=0)
 
-    if options[chosen]["session_id"] != SESSION_ID:
+    if options[chosen]["session_id"] != st.session_state.session_id:
         _set_session(options[chosen]["session_id"])
         st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         _try_load_chat(st.session_state.session_id)
