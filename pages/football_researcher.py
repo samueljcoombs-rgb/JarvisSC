@@ -4,6 +4,7 @@ import os
 import json
 import uuid
 import re
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Set
 
@@ -60,7 +61,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_research_context",
-            "description": "Fetch all Google Sheet tabs + derived constraints (ignored_columns, outcome_columns).",
+            "description": "Fetch all Google Sheet tabs + derived constraints (ignored_columns, outcome_columns, enforcement).",
             "parameters": {"type": "object", "properties": {"limit_notes": {"type": "integer"}}, "required": []},
         },
     },
@@ -157,6 +158,38 @@ TOOLS = [
             "parameters": {"type": "object", "properties": {"duration_minutes": {"type": "integer"}}, "required": []},
         },
     },
+    # NEW: Small primitives for autonomous iteration
+    {
+        "type": "function",
+        "function": {
+            "name": "start_feature_profile",
+            "description": "Start a feature profiling job (missingness, cardinality, time-window stability summary).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "duration_minutes": {"type": "integer"},
+                    "pl_column": {"type": "string"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "start_rule_validate",
+            "description": "Validate a proposed explicit rule spec (numeric ranges + categorical constraints) on train/val/test with risk + stability.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "duration_minutes": {"type": "integer"},
+                    "pl_column": {"type": "string"},
+                    "spec": {"type": "object"},
+                },
+                "required": ["spec"],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {"name": "list_chats", "description": "List saved chat sessions.", "parameters": {"type": "object", "properties": {"limit": {"type": "integer"}}, "required": []}},
@@ -194,20 +227,30 @@ TOOLS = [
 
 SYSTEM_PROMPT = """You are FootballResearcher — an autonomous strategy R&D agent.
 
-NON-NEGOTIABLE SOURCE OF TRUTH
+NON-NEGOTIABLE SOURCE OF TRUTH (THE BIBLE)
 - You MUST use Google Sheet tabs via get_research_context():
   dataset_overview, research_rules, column_definitions, evaluation_framework, research_state, research_memory.
 - Treat research_rules as ENFORCEMENT rules, not suggestions.
+- You MUST read recent research_memory before starting new analysis.
+- You MUST use derived.enforcement limits (min samples, max gaps, risk limits) when choosing/validating strategies.
 
 MISSION / PURPOSE
 - Discover strategies that are REPEATABLE on future matches.
-- Avoid overfitting and leakage. You are judged on out-of-sample stability and risk:
-  - P&L, ROI
-  - max drawdown and longest losing streak (in POINTS)
+- The dataset is POST-SCAN. Each row = the historical outcome of a scan condition, NOT a match/bet.
+- PL columns are OUTCOMES ONLY: never use PL columns (or proxies) as predictive features.
+- NO GAMES is an aggregated count: must NOT be summed across rows; treat carefully.
+- You are judged on out-of-sample stability and risk (points):
+  - P&L and ROI
+  - max drawdown and longest losing streak (by ID aggregation)
 - Output strategies as explicit filters:
-  - Numeric ranges + categorical constraints
-  - With minimum sample sizes on train/val/test (and unique IDs where possible)
-- You MUST separate discovery (train/val) from final confirmation (test).
+  - Numeric ranges + categorical constraints (MODE/MARKET/DRIFT etc.)
+  - With minimum sample sizes on train/val/test and unique IDs where possible
+
+VALIDATION DISCIPLINE
+- Always time-split: train on earlier data; validate on later; final test untouched.
+- Never tune thresholds using test.
+- Prefer simple, stable strategies over complex, fragile ones.
+- Log significant findings using append_research_note.
 """
 
 
@@ -332,7 +375,7 @@ def _sanitize_history_for_llm(messages: List[Dict[str, Any]]) -> List[Dict[str, 
 
 
 # ============================================================
-# LLM call
+# LLM calls
 # ============================================================
 def _call_llm(messages: List[Dict[str, Any]]):
     mode = st.session_state.agent_mode
@@ -352,6 +395,16 @@ def _call_llm(messages: List[Dict[str, Any]]):
         return client.chat.completions.create(model=MODEL, messages=chat_only)
 
     return client.chat.completions.create(model=MODEL, messages=safe_messages, tools=TOOLS, tool_choice="auto")
+
+
+def _call_llm_tools(messages: List[Dict[str, Any]]):
+    safe_messages = _sanitize_history_for_llm(messages)
+    return client.chat.completions.create(model=MODEL, messages=safe_messages, tools=TOOLS, tool_choice="auto")
+
+
+def _call_llm_no_tools(messages: List[Dict[str, Any]]):
+    safe_messages = _sanitize_history_for_llm(messages)
+    return client.chat.completions.create(model=MODEL, messages=safe_messages, tools=TOOLS, tool_choice="none")
 
 
 # ============================================================
@@ -412,12 +465,13 @@ def _resolve_pl_column(user_text: str, ctx: Dict[str, Any]) -> str:
         "bo 2.5": "BO 2.5 PL",
         "fh over 1.5": "BO1.5 FHG PL",
         "shg": "SHG PL",
+        "lu1.5": "LU1.5 PL",
+        "lfghu0.5": "LFGHU0.5 PL",
     }
     for k, v in aliases.items():
         if k in t:
             return v
 
-    # match against outcome columns
     def nn(x: str) -> str:
         return _normalize(x).replace(" ", "")
 
@@ -510,14 +564,21 @@ def _context_snapshot_text(ctx: Dict[str, Any]) -> str:
     derived = (ctx.get("derived") or {})
     ignored = derived.get("ignored_columns") or []
     outcomes = derived.get("outcome_columns") or []
+    enforcement = derived.get("enforcement") or {}
     primary_goal = ov.get("primary_goal", "")
     fmt = ov.get("strategy_output_format", "")
+    row_def = ov.get("row_definition", "")
+    warn = ov.get("analysis_warning", "")
+
     return (
-        f"Context loaded.\n"
+        f"Context loaded (Sheet Bible).\n"
         f"- primary_goal: {primary_goal}\n"
+        f"- row_definition: {row_def}\n"
+        f"- warning: {warn}\n"
         f"- strategy_output_format: {fmt}\n"
         f"- ignored_columns: {ignored}\n"
         f"- outcome_columns: {outcomes}\n"
+        f"- enforcement: {enforcement}\n"
     )
 
 
@@ -565,8 +626,144 @@ def _log_lab_to_sheet(job_id: str, result_obj: Dict[str, Any], tags: str):
 
 
 # ============================================================
+# NEW: Autonomous research loop
+# ============================================================
+def _run_autonomous_research_loop(user_text: str, budget_minutes: int, max_rounds: int = 80):
+    budget_minutes = max(5, min(int(budget_minutes), 360))
+    deadline = time.time() + budget_minutes * 60
+
+    # Add user request once
+    st.session_state.messages.append({"role": "user", "content": user_text})
+    st.session_state.messages = _trim_messages(st.session_state.messages)
+
+    # Load sheet context immediately (Bible) and inject it to the model
+    ctx = _run_tool("get_research_context", {"limit_notes": 40})
+    st.session_state.last_context = ctx
+
+    st.session_state.messages.append({"role": "assistant", "content": _context_snapshot_text(ctx)})
+    st.session_state.messages.append(
+        {
+            "role": "assistant",
+            "content": (
+                "🧠 AUTONOMOUS RESEARCH LOOP START\n"
+                f"- Budget: {budget_minutes} minutes\n"
+                "- You must iterate: run jobs → interpret results → decide next job params.\n"
+                "- Always obey Sheet rules: no leakage, 3-way time split, never tune on test.\n"
+                "- Prefer short jobs so you can iterate multiple times.\n"
+                "- Log significant findings to research_memory.\n"
+                "- When remaining time < 120s, stop tools and write final strategies.\n"
+            ),
+        }
+    )
+
+    rounds = 0
+    while rounds < max_rounds and time.time() < deadline:
+        rounds += 1
+        remaining_s = int(deadline - time.time())
+
+        st.session_state.messages.append(
+            {"role": "assistant", "content": f"[Loop clock] Remaining seconds: {remaining_s}. If < 120, start final write-up."}
+        )
+
+        try:
+            resp = _call_llm_tools(st.session_state.messages)
+        except BadRequestError as e:
+            st.error("OpenAI BadRequestError (full details below).")
+            try:
+                st.json(e.response.json())
+            except Exception:
+                st.exception(e)
+            raise
+
+        msg = resp.choices[0].message
+        tool_calls = getattr(msg, "tool_calls", None)
+
+        assistant_msg: Dict[str, Any] = {"role": "assistant", "content": msg.content or ""}
+        if tool_calls:
+            assistant_msg["tool_calls"] = [
+                {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                for tc in tool_calls
+            ]
+        st.session_state.messages.append(assistant_msg)
+
+        if not tool_calls:
+            break
+
+        # Execute tools with guardrails
+        for tc in tool_calls:
+            name = tc.function.name
+            args = json.loads(tc.function.arguments or "{}")
+
+            # Clamp waits to keep loop responsive
+            if name == "wait_for_job":
+                args["timeout_s"] = min(int(args.get("timeout_s") or 60), max(5, min(120, int(deadline - time.time()))))
+                args["poll_s"] = min(int(args.get("poll_s") or 5), 10)
+
+            # Keep job durations short inside the loop for iterative control
+            if name in ("start_pl_lab", "start_feature_profile", "start_rule_validate"):
+                remaining_min = max(1, int((deadline - time.time()) // 60))
+                args["duration_minutes"] = min(int(args.get("duration_minutes") or 8), max(5, min(12, remaining_min)))
+
+            out = _run_tool(name, args)
+            st.session_state.messages.append({"role": "tool", "tool_call_id": tc.id, "content": json.dumps(out, ensure_ascii=False)})
+
+        st.session_state.messages = _trim_messages(st.session_state.messages)
+
+        # If nearly out of time, break to final
+        if int(deadline - time.time()) < 90:
+            break
+
+    # Final write-up without tools
+    st.session_state.messages.append(
+        {
+            "role": "assistant",
+            "content": (
+                "🧾 FINAL OUTPUT NOW.\n"
+                "Produce your best 1–3 strategies as explicit rules.\n"
+                "For each: train/val/test sample sizes + ROI + total PL + max drawdown + losing streak (by ID).\n"
+                "Explain why it makes logical sense (not just random), referencing MODE/MARKET/DRIFT/DIFF logic.\n"
+                "If nothing is robust, say so and explain what failed and what to try next."
+            ),
+        }
+    )
+
+    resp_final = _call_llm_no_tools(st.session_state.messages)
+    msg_final = resp_final.choices[0].message
+    st.session_state.messages.append({"role": "assistant", "content": msg_final.content or ""})
+
+    _persist_chat()
+
+
+# ============================================================
 # Autopilot intercepts
 # ============================================================
+def _maybe_run_loop(user_text: str) -> bool:
+    if st.session_state.agent_mode != "autopilot":
+        return False
+
+    t = _normalize(user_text)
+
+    # Trigger phrases for autonomous multi-step loop
+    wants_loop = any(
+        k in t
+        for k in [
+            "run research loop",
+            "research loop",
+            "autonomous loop",
+            "autonomously",
+            "iterate",
+            "keep iterating",
+            "full loop",
+        ]
+    )
+    if not wants_loop:
+        return False
+
+    minutes = _minutes_from_text(user_text, default_minutes=30)
+    _run_autonomous_research_loop(user_text=user_text, budget_minutes=minutes, max_rounds=90)
+    return True
+
+
 def _maybe_start_pl_lab(user_text: str) -> bool:
     if st.session_state.agent_mode != "autopilot":
         return False
@@ -648,6 +845,7 @@ def _maybe_handle_job_queries(user_text: str) -> bool:
         res = _run_tool("download_result", {"bucket": bucket, "result_path": rp})
         result_obj = res.get("result") or {}
 
+        # Render distilled strategies if present, otherwise show raw
         st.session_state.messages.append({"role": "assistant", "content": _render_distilled_top(result_obj, top_n=3)})
         st.session_state.messages.append({"role": "assistant", "content": f"```json\n{json.dumps(result_obj, indent=2)[:12000]}\n```"})
 
@@ -666,6 +864,8 @@ def _maybe_handle_job_queries(user_text: str) -> bool:
 
 def _chat_with_tools(user_text: str, max_rounds: int = 6):
     if st.session_state.agent_mode == "autopilot":
+        if _maybe_run_loop(user_text):
+            return
         if _maybe_start_pl_lab(user_text):
             return
         if _maybe_handle_job_queries(user_text):
