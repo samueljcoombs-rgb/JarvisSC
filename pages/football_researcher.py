@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import os
 import json
-import re
 import uuid
+import re
 from datetime import datetime
-from typing import Any, Dict, List, Set, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import streamlit as st
 from openai import OpenAI
@@ -43,6 +43,10 @@ DEFAULT_RESULTS_BUCKET = os.getenv("RESULTS_BUCKET") or st.secrets.get("RESULTS_
 MAX_MESSAGES_TO_KEEP = int(os.getenv("MAX_CHAT_MESSAGES") or st.secrets.get("MAX_CHAT_MESSAGES", 220))
 
 
+def _dataset_locator() -> Dict[str, str]:
+    return {"storage_bucket": DEFAULT_STORAGE_BUCKET, "storage_path": DEFAULT_STORAGE_PATH}
+
+
 # ============================================================
 # Tool runner
 # ============================================================
@@ -55,7 +59,8 @@ def _run_tool(name: str, args: Dict[str, Any]) -> Any:
 
 
 # ============================================================
-# LLM Tools (ONLY what the model should call)
+# Tools schema for OpenAI function calling
+# (Fix: arrays must declare items)
 # ============================================================
 
 TOOLS = [
@@ -72,14 +77,21 @@ TOOLS = [
     {"type": "function", "function": {"name": "list_columns", "description": "List CSV columns.", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "csv_url": {"type": "string"}}, "required": []}}},
     {"type": "function", "function": {"name": "basic_roi_for_pl_column", "description": "Row-level ROI for PL column.", "parameters": {"type": "object", "properties": {"pl_column": {"type": "string"}, "storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "csv_url": {"type": "string"}}, "required": ["pl_column"]}}},
 
-    # SAFE job wrappers
-    {"type": "function", "function": {"name": "submit_strategy_search", "description": "Submit strategy_search safely.", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "results_bucket": {"type": "string"}, "time_split_ratio": {"type": "number"}, "target_pl_column": {"type": "string"}}, "required": []}}},
-    {"type": "function", "function": {"name": "submit_feature_audit", "description": "Submit feature_audit safely.", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "results_bucket": {"type": "string"}, "target_pl_column": {"type": "string"}}, "required": []}}},
-    {"type": "function", "function": {"name": "submit_feature_rank", "description": "Submit feature_rank safely.", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "results_bucket": {"type": "string"}, "target_pl_column": {"type": "string"}, "time_split_ratio": {"type": "number"}, "max_rows": {"type": "integer"}}, "required": ["target_pl_column"]}}},
+    # SAFE wrappers
+    {"type": "function", "function": {"name": "submit_strategy_search", "description": "Submit strategy_search job (safe pl_column resolution).", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "results_bucket": {"type": "string"}, "time_split_ratio": {"type": "number"}, "target_pl_column": {"type": "string"}}, "required": ["target_pl_column"]}}},
+    {"type": "function", "function": {"name": "submit_feature_audit", "description": "Submit feature_audit job.", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "results_bucket": {"type": "string"}, "target_pl_column": {"type": "string"}}, "required": []}}},
+    {"type": "function", "function": {"name": "submit_feature_rank", "description": "Submit feature_rank job.", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "results_bucket": {"type": "string"}, "target_pl_column": {"type": "string"}, "time_split_ratio": {"type": "number"}, "max_rows": {"type": "integer"}}, "required": ["target_pl_column"]}}},
 
+    {"type": "function", "function": {"name": "submit_job", "description": "Submit Modal worker job (raw).", "parameters": {"type": "object", "properties": {"task_type": {"type": "string"}, "params": {"type": "object"}}, "required": ["task_type", "params"]}}},
     {"type": "function", "function": {"name": "get_job", "description": "Get job status by job_id.", "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]}}},
     {"type": "function", "function": {"name": "wait_for_job", "description": "Wait for completion; optionally downloads results.", "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}, "timeout_s": {"type": "integer"}, "poll_s": {"type": "integer"}, "auto_download": {"type": "boolean"}}, "required": ["job_id"]}}},
     {"type": "function", "function": {"name": "download_result", "description": "Download a result JSON from storage by path.", "parameters": {"type": "object", "properties": {"result_path": {"type": "string"}, "bucket": {"type": "string"}}, "required": ["result_path"]}}},
+
+    {"type": "function", "function": {"name": "list_chats", "description": "List saved chat sessions.", "parameters": {"type": "object", "properties": {"limit": {"type": "integer"}}, "required": []}}},
+    {"type": "function", "function": {"name": "save_chat", "description": "Save chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}, "messages": {"type": "array", "items": {"type": "object"}}, "title": {"type": "string"}}, "required": ["session_id", "messages"]}}},
+    {"type": "function", "function": {"name": "load_chat", "description": "Load chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}}, "required": ["session_id"]}}},
+    {"type": "function", "function": {"name": "rename_chat", "description": "Rename chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}, "title": {"type": "string"}}, "required": ["session_id", "title"]}}},
+    {"type": "function", "function": {"name": "delete_chat", "description": "Delete chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}}, "required": ["session_id"]}}},
 ]
 
 
@@ -90,19 +102,26 @@ TOOLS = [
 SYSTEM_PROMPT = """You are FootballResearcher — an autonomous research agent that discovers profitable, robust football trading strategy criteria.
 
 Source of truth:
-- Google Sheet tabs: dataset_overview, research_rules, column_definitions, evaluation_framework, research_state, research_memory.
+- Use Google Sheet tabs: dataset_overview, research_rules, column_definitions, evaluation_framework, research_state, research_memory.
 
 Hard constraints:
 - PL columns are outcomes only and MUST NOT be used as predictive features.
 - Avoid overfitting: time-based splits; never tune thresholds on final test.
-- Always report sample sizes, train vs test gap, drawdown + losing streak in POINTS.
+- Always report sample sizes and stability (train vs test gap) and drawdown/losing streak in POINTS.
 - Prefer simple rules that generalise; penalise fragile, tiny samples.
 
-Mode:
-- CHAT = conversational only (no tools unless user explicitly asks).
-- AUTOPILOT = tools/jobs allowed, keep outputs concrete.
+Objective:
+- When user asks to “design a strategy”, you should plan, run experiments (using worker jobs when needed), log results into research_memory, and present progress updates.
+- Strategies must be explicit filters: MARKET/PL column + ranges on numeric fields + optional categorical constraints.
+- Be decisive: pick what to test next. Only ask user if blocked by missing config.
 
-When asked what model you are, do NOT guess; rely on sidebar “OpenAI returned model”.
+Important:
+- In CHAT mode you must reply conversationally and should not call tools unless explicitly asked.
+- In AUTOPILOT mode you may call tools and run jobs, but still write a short explanation of what you did.
+
+Critical:
+- Never pass raw user sentences as a column name.
+- Always resolve target_pl_column to an exact CSV column (e.g. 'BTTS PL') before submitting jobs.
 """
 
 
@@ -186,45 +205,6 @@ if "agent_mode" not in st.session_state:
 
 
 # ============================================================
-# Context snapshot injection (AUTOPILOT)
-# ============================================================
-
-def _build_context_snapshot(max_notes: int = 8) -> str:
-    try:
-        overview = _run_tool("get_dataset_overview", {}) or {}
-        rules = _run_tool("get_research_rules", {}) or {}
-        evalfw = _run_tool("get_evaluation_framework", {}) or {}
-        state = _run_tool("get_research_state", {}) or {}
-        notes = _run_tool("get_recent_research_notes", {"limit": int(max_notes)}) or {}
-    except Exception as e:
-        return f"[context_snapshot_error] {e}"
-
-    snap = {
-        "dataset_overview": overview.get("data", overview),
-        "research_rules": rules.get("data", rules),
-        "evaluation_framework": evalfw.get("data", evalfw),
-        "research_state": state.get("data", state),
-        "recent_research_memory": notes.get("rows", notes),
-    }
-    s = json.dumps(snap, ensure_ascii=False)
-    return s if len(s) <= 9000 else (s[:9000] + "…")
-
-
-def _autopilot_system_prompt() -> str:
-    now = datetime.utcnow().timestamp()
-    cached = st.session_state.get("_ctx_snapshot")
-    cached_at = st.session_state.get("_ctx_snapshot_at", 0.0)
-    if cached and (now - float(cached_at)) < 180:
-        snap = cached
-    else:
-        snap = _build_context_snapshot(max_notes=10)
-        st.session_state["_ctx_snapshot"] = snap
-        st.session_state["_ctx_snapshot_at"] = now
-
-    return SYSTEM_PROMPT + "\n\nAUTOPILOT_CONTEXT_SNAPSHOT_JSON:\n" + snap
-
-
-# ============================================================
 # Sanitise history for OpenAI
 # ============================================================
 
@@ -246,7 +226,10 @@ def _sanitize_history_for_llm(messages: List[Dict[str, Any]]) -> List[Dict[str, 
 
         if role == "assistant":
             expecting_tool_ids = set()
-            clean_assistant: Dict[str, Any] = {"role": "assistant", "content": m.get("content", "") or ""}
+            clean_assistant: Dict[str, Any] = {
+                "role": "assistant",
+                "content": m.get("content", "") or "",
+            }
 
             tc = m.get("tool_calls")
             if isinstance(tc, list) and tc:
@@ -258,7 +241,9 @@ def _sanitize_history_for_llm(messages: List[Dict[str, Any]]) -> List[Dict[str, 
                         name = fn.get("name")
                         args = fn.get("arguments", "{}")
                         if cid and name:
-                            cleaned_tool_calls.append({"id": cid, "type": "function", "function": {"name": name, "arguments": args}})
+                            cleaned_tool_calls.append(
+                                {"id": cid, "type": "function", "function": {"name": name, "arguments": args}}
+                            )
                             expecting_tool_ids.add(cid)
                     except Exception:
                         continue
@@ -278,8 +263,6 @@ def _sanitize_history_for_llm(messages: List[Dict[str, Any]]) -> List[Dict[str, 
         if role == "user":
             out.append({"role": "user", "content": m.get("content", "") or ""})
             continue
-
-        continue
 
     return out
 
@@ -304,177 +287,115 @@ def _call_llm(messages: List[Dict[str, Any]]):
             else:
                 chat_only.append(m)
 
-        return client.chat.completions.create(model=MODEL, messages=chat_only)
+        return client.chat.completions.create(
+            model=MODEL,
+            messages=chat_only,
+        )
 
-    # AUTOPILOT: inject sheet snapshot
-    safe_messages[0]["content"] = _autopilot_system_prompt()
-    return client.chat.completions.create(model=MODEL, messages=safe_messages, tools=TOOLS, tool_choice="auto")
+    return client.chat.completions.create(
+        model=MODEL,
+        messages=safe_messages,
+        tools=TOOLS,
+        tool_choice="auto",
+    )
 
 
 # ============================================================
-# Pipeline router: "build strategy for <X PL>"
+# Local PL resolver (never pass raw user text)
 # ============================================================
 
-def _extract_pl_column(user_text: str) -> Optional[str]:
-    m = re.search(r"([A-Za-z0-9\.\s]+?\sPL)\b", user_text, flags=re.IGNORECASE)
-    if not m:
-        return None
-    return m.group(1).strip()
+def _resolve_pl_from_user_text(user_text: str) -> Optional[str]:
+    # pull columns once
+    cols_out = _run_tool("list_columns", {"storage_bucket": DEFAULT_STORAGE_BUCKET, "storage_path": DEFAULT_STORAGE_PATH})
+    cols = cols_out.get("columns") or []
+    t = (user_text or "").lower()
+
+    # prefer exact column matches present in the user text
+    for c in cols:
+        if c and c.lower() in t:
+            return c
+
+    # fuzzy keywords -> canonical
+    if "btts" in t:
+        for c in cols:
+            if c.lower().strip() == "btts pl":
+                return c
+
+    if ("2.5" in t or "o2.5" in t or "over 2.5" in t) and "pl" in t:
+        for c in cols:
+            if c.lower().strip() == "bo 2.5 pl":
+                return c
+
+    # last resort: any column containing 'pl' and keyword
+    if "pl" in t:
+        for c in cols:
+            cl = c.lower()
+            if "pl" in cl and ("btts" in t and "btts" in cl):
+                return c
+
+    return None
 
 
-def _wait_and_download(job_id: str, bucket: str) -> Dict[str, Any]:
+# ============================================================
+# One-shot pipeline runner (BTTS etc)
+# ============================================================
+
+def _run_strategy_pipeline(pl_column: str, split_ratio: float = 0.7) -> Dict[str, Any]:
+    # 1) run strategy_search (safe wrapper resolves mapping properly)
+    submitted = _run_tool(
+        "submit_strategy_search",
+        {
+            "storage_bucket": DEFAULT_STORAGE_BUCKET,
+            "storage_path": DEFAULT_STORAGE_PATH,
+            "results_bucket": DEFAULT_RESULTS_BUCKET,
+            "time_split_ratio": float(split_ratio),
+            "target_pl_column": pl_column,
+        },
+    )
+
+    job_id = submitted.get("job_id")
+    if not job_id:
+        return {"ok": False, "stage": "submit", "submitted": submitted}
+
     waited = _run_tool("wait_for_job", {"job_id": job_id, "timeout_s": 1800, "poll_s": 5, "auto_download": True})
     if waited.get("status") != "done":
-        return {"error": f"Job not done: {waited.get('status')}", "waited": waited}
+        return {"ok": False, "stage": "wait", "waited": waited}
+
     job = waited.get("job") or {}
-    rp = job.get("result_path") or ""
-    result = waited.get("result")
-    if not result and rp:
-        dl = _run_tool("download_result", {"result_path": rp, "bucket": bucket})
-        result = dl.get("result")
-    return {"job": job, "result": result}
+    result_path = job.get("result_path") or ""
+    # fetch full result (wait_for_job may or may not include parsed)
+    result = _run_tool("download_result", {"bucket": DEFAULT_RESULTS_BUCKET, "result_path": result_path})
+    return {"ok": True, "job_id": job_id, "result_path": result_path, "result": result}
 
 
-def _summarise_feature_audit(payload: Dict[str, Any]) -> str:
-    if not payload or not isinstance(payload, dict):
-        return "feature_audit: no payload"
-    res = payload.get("result") if "result" in payload else payload
-    inner = res.get("result") if isinstance(res, dict) and "result" in res else res
-    if isinstance(inner, dict) and inner.get("error"):
-        return f"feature_audit error: {inner['error']}"
-    if not isinstance(inner, dict):
-        return "feature_audit: malformed result"
-    lines = []
-    lines.append("### 1) Feature audit")
-    lines.append(f"- Rows/Cols: **{inner.get('rows')}** / **{inner.get('cols')}**")
-    lines.append(f"- Target PL resolved: `{inner.get('target_pl_column_resolved')}`")
-    lines.append(f"- PL columns found: **{len(inner.get('pl_columns') or [])}**")
-    mt = inner.get("missingness_top") or []
-    if mt:
-        lines.append("- Top missingness:")
-        for r in mt[:8]:
-            lines.append(f"  - {r.get('col')}: {round(float(r.get('missing_pct',0))*100,1)}%")
-    return "\n".join(lines)
-
-
-def _summarise_feature_rank(payload: Dict[str, Any]) -> str:
-    if not payload or not isinstance(payload, dict):
-        return "feature_rank: no payload"
-    res = payload.get("result") if "result" in payload else payload
-    inner = res.get("result") if isinstance(res, dict) and "result" in res else res
-    if isinstance(inner, dict) and inner.get("error"):
-        return f"feature_rank error: {inner['error']}"
-    if not isinstance(inner, dict):
-        return "feature_rank: malformed result"
-    m = inner.get("metrics") or {}
-    lines = []
-    lines.append("### 2) Feature ranking (Logit + Permutation)")
-    lines.append(f"- Target: `{inner.get('target_pl_column')}` (binary: PL>0)")
-    lines.append(f"- Test ROC AUC: **{m.get('test_roc_auc')}**, LogLoss: **{m.get('test_logloss')}**, Brier: **{m.get('test_brier')}**")
-    lines.append(f"- Features used: **{m.get('n_features')}** | Train rows: **{m.get('train_rows')}** | Test rows: **{m.get('test_rows')}**")
-    top = inner.get("top_features_permutation_auc") or []
-    if top:
-        lines.append("- Top permutation features (AUC impact):")
-        for r in top[:12]:
-            lines.append(f"  - {r.get('feature')}: {round(float(r.get('importance_mean',0)),6)}")
-    return "\n".join(lines)
-
-
-def _summarise_strategy_search(payload: Dict[str, Any]) -> str:
-    if not payload or not isinstance(payload, dict):
-        return "strategy_search: no payload"
-    res = payload.get("result") if "result" in payload else payload
-    inner = res.get("result") if isinstance(res, dict) and "result" in res else res
-    if isinstance(inner, dict) and inner.get("error"):
-        return f"strategy_search error: {inner['error']}"
-    if not isinstance(inner, dict):
-        return "strategy_search: malformed result"
-
-    picked = inner.get("picked") or {}
-    search = inner.get("search") or {}
-    if isinstance(search, dict) and search.get("error"):
-        return f"Picked: `{picked}`\n\nSearch error: {search.get('error')}"
-
-    rules = (search.get("top_rules") or [])[:3]
-    lines = []
-    lines.append("### 3) Rule search (top 3)")
-    lines.append(f"- Picked: `{picked}`")
-    if not rules:
-        lines.append("- No rules returned.")
-        return "\n".join(lines)
-
-    for i, r in enumerate(rules, start=1):
-        lines.append(f"\n**Rule #{i}**")
-        lines.append(f"- Rule: `{r.get('rule')}`")
-        lines.append(f"- Samples: `{r.get('samples')}`")
-        lines.append(f"- Train: `{r.get('train')}`")
-        lines.append(f"- Test: `{r.get('test')}`")
-        lines.append(f"- Gap train−test: `{r.get('gap_train_minus_test')}`")
-        lines.append(f"- Test game-level risk: `{r.get('test_game_level')}`")
-    return "\n".join(lines)
-
-
-def _run_btts_pipeline(pl_column: str, split_ratio: float = 0.7) -> str:
-    # 1) audit
-    a = _run_tool("submit_feature_audit", {
-        "storage_bucket": DEFAULT_STORAGE_BUCKET,
-        "storage_path": DEFAULT_STORAGE_PATH,
-        "results_bucket": DEFAULT_RESULTS_BUCKET,
-        "target_pl_column": pl_column,
-    })
-    aj = a.get("job_id") if isinstance(a, dict) else None
-    if not aj:
-        return f"feature_audit submit failed: {a}"
-    ares = _wait_and_download(aj, DEFAULT_RESULTS_BUCKET)
-    if ares.get("error"):
-        return f"feature_audit failed: {ares}"
-
-    # 2) rank
-    r = _run_tool("submit_feature_rank", {
-        "storage_bucket": DEFAULT_STORAGE_BUCKET,
-        "storage_path": DEFAULT_STORAGE_PATH,
-        "results_bucket": DEFAULT_RESULTS_BUCKET,
-        "target_pl_column": pl_column,
-        "time_split_ratio": float(split_ratio),
-        "max_rows": 250000,
-    })
-    rj = r.get("job_id") if isinstance(r, dict) else None
-    if not rj:
-        return f"feature_rank submit failed: {r}"
-    rres = _wait_and_download(rj, DEFAULT_RESULTS_BUCKET)
-    if rres.get("error"):
-        return f"feature_rank failed: {rres}"
-
-    # 3) strategy search
-    s = _run_tool("submit_strategy_search", {
-        "storage_bucket": DEFAULT_STORAGE_BUCKET,
-        "storage_path": DEFAULT_STORAGE_PATH,
-        "results_bucket": DEFAULT_RESULTS_BUCKET,
-        "time_split_ratio": float(split_ratio),
-        "target_pl_column": pl_column,
-    })
-    sj = s.get("job_id") if isinstance(s, dict) else None
-    if not sj:
-        return f"strategy_search submit failed: {s}"
-    sres = _wait_and_download(sj, DEFAULT_RESULTS_BUCKET)
-    if sres.get("error"):
-        return f"strategy_search failed: {sres}"
-
-    # Log structured note
-    note = json.dumps({
-        "ts": datetime.utcnow().isoformat(),
-        "kind": "btts_pipeline_run",
-        "target_pl": pl_column,
-        "time_split_ratio": float(split_ratio),
-        "jobs": {"feature_audit": aj, "feature_rank": rj, "strategy_search": sj},
-    }, ensure_ascii=False)
-    _run_tool("append_research_note", {"note": note, "tags": "autopilot,pipeline,btts"})
-
-    parts = []
-    parts.append(_summarise_feature_audit(ares.get("result") or {}))
-    parts.append(_summarise_feature_rank(rres.get("result") or {}))
-    parts.append(_summarise_strategy_search(sres.get("result") or {}))
-    return "\n\n".join(parts)
+def _summarise_top3(result_obj: Dict[str, Any]) -> str:
+    try:
+        payload = (result_obj.get("result") or {}).get("result") or {}
+        inner = payload.get("result") or payload  # tolerate nesting
+        picked = inner.get("picked") or {}
+        search = inner.get("search") or {}
+        if "error" in search:
+            return f"Picked: {picked}\n\nERROR: {search.get('error')}"
+        top = (search.get("top_rules") or [])[:3]
+        lines = []
+        lines.append(f"Picked: {picked}")
+        lines.append("")
+        for i, r in enumerate(top, start=1):
+            rule = r.get("rule")
+            te = r.get("test")
+            tr = r.get("train")
+            gap = r.get("gap_train_minus_test")
+            games = (r.get("test_game_level") or {})
+            lines.append(f"Top #{i}")
+            lines.append(f"  Rule: {rule}")
+            lines.append(f"  Train: {tr}")
+            lines.append(f"  Test:  {te}")
+            lines.append(f"  Gap(train-test): {gap}")
+            lines.append(f"  Test drawdown/losing: {games}")
+            lines.append("")
+        return "\n".join(lines).strip()
+    except Exception as e:
+        return f"Could not summarise result: {e}\nRaw: {result_obj}"
 
 
 # ============================================================
@@ -482,24 +403,30 @@ def _run_btts_pipeline(pl_column: str, split_ratio: float = 0.7) -> str:
 # ============================================================
 
 def _chat_with_tools(user_text: str, max_rounds: int = 6):
-    # AUTOPILOT shortcut: if user asks for a PL strategy, run the pipeline deterministically
+    # AUTOPILOT fast-path: if user asks for a strategy, resolve PL locally and run pipeline
     if st.session_state.agent_mode == "autopilot":
-        pl = _extract_pl_column(user_text)
-        if pl:
-            summary = _run_btts_pipeline(pl_column=pl, split_ratio=0.7)
+        if re.search(r"\b(build|design|create)\b.*\bstrategy\b", user_text.lower()) or ("strategy" in user_text.lower() and "pl" in user_text.lower()):
+            pl = _resolve_pl_from_user_text(user_text)
+            if not pl:
+                st.session_state.messages.append({"role": "assistant", "content": "I couldn’t resolve the PL column from your message. Try: `Build a strategy for BTTS PL` (exact)."})
+                _persist_chat()
+                return
+
             st.session_state.messages.append({"role": "user", "content": user_text})
-            st.session_state.messages.append({"role": "assistant", "content": summary})
-            st.session_state.messages = _trim_messages(st.session_state.messages)
+            st.session_state.messages.append({"role": "assistant", "content": f"Running strategy_search pipeline for **{pl}** (time_split_ratio=0.7) using {DEFAULT_STORAGE_BUCKET}/{DEFAULT_STORAGE_PATH}…"})
+            out = _run_strategy_pipeline(pl_column=pl, split_ratio=0.7)
+            st.session_state.messages.append({"role": "assistant", "content": _summarise_top3(out.get("result", {}))})
+            _run_tool("append_research_note", {"note": json.dumps({"ts": datetime.utcnow().isoformat(), "kind": "strategy_pipeline", "pl_column": pl, "job_id": out.get("job_id"), "result_path": out.get("result_path")}, ensure_ascii=False), "tags": "pipeline,autopilot"})
             _persist_chat()
             return
 
+    # Normal LLM loop
     st.session_state.messages.append({"role": "user", "content": user_text})
     st.session_state.messages = _trim_messages(st.session_state.messages)
 
     for _ in range(max_rounds):
         try:
             resp = _call_llm(st.session_state.messages)
-            st.session_state.last_openai_model_used = getattr(resp, "model", None)
         except BadRequestError as e:
             st.error("OpenAI BadRequestError (full details below).")
             try:
@@ -522,10 +449,7 @@ def _chat_with_tools(user_text: str, max_rounds: int = 6):
         if assistant_msg["content"]:
             st.session_state.messages.append(assistant_msg)
         else:
-            if st.session_state.agent_mode == "chat":
-                st.session_state.messages.append({"role": "assistant", "content": "I’m here — what do you want to do next (strategy, debugging, or analysis)?"})
-            else:
-                st.session_state.messages.append(assistant_msg)
+            st.session_state.messages.append({"role": "assistant", "content": "I’m here — what do you want to do next?"})
 
         if st.session_state.agent_mode == "chat":
             break
@@ -549,17 +473,9 @@ def _chat_with_tools(user_text: str, max_rounds: int = 6):
 # ============================================================
 
 with st.sidebar:
-    st.caption(f"Requested MODEL var: `{MODEL}`")
+    st.caption(f"Requested model: `{MODEL}`")
     st.caption(f"Data: `{DEFAULT_STORAGE_BUCKET}/{DEFAULT_STORAGE_PATH}`")
     st.caption(f"Results: `{DEFAULT_RESULTS_BUCKET}`")
-
-    used = st.session_state.get("last_openai_model_used")
-    if used:
-        st.caption(f"OpenAI returned model: `{used}`")
-    else:
-        st.caption("OpenAI returned model: `(no call yet)`")
-
-    st.divider()
     st.radio("Agent mode", ["chat", "autopilot"], key="agent_mode")
     st.divider()
 
