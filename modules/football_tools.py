@@ -249,6 +249,13 @@ def get_research_context(limit_notes: int = 20) -> Dict[str, Any]:
     col_defs = get_column_definitions().get("data") or []
     eval_fw = get_evaluation_framework().get("data") or []
     state = get_research_state().get("data") or {}
+
+    # Optional feature blacklist: exclude from predictive inputs (but keep for grouping/reporting)
+    ignored_feature_columns = []
+    for k in ("ignored_feature_columns", "feature_blacklist", "ignored_features"):
+        if k in state and state.get(k):
+            ignored_feature_columns.extend(_parse_csv_list(state.get(k)))
+    ignored_feature_columns = sorted(set([c for c in ignored_feature_columns if c]))
     notes = get_recent_research_notes(limit=limit_notes).get("rows") or []
 
     ignored_cols = _extract_ignored_columns(rules_rows)
