@@ -270,6 +270,15 @@ for k, default in [
     ("active_job_last_update_ts", 0.0),
     ("active_job_bucket", ""),
     ("active_job_pl_col", ""),
+    ("active_job_last_event_ts", ""),
+    ("agent_session_active", False),
+    ("agent_session_steps_done", 0),
+    ("agent_session_max_steps", 8),
+    ("agent_session_budget_minutes", 30),
+    ("agent_session_minutes_per_job", 10),
+    ("agent_session_pl_column", ""),
+    ("agent_session_filters", {}),
+    ("agent_session_last_decision", ""),
 ]:
     if k not in st.session_state:
         st.session_state[k] = default
@@ -637,6 +646,12 @@ def _maybe_start_narrated_pl_research(user_text: str) -> bool:
     st.session_state.active_job_id = job_id
     st.session_state.active_job_pl_col = pl_col
     st.session_state.active_job_bucket = DEFAULT_RESULTS_BUCKET
+    st.session_state["active_job_last_event_ts"] = ""
+    st.session_state["agent_session_active"] = True
+    st.session_state["agent_session_steps_done"] = 0
+    st.session_state["agent_session_pl_column"] = pl_col
+    st.session_state["agent_session_minutes_per_job"] = int(duration_minutes)
+
     st.session_state.active_job_last_status = ""
     st.session_state.active_job_last_update_ts = 0.0
 
@@ -651,8 +666,148 @@ def _maybe_start_narrated_pl_research(user_text: str) -> bool:
     _append("assistant", f"🚀 Started **PL Lab** for **{pl_col}**. Job ID: `{job_id}`\n\nI'll keep checking it automatically and will post results when they're ready.")
     return True
 
+
+def _summarise_job_result(task_type: str, result: dict) -> str:
+    """Create a compact summary for the LLM 'brain'."""
+    try:
+        if task_type == "pl_lab":
+            picked = result.get("picked") or {}
+            base = result.get("baseline") or {}
+            lb = result.get("leaderboard") or {}
+            best = (result.get("best_candidates") or [{}])[0]
+            return (
+                f"PL_LAB picked={picked}. "
+                f"baseline_val_roi={base.get('val', {}).get('roi'):.4f} baseline_test_roi={base.get('test', {}).get('roi'):.4f}. "
+                f"best_candidates={best}. "
+                f"distilled_rules_count={len((result.get('distilled') or {}).get('top_distilled_rules') or [])}."
+            )
+        if task_type == "categorical_scan":
+            scan = result.get("scan") or {}
+            parts = []
+            for col, rows in scan.items():
+                if rows:
+                    top = rows[0]
+                    parts.append(f"{col} top={top.get('value')} val_roi={top.get('val', {}).get('roi'):.4f} test_roi={top.get('test', {}).get('roi'):.4f} n_test={top.get('samples', {}).get('test')}")
+            return "CATEGORICAL_SCAN " + " | ".join(parts[:6])
+        if task_type == "bracket_sweep":
+            sweep = result.get("sweep") or {}
+            parts = []
+            for col, rows in sweep.items():
+                if rows:
+                    top = rows[0]
+                    rg = top.get("range") or {}
+                    parts.append(f"{col} best_range=[{rg.get('min'):.3g},{rg.get('max'):.3g}] val_roi={top.get('val', {}).get('roi'):.4f} test_roi={top.get('test', {}).get('roi'):.4f} n_test={top.get('samples', {}).get('test')}")
+            return "BRACKET_SWEEP " + " | ".join(parts[:6])
+        if task_type == "rule_search":
+            best = result.get("best_greedy_path")
+            if best:
+                return f"RULE_SEARCH best_score={best.get('score'):.4f} rule={best.get('rule')} val_roi={best.get('val', {}).get('roi'):.4f} test_roi={best.get('test', {}).get('roi'):.4f}"
+            return "RULE_SEARCH no_rule_found"
+        if task_type == "feature_audit":
+            return f"FEATURE_AUDIT n_features={len(result.get('feature_cols') or [])} top_missing={result.get('top_missing', [])[:3]}"
+        if task_type == "explain_best_model":
+            return f"EXPLAIN top_features={[x.get('feature') for x in (result.get('top_features') or [])[:8]]}"
+        if task_type == "hyperopt":
+            if result.get("error"):
+                return f"HYPEROPT error={result.get('error')}"
+            return f"HYPEROPT best_value={result.get('best_value'):.4f} best_params={result.get('best_params')}"
+    except Exception:
+        pass
+    return f"{task_type} (summary unavailable)"
+
+def _agent_choose_next_action(*, ctx: dict, last_task_type: str, last_result: dict) -> dict:
+    """
+    Uses the LLM to choose the next tool/job to run.
+    Returns dict with keys: narration, stop(bool), next_task(optional), next_params(optional), note(optional).
+    """
+    # Guardrails: user dictates budgets; agent decides next action within allowed set.
+    allowed = [
+        "pl_lab",
+        "feature_audit",
+        "categorical_scan",
+        "bracket_sweep",
+        "rule_search",
+        "explain_best_model",
+        "hyperopt",
+    ]
+    summary = _summarise_job_result(last_task_type, last_result)
+    enforcement = ctx.get("enforcement") or {}
+    ignored_cols = ctx.get("ignored_columns") or []
+    outcome_cols = ctx.get("outcome_columns") or []
+    ignored_feat = ctx.get("ignored_feature_columns") or []
+    filters = st.session_state.get("agent_session_filters") or {}
+
+    system = """You are Jarvis Football Research Agent.
+You must follow the Bible rules:
+- Each row is a scan outcome, not a match.
+- PL columns are outcomes only; NEVER use them as predictive features.
+- Always split by time (train/val/test). Do not tune on test.
+- Strategies must become explicit filters (ranges + categorical constraints) with minimum samples.
+- Prefer simple stable rules; penalize overfit/regime dependence.
+You can choose what job to run next, within the available job types."""
+
+    user = {
+        "goal": "Build a BO2.5 strategy with explicit filters that generalise to future matches.",
+        "last_summary": summary,
+        "last_task_type": last_task_type,
+        "budget": {
+            "steps_done": int(st.session_state.get("agent_session_steps_done", 0)),
+            "max_steps": int(st.session_state.get("agent_session_max_steps", 8)),
+        },
+        "current_filters": filters,
+        "enforcement_gates": enforcement,
+        "ignored_columns": ignored_cols,
+        "outcome_columns": outcome_cols,
+        "ignored_feature_columns": ignored_feat,
+        "available_job_types": allowed,
+        "instruction": "Choose the next job to run (or stop). If choosing a job, provide params. Keep params small. Only use train/val for decision-making; test is for final reporting only."
+    }
+
+    prompt = f"""Return STRICT JSON with this schema:
+{{
+  "narration": "what you're doing next and why",
+  "stop": false,
+  "next_task_type": "one of {allowed}",
+  "next_params": {{ ... }}
+}}
+If you decide to stop, set stop=true and omit next_task_type/next_params.
+
+Context JSON:
+{json.dumps(user, ensure_ascii=False)}
+"""
+    # Call LLM (no tools here)
+    resp = _call_llm([
+        {"role": "system", "content": system},
+        {"role": "user", "content": prompt},
+    ])
+    txt = (resp or "").strip()
+    # Extract JSON
+    try:
+        j = json.loads(txt)
+        return j
+    except Exception:
+        # fallback: stop with explanation
+        return {"narration": f"Agent could not parse JSON. Raw: {txt[:400]}", "stop": True}
+
+
 def _autopilot_tick():
     job_id = st.session_state.get("active_job_id") or ""
+
+    # Stream worker events (narrated progress)
+    try:
+        last_ts = st.session_state.get("active_job_last_event_ts") or None
+        ev = _run_tool("get_job_events", {"job_id": job_id, "since_ts": last_ts, "limit": 200})
+        events = (ev or {}).get("events", []) if isinstance(ev, dict) else []
+        if events:
+            for e in events:
+                ts = e.get("ts")
+                lvl = (e.get("level") or "info").upper()
+                msg = e.get("message") or ""
+                _append_chat("assistant", f"🧩 {lvl} {msg}")
+                if ts:
+                    st.session_state["active_job_last_event_ts"] = ts
+    except Exception:
+        pass
     if not job_id:
         return
 
@@ -715,7 +870,56 @@ def _autopilot_tick():
     # Log to sheet
     _log_lab_to_sheet(job_id, result_obj, tags="pl_lab,bo2.5,narrated_autopilot")
 
-    # Clear active job
+    # Decide next step if agent session is active and budget remains
+    if st.session_state.get("agent_session_active") and st.session_state.get("agent_session_steps_done", 0) < st.session_state.get("agent_session_max_steps", 8):
+        st.session_state["agent_session_steps_done"] = int(st.session_state.get("agent_session_steps_done", 0)) + 1
+
+        # LLM decides what to try next based on results (Bible-safe)
+        decision = _agent_choose_next_action(
+            ctx=ctx if isinstance(ctx, dict) else {},
+            last_task_type=str(job.get("task_type") or ""),
+            last_result=(result_obj.get("result") or {}) if isinstance(result_obj, dict) else {}
+        )
+        st.session_state["agent_session_last_decision"] = json.dumps(decision, ensure_ascii=False)[:2000]
+        _append_chat("assistant", "🧠 Agent decision: " + (decision.get("narration") or ""))
+
+        if decision.get("stop"):
+            _append_chat("assistant", "🛑 Agent stopped (no further actions).")
+            st.session_state["agent_session_active"] = False
+            st.session_state.active_job_id = ""
+            return
+
+        next_task = decision.get("next_task_type")
+        next_params = decision.get("next_params") or {}
+
+        # Enforce Bible columns + gates on every job (and keep carry-over filters)
+        base_params = {
+            "pl_column": (st.session_state.get("agent_session_pl_column") or (job.get("params") or {}).get("pl_column") or "BO 2.5 PL"),
+            "storage_path": (job.get("params") or {}).get("storage_path", "football_ai_NNIA.csv"),
+            "storage_bucket": (job.get("params") or {}).get("storage_bucket", "football-data"),
+            "ignored_columns": (ctx.get("derived") or {}).get("ignored_columns") or (job.get("params") or {}).get("ignored_columns") or [],
+            "outcome_columns": (ctx.get("derived") or {}).get("outcome_columns") or (job.get("params") or {}).get("outcome_columns") or [],
+            "ignored_feature_columns": (ctx.get("derived") or {}).get("ignored_feature_columns") or (job.get("params") or {}).get("ignored_feature_columns") or [],
+            "enforcement": (job.get("params") or {}).get("enforcement") or (ctx.get("enforcement") if isinstance(ctx, dict) else {}) or {},
+            "duration_minutes": int(st.session_state.get("agent_session_minutes_per_job", 10)),
+            "filters": st.session_state.get("agent_session_filters") or {},
+            "top_n": int((job.get("params") or {}).get("top_n", 12)),
+        }
+        merged = {**base_params, **next_params}
+        submitted = _run_tool("submit_job", {"task_type": next_task, "params": merged})
+        new_job_id = (submitted or {}).get("job_id") if isinstance(submitted, dict) else None
+        if new_job_id:
+            st.session_state.active_job_id = new_job_id
+            st.session_state.active_job_pl_col = merged.get("pl_column")
+            st.session_state["active_job_last_event_ts"] = ""
+            _append_chat("assistant", f"🚀 Started next job: {next_task}. Job ID: {new_job_id}")
+        else:
+            _append_chat("assistant", "⚠️ Could not submit next job. Stopping agent.")
+            st.session_state["agent_session_active"] = False
+            st.session_state.active_job_id = ""
+        return
+
+    # Clear active job (no agent continuation)
     st.session_state.active_job_id = ""
 
 # ============================================================
