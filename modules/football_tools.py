@@ -216,7 +216,7 @@ def set_research_state(key: str, value: str) -> Dict[str, Any]:
 
 
 # ============================================================
-# Context fetch + parsing
+# One-shot "source of truth" context fetch + parsing
 # ============================================================
 
 def _extract_ignored_columns(rules_rows: List[Dict[str, str]]) -> List[str]:
@@ -235,7 +235,6 @@ def _extract_ignored_columns(rules_rows: List[Dict[str, str]]) -> List[str]:
             for p in parts:
                 if p:
                     ignored.append(p)
-    # de-dupe preserve order
     seen = set()
     out = []
     for x in ignored:
@@ -256,54 +255,7 @@ def _extract_outcome_columns(col_defs: List[Dict[str, str]]) -> List[str]:
     return out
 
 
-def _parse_enforcement_from_state(state: Dict[str, str]) -> Dict[str, Any]:
-    """
-    Pull enforceable numeric constraints from research_state.
-
-    Expected keys (string values in sheet):
-      min_train_rows
-      min_val_rows
-      min_test_rows
-      max_train_val_gap_roi
-      max_test_drawdown
-      max_test_losing_streak_bets
-    """
-    def _to_int(x: str, default: int) -> int:
-        try:
-            return int(float(str(x).strip()))
-        except Exception:
-            return int(default)
-
-    def _to_float(x: str, default: float) -> float:
-        try:
-            return float(str(x).strip())
-        except Exception:
-            return float(default)
-
-    # sensible defaults if sheet not set yet
-    out = {
-        "min_train_rows": _to_int(state.get("min_train_rows", ""), 300),
-        "min_val_rows": _to_int(state.get("min_val_rows", ""), 120),
-        "min_test_rows": _to_int(state.get("min_test_rows", ""), 120),
-        "max_train_val_gap_roi": _to_float(state.get("max_train_val_gap_roi", ""), 0.10),
-        "max_test_drawdown": _to_float(state.get("max_test_drawdown", ""), -25.0),
-        "max_test_losing_streak_bets": _to_int(state.get("max_test_losing_streak_bets", ""), 8),
-    }
-
-    # clamp some values to avoid nonsense
-    out["min_train_rows"] = max(50, min(out["min_train_rows"], 1000000))
-    out["min_val_rows"] = max(20, min(out["min_val_rows"], 1000000))
-    out["min_test_rows"] = max(20, min(out["min_test_rows"], 1000000))
-    out["max_train_val_gap_roi"] = max(0.0, min(out["max_train_val_gap_roi"], 10.0))
-    out["max_test_drawdown"] = min(0.0, max(out["max_test_drawdown"], -1000000.0))  # should be <= 0
-    out["max_test_losing_streak_bets"] = max(0, min(out["max_test_losing_streak_bets"], 1000000))
-    return out
-
-
 def get_research_context(limit_notes: int = 20) -> Dict[str, Any]:
-    """
-    Fetches all relevant tabs + returns derived constraints (ignored/outcome columns + enforcement).
-    """
     overview = get_dataset_overview().get("data") or {}
     rules_rows = get_research_rules().get("data") or []
     col_defs = get_column_definitions().get("data") or []
@@ -313,7 +265,6 @@ def get_research_context(limit_notes: int = 20) -> Dict[str, Any]:
 
     ignored_cols = _extract_ignored_columns(rules_rows)
     outcome_cols = _extract_outcome_columns(col_defs)
-    enforcement = _parse_enforcement_from_state(state)
 
     return {
         "ok": True,
@@ -326,7 +277,6 @@ def get_research_context(limit_notes: int = 20) -> Dict[str, Any]:
         "derived": {
             "ignored_columns": ignored_cols,
             "outcome_columns": outcome_cols,
-            "enforcement": enforcement,
         },
         "ts": _now_iso(),
     }
@@ -452,7 +402,7 @@ def wait_for_job(job_id: str, timeout_s: int = 300, poll_s: int = 5, auto_downlo
 
 
 # ============================================================
-# One-click PL lab starter (ANY PL column) + BTTS wrapper
+# PL lab starter (UPDATED: accepts enforcement/top_fracs/top_n)
 # ============================================================
 
 def start_pl_lab(
@@ -460,18 +410,18 @@ def start_pl_lab(
     pl_column: str = "BTTS PL",
     do_hyperopt: bool = False,
     hyperopt_iter: int = 12,
+    enforcement: Optional[Dict[str, Any]] = None,
+    top_fracs: Optional[List[float]] = None,
+    top_n: int = 12,
 ) -> Dict[str, Any]:
     """
     General lab starter for ANY PL column.
-    Uses Sheet-derived enforcement:
-      - ignored_columns / outcome_columns
-      - enforcement thresholds from research_state
+    Uses Sheet-derived enforcement (ignored_columns / outcome_columns).
     """
     ctx = get_research_context(limit_notes=10)
     derived = (ctx.get("derived") or {})
     ignored_columns = derived.get("ignored_columns") or []
     outcome_columns = derived.get("outcome_columns") or []
-    enforcement = derived.get("enforcement") or {}
 
     storage_bucket = (st.secrets.get("DATA_STORAGE_BUCKET") or os.getenv("DATA_STORAGE_BUCKET") or "football-data").strip()
     storage_path = (st.secrets.get("DATA_STORAGE_PATH") or os.getenv("DATA_STORAGE_PATH") or "football_ai_NNIA.csv").strip()
@@ -483,13 +433,13 @@ def start_pl_lab(
         "_results_bucket": results_bucket,
         "pl_column": pl_column,
         "duration_minutes": int(duration_minutes),
-        "top_fracs": [0.05, 0.1, 0.2],
+        "top_fracs": top_fracs or [0.05, 0.1, 0.2],
         "do_hyperopt": bool(do_hyperopt),
         "hyperopt_iter": int(hyperopt_iter),
-        "top_n": 12,
+        "top_n": int(top_n or 12),
         "ignored_columns": ignored_columns,
         "outcome_columns": outcome_columns,
-        "enforcement": enforcement,
+        "enforcement": enforcement or {},
     }
     return submit_job("pl_lab", params)
 
@@ -499,6 +449,9 @@ def start_btts_lab(
     pl_column: str = "BTTS PL",
     do_hyperopt: bool = False,
     hyperopt_iter: int = 12,
+    enforcement: Optional[Dict[str, Any]] = None,
+    top_fracs: Optional[List[float]] = None,
+    top_n: int = 12,
 ) -> Dict[str, Any]:
     """
     Backward-compatible wrapper. Uses the same pl_lab worker pathway.
@@ -508,6 +461,9 @@ def start_btts_lab(
         pl_column=pl_column or "BTTS PL",
         do_hyperopt=do_hyperopt,
         hyperopt_iter=hyperopt_iter,
+        enforcement=enforcement,
+        top_fracs=top_fracs,
+        top_n=top_n,
     )
 
 
