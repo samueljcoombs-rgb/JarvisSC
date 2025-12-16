@@ -47,6 +47,10 @@ def _run_tool(name: str, args: Dict[str, Any]) -> Any:
     return fn(**args)
 
 
+def _sid() -> str:
+    return st.session_state.session_id
+
+
 # ============================================================
 # Tools schema
 # NOTE: every array must include `items` in JSON schema
@@ -188,9 +192,6 @@ TOOLS = [
 ]
 
 
-# ============================================================
-# System prompt (world class explicit)
-# ============================================================
 SYSTEM_PROMPT = """You are FootballResearcher — an autonomous strategy R&D agent.
 
 NON-NEGOTIABLE SOURCE OF TRUTH
@@ -204,36 +205,9 @@ MISSION / PURPOSE
   - P&L, ROI
   - max drawdown and longest losing streak (in POINTS)
 - Output strategies as explicit filters:
-  - Numeric ranges + categorical constraints (categoricals are REQUIRED where useful)
+  - Numeric ranges + categorical constraints
   - With minimum sample sizes on train/val/test (and unique IDs where possible)
-- You MUST separate:
-  - discovery (train/val) from final confirmation (test)
-  - do NOT tune thresholds using test results
-
-CAPABILITIES (WHAT YOU CAN DO)
-- Read the “rules + definitions + evaluation framework” from the Google Sheet.
-- Submit compute jobs to a Modal worker via start_pl_lab (recommended) or submit_job.
-- Download and summarise results, distilling explicit strategies that include categoricals.
-
-CONSTRAINTS (IMPORTANT)
-- Each dataset row is a SCAN OUTCOME, not a single match.
-- PL columns are OUTCOMES ONLY and must never be used as predictive features.
-- Result / HOME FORM columns must be ignored per sheet rules.
-- Splits MUST be time-based and leakage-safe (the worker uses time-ordered group splits by ID).
-
-OPERATING PROCEDURE (AUTOPILOT)
-1) Load Sheet context first (get_research_context).
-2) Decide target PL column from the user's request (default: BTTS PL if unspecified).
-3) Run experiments with start_pl_lab using 3-way time split (train/val/test).
-4) Select strategies using VAL ONLY; then report TEST stability + risk.
-5) Log significant findings to research_memory as compact structured JSON.
-6) Iterate: simplify, re-test, penalise fragile strategies.
-
-CHAT MODE RULE
-- In chat mode, do not call tools unless the user explicitly requests.
-
-AUTOPILOT MODE RULE
-- In autopilot, be decisive: pick the next experiment yourself. Only ask the user if blocked.
+- You MUST separate discovery (train/val) from final confirmation (test).
 """
 
 
@@ -258,13 +232,6 @@ def _new_session_id() -> str:
     return str(uuid.uuid4())
 
 
-if "session_id" not in st.session_state:
-    qp = st.query_params.get("sid")
-    st.session_state.session_id = qp if qp else _new_session_id()
-
-SESSION_ID = st.session_state.session_id
-
-
 def _set_session(sid: str):
     st.session_state.session_id = sid
     st.query_params["sid"] = sid
@@ -285,7 +252,7 @@ def _trim_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def _persist_chat(title: str = ""):
     st.session_state.messages = _trim_messages(st.session_state.messages)
-    out = _run_tool("save_chat", {"session_id": st.session_state.session_id, "messages": st.session_state.messages, "title": title})
+    out = _run_tool("save_chat", {"session_id": _sid(), "messages": st.session_state.messages, "title": title})
     if isinstance(out, dict) and out.get("ok") is False:
         st.session_state.last_chat_save_error = out
 
@@ -298,35 +265,16 @@ def _try_load_chat(sid: str) -> bool:
     return False
 
 
-def _reset_to_new_chat(title: str = ""):
-    """
-    Creates a brand new chat session (new sid), resets messages, and persists immediately.
-    """
-    new_sid = _new_session_id()
-    _set_session(new_sid)
-    st.session_state.loaded_for_sid = new_sid
-    st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    _persist_chat(title=title or f"Session {new_sid[:8]}")
-
-
-def _duplicate_current_to_new_chat(title: str = ""):
-    """
-    Forks the current chat into a new session id (keeps current messages).
-    """
-    cur_msgs = st.session_state.get("messages") or [{"role": "system", "content": SYSTEM_PROMPT}]
-    new_sid = _new_session_id()
-    _set_session(new_sid)
-    st.session_state.loaded_for_sid = new_sid
-    st.session_state.messages = _trim_messages(list(cur_msgs))
-    _persist_chat(title=title or f"Fork {new_sid[:8]}")
-
+if "session_id" not in st.session_state:
+    qp = st.query_params.get("sid")
+    st.session_state.session_id = qp if qp else _new_session_id()
 
 _init_messages_if_needed()
 
-if "loaded_for_sid" not in st.session_state or st.session_state.loaded_for_sid != SESSION_ID:
-    st.session_state.loaded_for_sid = SESSION_ID
-    if not _try_load_chat(SESSION_ID):
-        _persist_chat(title=f"Session {SESSION_ID[:8]}")
+if "loaded_for_sid" not in st.session_state or st.session_state.loaded_for_sid != _sid():
+    st.session_state.loaded_for_sid = _sid()
+    if not _try_load_chat(_sid()):
+        _persist_chat(title=f"Session {_sid()[:8]}")
 
 if "agent_mode" not in st.session_state:
     st.session_state.agent_mode = "chat"
@@ -409,68 +357,80 @@ def _call_llm(messages: List[Dict[str, Any]]):
 # ============================================================
 # Parsing helpers
 # ============================================================
-def _minutes_from_text(t: str, default_minutes: int = 300) -> int:
-    t = (t or "").lower().strip()
-    minutes = default_minutes
-    m = re.search(r"next\s+(\d+)\s*(hour|hours|hr|hrs|h)\b", t)
+def _minutes_from_text(t: str, default_minutes: int = 30) -> int:
+    """
+    Supports:
+      - "30", "for 30", "30m", "30 min", "30 minutes"
+      - "2h", "2 hours", "next 2 hours"
+      - "0.5h"
+    """
+    s = (t or "").lower().strip()
+
+    # hours (float)
+    m = re.search(r"\b(\d+(?:\.\d+)?)\s*(h|hr|hrs|hour|hours)\b", s)
     if m:
-        minutes = int(m.group(1)) * 60
-    m2 = re.search(r"(\d+)\s*(minute|minutes|min)\b", t)
+        mins = int(round(float(m.group(1)) * 60))
+        return max(5, min(mins, 360))
+
+    # minutes
+    m2 = re.search(r"\b(\d+)\s*(m|min|mins|minute|minutes)\b", s)
     if m2:
-        minutes = int(m2.group(1))
-    return max(5, min(minutes, 360))
+        mins = int(m2.group(1))
+        return max(5, min(mins, 360))
+
+    # "for 30" (assume minutes)
+    m3 = re.search(r"\bfor\s+(\d{1,3})\b", s)
+    if m3:
+        mins = int(m3.group(1))
+        return max(5, min(mins, 360))
+
+    # bare "30" anywhere (only if it's the ONLY number-ish thing)
+    nums = re.findall(r"\b(\d{1,3})\b", s)
+    if len(nums) == 1:
+        mins = int(nums[0])
+        if 5 <= mins <= 360:
+            return mins
+
+    return max(5, min(int(default_minutes), 360))
 
 
 def _normalize(s: str) -> str:
     s = (s or "").strip().lower()
     s = re.sub(r"[\(\)\[\]\{\}\,\;\:]+", " ", s)
-    s = s.replace("  ", " ")
     return re.sub(r"\s+", " ", s).strip()
 
 
 def _resolve_pl_column(user_text: str, ctx: Dict[str, Any]) -> str:
     t = _normalize(user_text)
-    derived = (ctx.get("derived") or {})
-    outcomes: List[str] = derived.get("outcome_columns") or []
+    outcomes: List[str] = ((ctx.get("derived") or {}).get("outcome_columns") or [])
 
     aliases = {
         "btts": "BTTS PL",
         "both teams to score": "BTTS PL",
         "over 2.5": "BO 2.5 PL",
-        "o 2.5": "BO 2.5 PL",
         "o2.5": "BO 2.5 PL",
         "bo 2.5": "BO 2.5 PL",
-        "bo2.5": "BO 2.5 PL",
         "fh over 1.5": "BO1.5 FHG PL",
-        "fh o1.5": "BO1.5 FHG PL",
         "shg": "SHG PL",
     }
     for k, v in aliases.items():
         if k in t:
             return v
 
-    norm_map = {_normalize(c): c for c in outcomes}
-    for c in outcomes:
-        if _normalize(c) in t:
-            return c
+    # match against outcome columns
+    def nn(x: str) -> str:
+        return _normalize(x).replace(" ", "")
 
     t_compact = t.replace(" ", "")
-    for c in outcomes:
-        if _normalize(c).replace(" ", "") in t_compact:
-            return c
-
-    m = re.search(r"\bfor\s+(.+?\bpl)\b", t)
-    if m:
-        guess = m.group(1).strip()
-        if _normalize(guess) in norm_map:
-            return norm_map[_normalize(guess)]
-        return guess
+    for col in outcomes:
+        if nn(col) in t_compact:
+            return col
 
     return "BTTS PL"
 
 
 # ============================================================
-# Rendering distilled rules
+# Rendering distilled rules (unchanged)
 # ============================================================
 def _fmt_num(x: Any) -> str:
     try:
@@ -545,9 +505,6 @@ def _render_distilled_top(result_obj: Dict[str, Any], top_n: int = 3) -> str:
     return "\n".join(out)
 
 
-# ============================================================
-# Sheet logging (compact but useful)
-# ============================================================
 def _context_snapshot_text(ctx: Dict[str, Any]) -> str:
     ov = (ctx.get("dataset_overview") or {})
     derived = (ctx.get("derived") or {})
@@ -569,7 +526,6 @@ def _log_lab_to_sheet(job_id: str, result_obj: Dict[str, Any], tags: str):
         payload = (result_obj or {}).get("result") or {}
         if not payload:
             return
-
         picked = payload.get("picked") or {}
         pl_col = str((picked.get("pl_column") or "")).strip()
 
@@ -609,7 +565,7 @@ def _log_lab_to_sheet(job_id: str, result_obj: Dict[str, Any], tags: str):
 
 
 # ============================================================
-# Autopilot command intercepts
+# Autopilot intercepts
 # ============================================================
 def _maybe_start_pl_lab(user_text: str) -> bool:
     if st.session_state.agent_mode != "autopilot":
@@ -623,7 +579,7 @@ def _maybe_start_pl_lab(user_text: str) -> bool:
     ctx = _run_tool("get_research_context", {"limit_notes": 10})
     st.session_state.last_context = ctx
 
-    minutes = _minutes_from_text(user_text, default_minutes=180)
+    minutes = _minutes_from_text(user_text, default_minutes=30)
     do_hyperopt = any(k in t for k in ["hyperopt", "grid", "cv", "bayes", "optuna"])
 
     pl_col = _resolve_pl_column(user_text, ctx)
@@ -692,12 +648,8 @@ def _maybe_handle_job_queries(user_text: str) -> bool:
         res = _run_tool("download_result", {"bucket": bucket, "result_path": rp})
         result_obj = res.get("result") or {}
 
-        md = _render_distilled_top(result_obj, top_n=3)
-        st.session_state.messages.append({"role": "assistant", "content": md})
-
-        st.session_state.messages.append(
-            {"role": "assistant", "content": f"```json\n{json.dumps(result_obj, indent=2)[:12000]}\n```"}
-        )
+        st.session_state.messages.append({"role": "assistant", "content": _render_distilled_top(result_obj, top_n=3)})
+        st.session_state.messages.append({"role": "assistant", "content": f"```json\n{json.dumps(result_obj, indent=2)[:12000]}\n```"})
 
         try:
             task_type = (result_obj.get("task_type") or "")
@@ -712,9 +664,6 @@ def _maybe_handle_job_queries(user_text: str) -> bool:
     return False
 
 
-# ============================================================
-# Main chat loop
-# ============================================================
 def _chat_with_tools(user_text: str, max_rounds: int = 6):
     if st.session_state.agent_mode == "autopilot":
         if _maybe_start_pl_lab(user_text):
@@ -775,29 +724,13 @@ with st.sidebar:
     st.radio("Agent mode", ["chat", "autopilot"], key="agent_mode")
     st.divider()
 
-    # --- NEW CHAT controls (restored) ---
-    st.subheader("🧠 Session Controls")
-
-    colA, colB = st.columns(2)
-    with colA:
-        if st.button("🆕 New chat", use_container_width=True):
-            _reset_to_new_chat()
-            st.rerun()
-    with colB:
-        if st.button("🧬 Fork chat", use_container_width=True, help="Duplicate current chat into a new session id"):
-            _duplicate_current_to_new_chat()
-            st.rerun()
-
-    with st.expander("Rename / Delete", expanded=False):
-        new_title = st.text_input("Rename this chat", value=f"Session {st.session_state.session_id[:8]}")
-        if st.button("Save title"):
-            _run_tool("rename_chat", {"session_id": st.session_state.session_id, "title": new_title})
-            _persist_chat(title=new_title)
-            st.success("Renamed.")
-        if st.button("Delete this chat", type="secondary"):
-            _run_tool("delete_chat", {"session_id": st.session_state.session_id})
-            _reset_to_new_chat()
-            st.rerun()
+    if st.button("➕ New chat"):
+        new_id = _new_session_id()
+        _set_session(new_id)
+        st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        st.session_state.loaded_for_sid = new_id
+        _persist_chat(title=f"Session {new_id[:8]}")
+        st.rerun()
 
     st.divider()
 
@@ -810,16 +743,16 @@ with st.sidebar:
     sessions = _load_sessions()
     sessions_display = list(reversed(sessions))
 
-    options = [{"session_id": st.session_state.session_id, "title": f"(current) {st.session_state.session_id[:8]}"}] + [
+    options = [{"session_id": _sid(), "title": f"(current) {_sid()[:8]}"}] + [
         {"session_id": s.get("session_id"), "title": s.get("title") or s.get("session_id")[:8]}
         for s in sessions_display
-        if s.get("session_id") and s.get("session_id") != st.session_state.session_id
+        if s.get("session_id") and s.get("session_id") != _sid()
     ]
 
     labels = [f"{o['title']} — {o['session_id'][:8]}" for o in options]
     chosen = st.selectbox("Select session", options=list(range(len(options))), format_func=lambda i: labels[i], index=0)
 
-    if options[chosen]["session_id"] != st.session_state.session_id:
+    if options[chosen]["session_id"] != _sid():
         _set_session(options[chosen]["session_id"])
         st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         _try_load_chat(st.session_state.session_id)
