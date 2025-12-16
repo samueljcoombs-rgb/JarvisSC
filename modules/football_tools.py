@@ -216,7 +216,7 @@ def set_research_state(key: str, value: str) -> Dict[str, Any]:
 
 
 # ============================================================
-# NEW: One-shot "source of truth" context fetch + parsing
+# Source-of-truth context fetch + parsing
 # ============================================================
 
 def _extract_ignored_columns(rules_rows: List[Dict[str, str]]) -> List[str]:
@@ -235,7 +235,6 @@ def _extract_ignored_columns(rules_rows: List[Dict[str, str]]) -> List[str]:
             for p in parts:
                 if p:
                     ignored.append(p)
-    # de-dupe preserve order
     seen = set()
     out = []
     for x in ignored:
@@ -256,9 +255,47 @@ def _extract_outcome_columns(col_defs: List[Dict[str, str]]) -> List[str]:
     return out
 
 
+def _extract_enforcement_config(state: Dict[str, str]) -> Dict[str, Any]:
+    """
+    Machine-readable governance config, stored in research_state KV.
+    Defaults are safe fallbacks aligned with your existing pipeline.
+
+    Optional keys you can add to research_state:
+      - min_train_rows
+      - min_val_rows
+      - min_test_rows
+      - max_train_val_gap_roi
+      - max_test_drawdown   (negative number, e.g. -25)
+      - max_test_losing_streak_bets
+    """
+    def geti(k: str, default: int) -> int:
+        try:
+            return int(float((state.get(k) or "").strip()))
+        except Exception:
+            return default
+
+    def getf(k: str, default: float) -> float:
+        try:
+            return float((state.get(k) or "").strip())
+        except Exception:
+            return default
+
+    return {
+        "min_train_rows": geti("min_train_rows", 300),
+        "min_val_rows": geti("min_val_rows", 120),
+        "min_test_rows": geti("min_test_rows", 120),
+        "max_train_val_gap_roi": getf("max_train_val_gap_roi", 0.10),
+        "max_test_drawdown": getf("max_test_drawdown", -9999.0),
+        "max_test_losing_streak_bets": geti("max_test_losing_streak_bets", 9999),
+    }
+
+
 def get_research_context(limit_notes: int = 20) -> Dict[str, Any]:
     """
-    Fetches all relevant tabs + returns derived constraints (ignored/outcome columns).
+    Fetches all relevant tabs + returns derived constraints:
+      - ignored_columns
+      - outcome_columns
+      - enforcement (machine-readable)
     """
     overview = get_dataset_overview().get("data") or {}
     rules_rows = get_research_rules().get("data") or []
@@ -269,6 +306,7 @@ def get_research_context(limit_notes: int = 20) -> Dict[str, Any]:
 
     ignored_cols = _extract_ignored_columns(rules_rows)
     outcome_cols = _extract_outcome_columns(col_defs)
+    enforcement = _extract_enforcement_config(state)
 
     return {
         "ok": True,
@@ -279,8 +317,9 @@ def get_research_context(limit_notes: int = 20) -> Dict[str, Any]:
         "research_state": state,
         "recent_notes": notes,
         "derived": {
-            "ignored_columns": ignored_cols,          # e.g. ["Result", "HOME FORM"]
-            "outcome_columns": outcome_cols,          # from column_definitions role==outcome
+            "ignored_columns": ignored_cols,
+            "outcome_columns": outcome_cols,
+            "enforcement": enforcement,
         },
         "ts": _now_iso(),
     }
@@ -406,27 +445,35 @@ def wait_for_job(job_id: str, timeout_s: int = 300, poll_s: int = 5, auto_downlo
 
 
 # ============================================================
-# NEW: One-click PL lab starter (ANY PL column) + BTTS wrapper
+# One-click job starters
 # ============================================================
+
+def _default_storage() -> Tuple[str, str, str]:
+    storage_bucket = (st.secrets.get("DATA_STORAGE_BUCKET") or os.getenv("DATA_STORAGE_BUCKET") or "football-data").strip()
+    storage_path = (st.secrets.get("DATA_STORAGE_PATH") or os.getenv("DATA_STORAGE_PATH") or "football_ai_NNIA.csv").strip()
+    results_bucket = (st.secrets.get("RESULTS_BUCKET") or os.getenv("RESULTS_BUCKET") or "football-results").strip()
+    return storage_bucket, storage_path, results_bucket
+
 
 def start_pl_lab(
     duration_minutes: int = 300,
     pl_column: str = "BTTS PL",
     do_hyperopt: bool = False,
     hyperopt_iter: int = 12,
+    top_fracs: Optional[List[float]] = None,
+    top_n: int = 12,
 ) -> Dict[str, Any]:
     """
     General lab starter for ANY PL column.
-    Uses Sheet-derived enforcement (ignored_columns / outcome_columns).
+    Uses Sheet-derived enforcement (ignored/outcome/enforcement).
     """
     ctx = get_research_context(limit_notes=10)
     derived = (ctx.get("derived") or {})
     ignored_columns = derived.get("ignored_columns") or []
     outcome_columns = derived.get("outcome_columns") or []
+    enforcement = derived.get("enforcement") or {}
 
-    storage_bucket = (st.secrets.get("DATA_STORAGE_BUCKET") or os.getenv("DATA_STORAGE_BUCKET") or "football-data").strip()
-    storage_path = (st.secrets.get("DATA_STORAGE_PATH") or os.getenv("DATA_STORAGE_PATH") or "football_ai_NNIA.csv").strip()
-    results_bucket = (st.secrets.get("RESULTS_BUCKET") or os.getenv("RESULTS_BUCKET") or "football-results").strip()
+    storage_bucket, storage_path, results_bucket = _default_storage()
 
     params = {
         "storage_bucket": storage_bucket,
@@ -434,12 +481,13 @@ def start_pl_lab(
         "_results_bucket": results_bucket,
         "pl_column": pl_column,
         "duration_minutes": int(duration_minutes),
-        "top_fracs": [0.05, 0.1, 0.2],
+        "top_fracs": top_fracs or [0.05, 0.1, 0.2],
         "do_hyperopt": bool(do_hyperopt),
         "hyperopt_iter": int(hyperopt_iter),
-        "top_n": 12,
+        "top_n": int(top_n),
         "ignored_columns": ignored_columns,
         "outcome_columns": outcome_columns,
+        "enforcement": enforcement,
     }
     return submit_job("pl_lab", params)
 
@@ -459,6 +507,58 @@ def start_btts_lab(
         do_hyperopt=do_hyperopt,
         hyperopt_iter=hyperopt_iter,
     )
+
+
+def start_feature_profile(duration_minutes: int = 20) -> Dict[str, Any]:
+    """
+    Lightweight profiling job to help the autonomous loop decide next steps.
+    """
+    ctx = get_research_context(limit_notes=10)
+    derived = (ctx.get("derived") or {})
+    ignored_columns = derived.get("ignored_columns") or []
+    outcome_columns = derived.get("outcome_columns") or []
+    enforcement = derived.get("enforcement") or {}
+
+    storage_bucket, storage_path, results_bucket = _default_storage()
+
+    params = {
+        "storage_bucket": storage_bucket,
+        "storage_path": storage_path,
+        "_results_bucket": results_bucket,
+        "duration_minutes": int(duration_minutes),
+        "ignored_columns": ignored_columns,
+        "outcome_columns": outcome_columns,
+        "enforcement": enforcement,
+    }
+    return submit_job("feature_profile", params)
+
+
+def start_rule_validate(duration_minutes: int = 30, pl_column: str = "BTTS PL", spec: Dict[str, Any] = None) -> Dict[str, Any]:
+    """
+    Validate a proposed explicit rule spec against train/val/test and monthly stability.
+    """
+    spec = spec or {}
+
+    ctx = get_research_context(limit_notes=10)
+    derived = (ctx.get("derived") or {})
+    ignored_columns = derived.get("ignored_columns") or []
+    outcome_columns = derived.get("outcome_columns") or []
+    enforcement = derived.get("enforcement") or {}
+
+    storage_bucket, storage_path, results_bucket = _default_storage()
+
+    params = {
+        "storage_bucket": storage_bucket,
+        "storage_path": storage_path,
+        "_results_bucket": results_bucket,
+        "pl_column": pl_column,
+        "spec": spec,
+        "duration_minutes": int(duration_minutes),
+        "ignored_columns": ignored_columns,
+        "outcome_columns": outcome_columns,
+        "enforcement": enforcement,
+    }
+    return submit_job("rule_validate", params)
 
 
 # ============================================================
