@@ -233,7 +233,7 @@ def _sb():
 
 
 # ============================================================
-# CSV loading (Supabase Storage preferred)
+# CSV loading
 # ============================================================
 
 def _download_from_storage(bucket: str, path: str) -> bytes:
@@ -280,12 +280,67 @@ def _load_csv_header_only(storage_bucket: Optional[str] = None, storage_path: Op
     return df0.columns.tolist()
 
 
-def _resolve_col_case_insensitive(cols: List[str], wanted: str) -> str:
+def _resolve_col_case_insensitive(cols: List[str], wanted: str) -> Optional[str]:
     w = (wanted or "").strip().lower()
+    if not w:
+        return None
     for c in cols:
         if (c or "").strip().lower() == w:
             return c
-    return wanted
+    return None
+
+
+def _mapping() -> Dict[str, Tuple[str, str]]:
+    # canonical PL column names -> (side, odds_col)
+    return {
+        "SHG PL": ("lay", "HT CS Price"),
+        "SHG 2+ PL": ("lay", "HT 2 Ahead Odds"),
+        "LU1.5 PL": ("lay", "U1.5 Odds"),
+        "LFGHU0.5 PL": ("lay", "FHGU0.5Odds"),
+        "BO 2.5 PL": ("back", "O2.5 Odds"),
+        "BO1.5 FHG PL": ("back", "FHGO1.5 Odds"),
+        "BTTS PL": ("back", "BTTS Y Odds"),
+    }
+
+
+def _heuristic_pl_from_text(text: str, cols: List[str]) -> Optional[str]:
+    """
+    If user passes 'Build a strategy for BTTS PL', this finds the *actual* PL column.
+    """
+    t = (text or "").strip().lower()
+    if not t:
+        return None
+
+    # 1) direct hit on canonical names
+    for canonical in _mapping().keys():
+        if canonical.lower() in t:
+            hit = _resolve_col_case_insensitive(cols, canonical)
+            return hit or canonical if canonical in cols else hit
+
+    # 2) fuzzy keywords
+    if "btts" in t:
+        hit = _resolve_col_case_insensitive(cols, "BTTS PL")
+        if hit:
+            return hit
+
+    if ("over" in t or "o2.5" in t or "2.5" in t) and ("pl" in t):
+        hit = _resolve_col_case_insensitive(cols, "BO 2.5 PL")
+        if hit:
+            return hit
+
+    if "shg" in t and "pl" in t:
+        hit = _resolve_col_case_insensitive(cols, "SHG PL")
+        if hit:
+            return hit
+
+    # 3) last resort: any column containing both token and 'PL'
+    if "pl" in t:
+        for c in cols:
+            cl = (c or "").lower()
+            if "pl" in cl and any(k in t for k in ["btts", "2.5", "o2.5", "shg", "u1.5", "fhg"]):
+                return c
+
+    return None
 
 
 def load_data_basic(storage_bucket: str = "", storage_path: str = "", csv_url: str = "") -> Dict[str, Any]:
@@ -301,18 +356,6 @@ def list_columns(storage_bucket: str = "", storage_path: str = "", csv_url: str 
 # ============================================================
 # ROI (row-level)
 # ============================================================
-
-def _mapping() -> Dict[str, Tuple[str, str]]:
-    return {
-        "SHG PL": ("lay", "HT CS Price"),
-        "SHG 2+ PL": ("lay", "HT 2 Ahead Odds"),
-        "LU1.5 PL": ("lay", "U1.5 Odds"),
-        "LFGHU0.5 PL": ("lay", "FHGU0.5Odds"),
-        "BO 2.5 PL": ("back", "O2.5 Odds"),
-        "BO1.5 FHG PL": ("back", "FHGO1.5 Odds"),
-        "BTTS PL": ("back", "BTTS Y Odds"),
-    }
-
 
 def basic_roi_for_pl_column(pl_column: str, storage_bucket: str = "", storage_path: str = "", csv_url: str = "") -> Dict[str, Any]:
     df = _load_csv(storage_bucket or None, storage_path or None, csv_url or None)
@@ -422,7 +465,7 @@ def wait_for_job(job_id: str, timeout_s: int = 300, poll_s: int = 5, auto_downlo
 
 
 # ============================================================
-# SAFE submit wrappers (MODEL should call these, not raw submit_job)
+# SAFE submit wrappers (used by the Streamlit pipeline)
 # ============================================================
 
 def submit_strategy_search(
@@ -437,7 +480,9 @@ def submit_strategy_search(
     rbucket = (results_bucket or st.secrets.get("RESULTS_BUCKET") or os.getenv("RESULTS_BUCKET") or "football-results").strip()
 
     cols = _load_csv_header_only(sbucket, spath, None)
-    pl = _resolve_col_case_insensitive(cols, target_pl_column) if target_pl_column else ""
+
+    # Resolve PL column properly (case-insensitive + heuristic from free text)
+    resolved = _resolve_col_case_insensitive(cols, target_pl_column) or _heuristic_pl_from_text(target_pl_column, cols)
 
     params: Dict[str, Any] = {
         "storage_bucket": sbucket,
@@ -445,9 +490,13 @@ def submit_strategy_search(
         "_results_bucket": rbucket,
         "time_split_ratio": float(time_split_ratio or 0.7),
     }
-    # IMPORTANT: worker expects params.pl_column (not target_pl_column)
-    if pl:
-        params["pl_column"] = pl
+
+    # Modal worker expects "pl_column"
+    if resolved:
+        params["pl_column"] = resolved
+    elif target_pl_column:
+        # still pass something readable for debugging
+        params["pl_column"] = target_pl_column
 
     return submit_job("strategy_search", params)
 
@@ -458,20 +507,24 @@ def submit_feature_audit(
     results_bucket: str = "",
     target_pl_column: str = "",
 ) -> Dict[str, Any]:
+    """
+    If your Modal worker doesn't implement 'feature_audit', you can still keep this tool;
+    it will submit the job (or you can remove it later).
+    """
     sbucket = (storage_bucket or st.secrets.get("DATA_STORAGE_BUCKET") or os.getenv("DATA_STORAGE_BUCKET") or "football-data").strip()
     spath = (storage_path or st.secrets.get("DATA_STORAGE_PATH") or os.getenv("DATA_STORAGE_PATH") or "football_ai_NNIA.csv").strip()
     rbucket = (results_bucket or st.secrets.get("RESULTS_BUCKET") or os.getenv("RESULTS_BUCKET") or "football-results").strip()
 
     cols = _load_csv_header_only(sbucket, spath, None)
-    target = _resolve_col_case_insensitive(cols, target_pl_column) if target_pl_column else ""
+    resolved = _resolve_col_case_insensitive(cols, target_pl_column) or _heuristic_pl_from_text(target_pl_column, cols)
 
     params: Dict[str, Any] = {
         "storage_bucket": sbucket,
         "storage_path": spath,
         "_results_bucket": rbucket,
     }
-    if target:
-        params["target_pl_column"] = target
+    if resolved:
+        params["target_pl_column"] = resolved
 
     return submit_job("feature_audit", params)
 
@@ -489,16 +542,20 @@ def submit_feature_rank(
     rbucket = (results_bucket or st.secrets.get("RESULTS_BUCKET") or os.getenv("RESULTS_BUCKET") or "football-results").strip()
 
     cols = _load_csv_header_only(sbucket, spath, None)
-    target = _resolve_col_case_insensitive(cols, target_pl_column) if target_pl_column else target_pl_column
+    resolved = _resolve_col_case_insensitive(cols, target_pl_column) or _heuristic_pl_from_text(target_pl_column, cols)
+
+    if not resolved:
+        return {"ok": False, "error": f"Target PL column not found: {target_pl_column}", "available_pl": [c for c in cols if "pl" in c.lower()]}
 
     params: Dict[str, Any] = {
         "storage_bucket": sbucket,
         "storage_path": spath,
         "_results_bucket": rbucket,
-        "target_pl_column": target,
+        "target_pl_column": resolved,
         "time_split_ratio": float(time_split_ratio or 0.7),
         "max_rows": int(max_rows or 250000),
     }
+
     return submit_job("feature_rank", params)
 
 
@@ -526,7 +583,11 @@ def _load_chat_index(sb) -> Dict[str, Any]:
 def _save_chat_index(sb, index: Dict[str, Any]) -> None:
     bucket = _chat_bucket()
     payload = json.dumps(index, ensure_ascii=False, indent=2).encode("utf-8")
-    sb.storage.from_(bucket).upload(path=_chat_index_path(), file=payload, file_options={"content-type": "application/json", "upsert": "true"})
+    sb.storage.from_(bucket).upload(
+        path=_chat_index_path(),
+        file=payload,
+        file_options={"content-type": "application/json", "upsert": "true"},
+    )
 
 
 def list_chats(limit: int = 200) -> Dict[str, Any]:
@@ -550,9 +611,18 @@ def save_chat(session_id: str, messages: List[Dict[str, Any]], title: str = "") 
     ).encode("utf-8")
 
     try:
-        sb.storage.from_(bucket).upload(path=path, file=payload, file_options={"content-type": "application/json", "upsert": "true"})
+        sb.storage.from_(bucket).upload(
+            path=path,
+            file=payload,
+            file_options={"content-type": "application/json", "upsert": "true"},
+        )
     except StorageException as e:
-        return {"ok": False, "error": f"Storage upload failed. Create bucket '{bucket}' in Supabase Storage. Details: {e}", "bucket": bucket, "path": path}
+        return {
+            "ok": False,
+            "error": f"Storage upload failed. Create bucket '{bucket}' in Supabase Storage and ensure the service role key has access. Details: {e}",
+            "bucket": bucket,
+            "path": path,
+        }
     except Exception as e:
         return {"ok": False, "error": f"save_chat failed: {e}", "bucket": bucket, "path": path}
 
