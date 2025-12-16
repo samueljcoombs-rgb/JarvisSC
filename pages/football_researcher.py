@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import os
 import json
+import re
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Set, Optional
 
 import streamlit as st
 from openai import OpenAI
@@ -37,15 +38,9 @@ MODEL = PREFERRED or "gpt-5.1"
 
 DEFAULT_STORAGE_BUCKET = os.getenv("DATA_STORAGE_BUCKET") or st.secrets.get("DATA_STORAGE_BUCKET", "football-data")
 DEFAULT_STORAGE_PATH = os.getenv("DATA_STORAGE_PATH") or st.secrets.get("DATA_STORAGE_PATH", "football_ai_NNIA.csv")
-
-# results bucket should come from env/secrets; model cannot override if you only expose submit_strategy_search
 DEFAULT_RESULTS_BUCKET = os.getenv("RESULTS_BUCKET") or st.secrets.get("RESULTS_BUCKET", "football-results")
 
 MAX_MESSAGES_TO_KEEP = int(os.getenv("MAX_CHAT_MESSAGES") or st.secrets.get("MAX_CHAT_MESSAGES", 220))
-
-
-def _dataset_locator() -> Dict[str, str]:
-    return {"storage_bucket": DEFAULT_STORAGE_BUCKET, "storage_path": DEFAULT_STORAGE_PATH}
 
 
 # ============================================================
@@ -60,11 +55,7 @@ def _run_tool(name: str, args: Dict[str, Any]) -> Any:
 
 
 # ============================================================
-# Tools schema for OpenAI function calling
-# NOTE:
-# - Only expose tools the MODEL should call.
-# - Do NOT expose chat persistence tools (save_chat/load_chat/etc).
-# - Do NOT expose raw submit_job (model was overriding _results_bucket).
+# LLM Tools (ONLY what the model should call)
 # ============================================================
 
 TOOLS = [
@@ -81,18 +72,10 @@ TOOLS = [
     {"type": "function", "function": {"name": "list_columns", "description": "List CSV columns.", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "csv_url": {"type": "string"}}, "required": []}}},
     {"type": "function", "function": {"name": "basic_roi_for_pl_column", "description": "Row-level ROI for PL column.", "parameters": {"type": "object", "properties": {"pl_column": {"type": "string"}, "storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "csv_url": {"type": "string"}}, "required": ["pl_column"]}}},
 
-    # ✅ SAFE job wrapper (forces correct buckets + resolves target_pl_column to exact CSV header)
-    {"type": "function", "function": {
-        "name": "submit_strategy_search",
-        "description": "Submit a strategy_search job safely (forces correct buckets; canonicalises target PL column).",
-        "parameters": {"type": "object", "properties": {
-            "storage_bucket": {"type": "string"},
-            "storage_path": {"type": "string"},
-            "results_bucket": {"type": "string"},
-            "time_split_ratio": {"type": "number"},
-            "target_pl_column": {"type": "string"},
-        }, "required": []}
-    }},
+    # SAFE job wrappers
+    {"type": "function", "function": {"name": "submit_strategy_search", "description": "Submit strategy_search safely.", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "results_bucket": {"type": "string"}, "time_split_ratio": {"type": "number"}, "target_pl_column": {"type": "string"}}, "required": []}}},
+    {"type": "function", "function": {"name": "submit_feature_audit", "description": "Submit feature_audit safely.", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "results_bucket": {"type": "string"}, "target_pl_column": {"type": "string"}}, "required": []}}},
+    {"type": "function", "function": {"name": "submit_feature_rank", "description": "Submit feature_rank safely.", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "results_bucket": {"type": "string"}, "target_pl_column": {"type": "string"}, "time_split_ratio": {"type": "number"}, "max_rows": {"type": "integer"}}, "required": ["target_pl_column"]}}},
 
     {"type": "function", "function": {"name": "get_job", "description": "Get job status by job_id.", "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]}}},
     {"type": "function", "function": {"name": "wait_for_job", "description": "Wait for completion; optionally downloads results.", "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}, "timeout_s": {"type": "integer"}, "poll_s": {"type": "integer"}, "auto_download": {"type": "boolean"}}, "required": ["job_id"]}}},
@@ -107,22 +90,19 @@ TOOLS = [
 SYSTEM_PROMPT = """You are FootballResearcher — an autonomous research agent that discovers profitable, robust football trading strategy criteria.
 
 Source of truth:
-- Use Google Sheet tabs: dataset_overview, research_rules, column_definitions, evaluation_framework, research_state, research_memory.
+- Google Sheet tabs: dataset_overview, research_rules, column_definitions, evaluation_framework, research_state, research_memory.
 
 Hard constraints:
 - PL columns are outcomes only and MUST NOT be used as predictive features.
 - Avoid overfitting: time-based splits; never tune thresholds on final test.
-- Always report sample sizes and stability (train vs test gap) and drawdown/losing streak in POINTS.
+- Always report sample sizes, train vs test gap, drawdown + losing streak in POINTS.
 - Prefer simple rules that generalise; penalise fragile, tiny samples.
 
-Objective:
-- When user asks to “design a strategy”, you should plan, run experiments (using worker jobs when needed), log results into research_memory, and present progress updates.
-- Strategies must be explicit filters: MARKET/PL column + ranges on numeric fields + optional categorical constraints.
-- Be decisive: pick what to test next. Only ask user if blocked by missing config.
+Mode:
+- CHAT = conversational only (no tools unless user explicitly asks).
+- AUTOPILOT = tools/jobs allowed, keep outputs concrete.
 
-Important:
-- In CHAT mode you must reply conversationally and should not call tools unless explicitly asked.
-- In AUTOPILOT mode you may call tools and run jobs, but still write a short explanation of what you did.
+When asked what model you are, do NOT guess; rely on sidebar “OpenAI returned model”.
 """
 
 
@@ -135,7 +115,7 @@ st.title("⚽ Football Researcher")
 
 
 # ============================================================
-# Session management (UI persists chats via tools directly; NOT exposed to LLM)
+# Session management
 # ============================================================
 
 def _load_sessions() -> List[Dict[str, Any]]:
@@ -206,7 +186,46 @@ if "agent_mode" not in st.session_state:
 
 
 # ============================================================
-# Sanitise history for OpenAI (prevents invalid tool state)
+# Context snapshot injection (AUTOPILOT)
+# ============================================================
+
+def _build_context_snapshot(max_notes: int = 8) -> str:
+    try:
+        overview = _run_tool("get_dataset_overview", {}) or {}
+        rules = _run_tool("get_research_rules", {}) or {}
+        evalfw = _run_tool("get_evaluation_framework", {}) or {}
+        state = _run_tool("get_research_state", {}) or {}
+        notes = _run_tool("get_recent_research_notes", {"limit": int(max_notes)}) or {}
+    except Exception as e:
+        return f"[context_snapshot_error] {e}"
+
+    snap = {
+        "dataset_overview": overview.get("data", overview),
+        "research_rules": rules.get("data", rules),
+        "evaluation_framework": evalfw.get("data", evalfw),
+        "research_state": state.get("data", state),
+        "recent_research_memory": notes.get("rows", notes),
+    }
+    s = json.dumps(snap, ensure_ascii=False)
+    return s if len(s) <= 9000 else (s[:9000] + "…")
+
+
+def _autopilot_system_prompt() -> str:
+    now = datetime.utcnow().timestamp()
+    cached = st.session_state.get("_ctx_snapshot")
+    cached_at = st.session_state.get("_ctx_snapshot_at", 0.0)
+    if cached and (now - float(cached_at)) < 180:
+        snap = cached
+    else:
+        snap = _build_context_snapshot(max_notes=10)
+        st.session_state["_ctx_snapshot"] = snap
+        st.session_state["_ctx_snapshot_at"] = now
+
+    return SYSTEM_PROMPT + "\n\nAUTOPILOT_CONTEXT_SNAPSHOT_JSON:\n" + snap
+
+
+# ============================================================
+# Sanitise history for OpenAI
 # ============================================================
 
 def _sanitize_history_for_llm(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -287,7 +306,175 @@ def _call_llm(messages: List[Dict[str, Any]]):
 
         return client.chat.completions.create(model=MODEL, messages=chat_only)
 
+    # AUTOPILOT: inject sheet snapshot
+    safe_messages[0]["content"] = _autopilot_system_prompt()
     return client.chat.completions.create(model=MODEL, messages=safe_messages, tools=TOOLS, tool_choice="auto")
+
+
+# ============================================================
+# Pipeline router: "build strategy for <X PL>"
+# ============================================================
+
+def _extract_pl_column(user_text: str) -> Optional[str]:
+    m = re.search(r"([A-Za-z0-9\.\s]+?\sPL)\b", user_text, flags=re.IGNORECASE)
+    if not m:
+        return None
+    return m.group(1).strip()
+
+
+def _wait_and_download(job_id: str, bucket: str) -> Dict[str, Any]:
+    waited = _run_tool("wait_for_job", {"job_id": job_id, "timeout_s": 1800, "poll_s": 5, "auto_download": True})
+    if waited.get("status") != "done":
+        return {"error": f"Job not done: {waited.get('status')}", "waited": waited}
+    job = waited.get("job") or {}
+    rp = job.get("result_path") or ""
+    result = waited.get("result")
+    if not result and rp:
+        dl = _run_tool("download_result", {"result_path": rp, "bucket": bucket})
+        result = dl.get("result")
+    return {"job": job, "result": result}
+
+
+def _summarise_feature_audit(payload: Dict[str, Any]) -> str:
+    if not payload or not isinstance(payload, dict):
+        return "feature_audit: no payload"
+    res = payload.get("result") if "result" in payload else payload
+    inner = res.get("result") if isinstance(res, dict) and "result" in res else res
+    if isinstance(inner, dict) and inner.get("error"):
+        return f"feature_audit error: {inner['error']}"
+    if not isinstance(inner, dict):
+        return "feature_audit: malformed result"
+    lines = []
+    lines.append("### 1) Feature audit")
+    lines.append(f"- Rows/Cols: **{inner.get('rows')}** / **{inner.get('cols')}**")
+    lines.append(f"- Target PL resolved: `{inner.get('target_pl_column_resolved')}`")
+    lines.append(f"- PL columns found: **{len(inner.get('pl_columns') or [])}**")
+    mt = inner.get("missingness_top") or []
+    if mt:
+        lines.append("- Top missingness:")
+        for r in mt[:8]:
+            lines.append(f"  - {r.get('col')}: {round(float(r.get('missing_pct',0))*100,1)}%")
+    return "\n".join(lines)
+
+
+def _summarise_feature_rank(payload: Dict[str, Any]) -> str:
+    if not payload or not isinstance(payload, dict):
+        return "feature_rank: no payload"
+    res = payload.get("result") if "result" in payload else payload
+    inner = res.get("result") if isinstance(res, dict) and "result" in res else res
+    if isinstance(inner, dict) and inner.get("error"):
+        return f"feature_rank error: {inner['error']}"
+    if not isinstance(inner, dict):
+        return "feature_rank: malformed result"
+    m = inner.get("metrics") or {}
+    lines = []
+    lines.append("### 2) Feature ranking (Logit + Permutation)")
+    lines.append(f"- Target: `{inner.get('target_pl_column')}` (binary: PL>0)")
+    lines.append(f"- Test ROC AUC: **{m.get('test_roc_auc')}**, LogLoss: **{m.get('test_logloss')}**, Brier: **{m.get('test_brier')}**")
+    lines.append(f"- Features used: **{m.get('n_features')}** | Train rows: **{m.get('train_rows')}** | Test rows: **{m.get('test_rows')}**")
+    top = inner.get("top_features_permutation_auc") or []
+    if top:
+        lines.append("- Top permutation features (AUC impact):")
+        for r in top[:12]:
+            lines.append(f"  - {r.get('feature')}: {round(float(r.get('importance_mean',0)),6)}")
+    return "\n".join(lines)
+
+
+def _summarise_strategy_search(payload: Dict[str, Any]) -> str:
+    if not payload or not isinstance(payload, dict):
+        return "strategy_search: no payload"
+    res = payload.get("result") if "result" in payload else payload
+    inner = res.get("result") if isinstance(res, dict) and "result" in res else res
+    if isinstance(inner, dict) and inner.get("error"):
+        return f"strategy_search error: {inner['error']}"
+    if not isinstance(inner, dict):
+        return "strategy_search: malformed result"
+
+    picked = inner.get("picked") or {}
+    search = inner.get("search") or {}
+    if isinstance(search, dict) and search.get("error"):
+        return f"Picked: `{picked}`\n\nSearch error: {search.get('error')}"
+
+    rules = (search.get("top_rules") or [])[:3]
+    lines = []
+    lines.append("### 3) Rule search (top 3)")
+    lines.append(f"- Picked: `{picked}`")
+    if not rules:
+        lines.append("- No rules returned.")
+        return "\n".join(lines)
+
+    for i, r in enumerate(rules, start=1):
+        lines.append(f"\n**Rule #{i}**")
+        lines.append(f"- Rule: `{r.get('rule')}`")
+        lines.append(f"- Samples: `{r.get('samples')}`")
+        lines.append(f"- Train: `{r.get('train')}`")
+        lines.append(f"- Test: `{r.get('test')}`")
+        lines.append(f"- Gap train−test: `{r.get('gap_train_minus_test')}`")
+        lines.append(f"- Test game-level risk: `{r.get('test_game_level')}`")
+    return "\n".join(lines)
+
+
+def _run_btts_pipeline(pl_column: str, split_ratio: float = 0.7) -> str:
+    # 1) audit
+    a = _run_tool("submit_feature_audit", {
+        "storage_bucket": DEFAULT_STORAGE_BUCKET,
+        "storage_path": DEFAULT_STORAGE_PATH,
+        "results_bucket": DEFAULT_RESULTS_BUCKET,
+        "target_pl_column": pl_column,
+    })
+    aj = a.get("job_id") if isinstance(a, dict) else None
+    if not aj:
+        return f"feature_audit submit failed: {a}"
+    ares = _wait_and_download(aj, DEFAULT_RESULTS_BUCKET)
+    if ares.get("error"):
+        return f"feature_audit failed: {ares}"
+
+    # 2) rank
+    r = _run_tool("submit_feature_rank", {
+        "storage_bucket": DEFAULT_STORAGE_BUCKET,
+        "storage_path": DEFAULT_STORAGE_PATH,
+        "results_bucket": DEFAULT_RESULTS_BUCKET,
+        "target_pl_column": pl_column,
+        "time_split_ratio": float(split_ratio),
+        "max_rows": 250000,
+    })
+    rj = r.get("job_id") if isinstance(r, dict) else None
+    if not rj:
+        return f"feature_rank submit failed: {r}"
+    rres = _wait_and_download(rj, DEFAULT_RESULTS_BUCKET)
+    if rres.get("error"):
+        return f"feature_rank failed: {rres}"
+
+    # 3) strategy search
+    s = _run_tool("submit_strategy_search", {
+        "storage_bucket": DEFAULT_STORAGE_BUCKET,
+        "storage_path": DEFAULT_STORAGE_PATH,
+        "results_bucket": DEFAULT_RESULTS_BUCKET,
+        "time_split_ratio": float(split_ratio),
+        "target_pl_column": pl_column,
+    })
+    sj = s.get("job_id") if isinstance(s, dict) else None
+    if not sj:
+        return f"strategy_search submit failed: {s}"
+    sres = _wait_and_download(sj, DEFAULT_RESULTS_BUCKET)
+    if sres.get("error"):
+        return f"strategy_search failed: {sres}"
+
+    # Log structured note
+    note = json.dumps({
+        "ts": datetime.utcnow().isoformat(),
+        "kind": "btts_pipeline_run",
+        "target_pl": pl_column,
+        "time_split_ratio": float(split_ratio),
+        "jobs": {"feature_audit": aj, "feature_rank": rj, "strategy_search": sj},
+    }, ensure_ascii=False)
+    _run_tool("append_research_note", {"note": note, "tags": "autopilot,pipeline,btts"})
+
+    parts = []
+    parts.append(_summarise_feature_audit(ares.get("result") or {}))
+    parts.append(_summarise_feature_rank(rres.get("result") or {}))
+    parts.append(_summarise_strategy_search(sres.get("result") or {}))
+    return "\n\n".join(parts)
 
 
 # ============================================================
@@ -295,16 +482,24 @@ def _call_llm(messages: List[Dict[str, Any]]):
 # ============================================================
 
 def _chat_with_tools(user_text: str, max_rounds: int = 6):
+    # AUTOPILOT shortcut: if user asks for a PL strategy, run the pipeline deterministically
+    if st.session_state.agent_mode == "autopilot":
+        pl = _extract_pl_column(user_text)
+        if pl:
+            summary = _run_btts_pipeline(pl_column=pl, split_ratio=0.7)
+            st.session_state.messages.append({"role": "user", "content": user_text})
+            st.session_state.messages.append({"role": "assistant", "content": summary})
+            st.session_state.messages = _trim_messages(st.session_state.messages)
+            _persist_chat()
+            return
+
     st.session_state.messages.append({"role": "user", "content": user_text})
     st.session_state.messages = _trim_messages(st.session_state.messages)
 
     for _ in range(max_rounds):
         try:
             resp = _call_llm(st.session_state.messages)
-
-            # ✅ DEBUG: capture what OpenAI ACTUALLY returned
             st.session_state.last_openai_model_used = getattr(resp, "model", None)
-
         except BadRequestError as e:
             st.error("OpenAI BadRequestError (full details below).")
             try:
@@ -342,72 +537,11 @@ def _chat_with_tools(user_text: str, max_rounds: int = 6):
             name = tc.function.name
             args = json.loads(tc.function.arguments or "{}")
             out = _run_tool(name, args)
-
             st.session_state.messages.append({"role": "tool", "tool_call_id": tc.id, "content": json.dumps(out, ensure_ascii=False)})
 
         st.session_state.messages = _trim_messages(st.session_state.messages)
 
     _persist_chat()
-
-
-# ============================================================
-# Autopilot receipt + structured logging
-# ============================================================
-
-def _structured_note(worker_payload: Dict[str, Any], job_id: str, result_path: str) -> str:
-    result = worker_payload.get("result", {}) if isinstance(worker_payload, dict) else {}
-    picked = result.get("picked") or {}
-    search = result.get("search") or {}
-    top_rules = (search.get("top_rules") or [])[:3]
-
-    note = {
-        "ts": datetime.utcnow().isoformat(),
-        "kind": "strategy_search_result",
-        "job_id": job_id,
-        "result_path": result_path,
-        "picked": picked,
-        "top_rules": top_rules,
-    }
-    return json.dumps(note, ensure_ascii=False)
-
-
-def _autopilot_one_cycle():
-    submitted = _run_tool(
-        "submit_strategy_search",
-        {
-            "storage_bucket": DEFAULT_STORAGE_BUCKET,
-            "storage_path": DEFAULT_STORAGE_PATH,
-            "results_bucket": DEFAULT_RESULTS_BUCKET,
-            "time_split_ratio": 0.7,
-        },
-    )
-
-    job_id = submitted.get("job_id")
-    st.session_state.last_autopilot = {"stage": "submitted", "submitted": submitted}
-
-    if not job_id:
-        st.session_state.last_autopilot["stage"] = "error"
-        st.session_state.last_autopilot["error"] = "No job_id returned from submit_strategy_search"
-        return
-
-    waited = _run_tool("wait_for_job", {"job_id": job_id, "timeout_s": 900, "poll_s": 5, "auto_download": True})
-    st.session_state.last_autopilot["waited"] = waited
-
-    _run_tool("set_research_state", {"key": "last_autopilot_ran_at", "value": datetime.utcnow().isoformat()})
-    _run_tool("set_research_state", {"key": "last_job_id", "value": job_id})
-
-    if waited.get("status") != "done":
-        st.session_state.last_autopilot["stage"] = waited.get("status")
-        return
-
-    job = waited.get("job") or {}
-    result_path = job.get("result_path") or ""
-    result_json = waited.get("result") or {}
-
-    note = _structured_note(result_json, job_id, result_path)
-    _run_tool("append_research_note", {"note": note, "tags": "autopilot,worker,structured"})
-
-    st.session_state.last_autopilot["stage"] = "done"
 
 
 # ============================================================
@@ -419,25 +553,13 @@ with st.sidebar:
     st.caption(f"Data: `{DEFAULT_STORAGE_BUCKET}/{DEFAULT_STORAGE_PATH}`")
     st.caption(f"Results: `{DEFAULT_RESULTS_BUCKET}`")
 
-    # ✅ DEBUG: show where MODEL is coming from
-    env_pref = os.getenv("PREFERRED_OPENAI_MODEL")
-    sec_pref = st.secrets.get("PREFERRED_OPENAI_MODEL", None)
-    st.caption(f"Env PREFERRED_OPENAI_MODEL: `{env_pref}`")
-    st.caption(f"Secrets PREFERRED_OPENAI_MODEL: `{sec_pref}`")
-
     used = st.session_state.get("last_openai_model_used")
     if used:
         st.caption(f"OpenAI returned model: `{used}`")
-
-        # ✅ HARD FAIL if not GPT-5.* (you can relax this later)
-        if not str(used).startswith("gpt-5"):
-            st.error(f"❌ Not running GPT-5. OpenAI returned: {used}")
-            st.stop()
     else:
         st.caption("OpenAI returned model: `(no call yet)`")
 
     st.divider()
-
     st.radio("Agent mode", ["chat", "autopilot"], key="agent_mode")
     st.divider()
 
@@ -496,24 +618,10 @@ with st.sidebar:
         st.success("Deleted + created new.")
         st.rerun()
 
-    st.divider()
-
-    st.subheader("🤖 Autopilot")
-    if st.button("Run 1 autopilot cycle"):
-        _autopilot_one_cycle()
-        st.rerun()
-
 
 # ============================================================
-# Main: Autopilot receipt + Chat
+# Main: Chat
 # ============================================================
-
-st.subheader("🧾 Autopilot Receipt")
-last = st.session_state.get("last_autopilot")
-if not last:
-    st.info("No autopilot run in this session yet.")
-else:
-    st.json(last)
 
 st.subheader("💬 Chat")
 for m in st.session_state.messages:
