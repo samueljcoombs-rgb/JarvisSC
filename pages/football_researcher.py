@@ -5,7 +5,7 @@ import json
 import uuid
 import re
 from datetime import datetime
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Set, Optional
 
 import streamlit as st
 from openai import OpenAI
@@ -14,6 +14,9 @@ from openai import BadRequestError
 from modules import football_tools as functions
 
 
+# ============================================================
+# OpenAI client + model
+# ============================================================
 def _init_client() -> OpenAI:
     api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY")
     if not api_key:
@@ -34,6 +37,9 @@ DEFAULT_RESULTS_BUCKET = os.getenv("RESULTS_BUCKET") or st.secrets.get("RESULTS_
 MAX_MESSAGES_TO_KEEP = int(os.getenv("MAX_CHAT_MESSAGES") or st.secrets.get("MAX_CHAT_MESSAGES", 220))
 
 
+# ============================================================
+# Tool runner
+# ============================================================
 def _run_tool(name: str, args: Dict[str, Any]) -> Any:
     fn = getattr(functions, name, None)
     if not fn:
@@ -41,31 +47,150 @@ def _run_tool(name: str, args: Dict[str, Any]) -> Any:
     return fn(**args)
 
 
+# ============================================================
+# Tools schema
+# NOTE: every array must include `items` in JSON schema
+# ============================================================
 TOOLS = [
-    {"type": "function", "function": {"name": "get_research_context", "description": "Fetch all Google Sheet tabs + derived constraints.", "parameters": {"type": "object", "properties": {"limit_notes": {"type": "integer"}}, "required": []}}},
-
-    {"type": "function", "function": {"name": "append_research_note", "description": "Append to research_memory.", "parameters": {"type": "object", "properties": {"note": {"type": "string"}, "tags": {"type": "string"}}, "required": ["note"]}}},
-    {"type": "function", "function": {"name": "get_research_state", "description": "Get research_state KV.", "parameters": {"type": "object", "properties": {}, "required": []}}},
-    {"type": "function", "function": {"name": "set_research_state", "description": "Set research_state KV.", "parameters": {"type": "object", "properties": {"key": {"type": "string"}, "value": {"type": "string"}}, "required": ["key", "value"]}}},
-
-    {"type": "function", "function": {"name": "load_data_basic", "description": "Load CSV preview.", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "csv_url": {"type": "string"}}, "required": []}}},
-    {"type": "function", "function": {"name": "list_columns", "description": "List CSV columns.", "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "csv_url": {"type": "string"}}, "required": []}}},
-
-    {"type": "function", "function": {"name": "submit_job", "description": "Submit Modal worker job.", "parameters": {"type": "object", "properties": {"task_type": {"type": "string"}, "params": {"type": "object"}}, "required": ["task_type", "params"]}}},
-    {"type": "function", "function": {"name": "get_job", "description": "Get job status by job_id.", "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]}}},
-    {"type": "function", "function": {"name": "wait_for_job", "description": "Wait for completion; optionally downloads results.", "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}, "timeout_s": {"type": "integer"}, "poll_s": {"type": "integer"}, "auto_download": {"type": "boolean"}}, "required": ["job_id"]}}},
-    {"type": "function", "function": {"name": "download_result", "description": "Download a result JSON from storage by path.", "parameters": {"type": "object", "properties": {"result_path": {"type": "string"}, "bucket": {"type": "string"}}, "required": ["result_path"]}}},
-
-    {"type": "function", "function": {"name": "start_btts_lab", "description": "Start best-practice BTTS ML lab (uses Sheet rules).", "parameters": {"type": "object", "properties": {"duration_minutes": {"type": "integer"}, "pl_column": {"type": "string"}, "do_hyperopt": {"type": "boolean"}, "hyperopt_iter": {"type": "integer"}}, "required": []}}},
-
-    {"type": "function", "function": {"name": "list_chats", "description": "List saved chat sessions.", "parameters": {"type": "object", "properties": {"limit": {"type": "integer"}}, "required": []}}},
-    {"type": "function", "function": {"name": "save_chat", "description": "Save chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}, "messages": {"type": "array", "items": {"type": "object"}}, "title": {"type": "string"}}, "required": ["session_id", "messages"]}}},
-    {"type": "function", "function": {"name": "load_chat", "description": "Load chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}}, "required": ["session_id"]}}},
-    {"type": "function", "function": {"name": "rename_chat", "description": "Rename chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}, "title": {"type": "string"}}, "required": ["session_id", "title"]}}},
-    {"type": "function", "function": {"name": "delete_chat", "description": "Delete chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}}, "required": ["session_id"]}}},
+    {
+        "type": "function",
+        "function": {
+            "name": "get_research_context",
+            "description": "Fetch all Google Sheet tabs + derived constraints (ignored_columns, outcome_columns).",
+            "parameters": {"type": "object", "properties": {"limit_notes": {"type": "integer"}}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "append_research_note",
+            "description": "Append to research_memory.",
+            "parameters": {"type": "object", "properties": {"note": {"type": "string"}, "tags": {"type": "string"}}, "required": ["note"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {"name": "get_research_state", "description": "Get research_state KV.", "parameters": {"type": "object", "properties": {}, "required": []}},
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_research_state",
+            "description": "Set research_state KV.",
+            "parameters": {"type": "object", "properties": {"key": {"type": "string"}, "value": {"type": "string"}}, "required": ["key", "value"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "load_data_basic",
+            "description": "Load CSV preview.",
+            "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "csv_url": {"type": "string"}}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_columns",
+            "description": "List CSV columns.",
+            "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "csv_url": {"type": "string"}}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "submit_job",
+            "description": "Submit Modal worker job.",
+            "parameters": {"type": "object", "properties": {"task_type": {"type": "string"}, "params": {"type": "object"}}, "required": ["task_type", "params"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {"name": "get_job", "description": "Get job status by job_id.", "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]}},
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "wait_for_job",
+            "description": "Wait for completion; optionally downloads results.",
+            "parameters": {
+                "type": "object",
+                "properties": {"job_id": {"type": "string"}, "timeout_s": {"type": "integer"}, "poll_s": {"type": "integer"}, "auto_download": {"type": "boolean"}},
+                "required": ["job_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "download_result",
+            "description": "Download a result JSON from storage by path.",
+            "parameters": {"type": "object", "properties": {"result_path": {"type": "string"}, "bucket": {"type": "string"}}, "required": ["result_path"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "start_pl_lab",
+            "description": "Start best-practice ML lab for any PL column (uses Sheet rules; categoricals supported; distills explicit rules).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "duration_minutes": {"type": "integer"},
+                    "pl_column": {"type": "string"},
+                    "do_hyperopt": {"type": "boolean"},
+                    "hyperopt_iter": {"type": "integer"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "start_btts_lab",
+            "description": "Convenience wrapper around start_pl_lab for BTTS PL.",
+            "parameters": {"type": "object", "properties": {"duration_minutes": {"type": "integer"}}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {"name": "list_chats", "description": "List saved chat sessions.", "parameters": {"type": "object", "properties": {"limit": {"type": "integer"}}, "required": []}},
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_chat",
+            "description": "Save chat session.",
+            "parameters": {
+                "type": "object",
+                "properties": {"session_id": {"type": "string"}, "messages": {"type": "array", "items": {"type": "object"}}, "title": {"type": "string"}},
+                "required": ["session_id", "messages"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {"name": "load_chat", "description": "Load chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}}, "required": ["session_id"]}},
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "rename_chat",
+            "description": "Rename chat session.",
+            "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}, "title": {"type": "string"}}, "required": ["session_id", "title"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {"name": "delete_chat", "description": "Delete chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}}, "required": ["session_id"]}},
+    },
 ]
 
 
+# ============================================================
+# System prompt
+# ============================================================
 SYSTEM_PROMPT = """You are FootballResearcher — an autonomous strategy R&D agent.
 
 NON-NEGOTIABLE SOURCE OF TRUTH
@@ -74,13 +199,13 @@ NON-NEGOTIABLE SOURCE OF TRUTH
 - Treat research_rules as enforcement rules, not suggestions.
 
 MISSION / PURPOSE
-- Your job is to discover strategies that are REPEATABLE on future matches.
-- You must avoid overfitting and leakage; you are judged on out-of-sample stability and risk (drawdown / losing streak) in POINTS.
-- Output strategies as explicit filters (numeric ranges + optional categorical constraints). Keep them simple.
+- Discover strategies REPEATABLE on future matches.
+- Avoid overfitting and leakage; judged on out-of-sample stability and risk (drawdown / losing streak) in POINTS.
+- Output strategies as explicit filters (numeric ranges + categorical constraints). Keep them simple.
 
 OPERATING PROCEDURE (AUTOPILOT)
 1) Load Sheet context first (get_research_context). Extract:
-   - ignored columns (e.g. Result, HOME FORM)
+   - ignored columns (e.g. Result, HOME FORM, BET RESULT)
    - outcome columns (PL columns)
 2) Run experiments (jobs) that:
    - use TIME-BASED splits only (3-way when possible: train/val/test)
@@ -88,10 +213,10 @@ OPERATING PROCEDURE (AUTOPILOT)
    - never use outcomes as predictive features
 3) Always report:
    - sample size (rows + unique IDs where possible)
-   - train vs test gap (stability)
-   - max drawdown and longest losing streak (in points)
+   - stability gap (train vs val and val vs test)
+   - max drawdown + longest losing streak (points) on test
 4) Log significant findings to research_memory as structured JSON (append-only).
-5) Iterate: refine feature bans, simplify rules, re-test until robust.
+5) Iterate: refine bans, simplify rules, re-test until robust.
 
 CHAT MODE RULE
 - In chat mode, do not call tools unless the user explicitly requests.
@@ -101,10 +226,16 @@ AUTOPILOT MODE RULE
 """
 
 
+# ============================================================
+# Streamlit UI setup
+# ============================================================
 st.set_page_config(page_title="Football Researcher", layout="wide")
 st.title("⚽ Football Researcher")
 
 
+# ============================================================
+# Session management
+# ============================================================
 def _load_sessions() -> List[Dict[str, Any]]:
     out = _run_tool("list_chats", {"limit": 200})
     if not out.get("ok", True):
@@ -163,11 +294,13 @@ if "loaded_for_sid" not in st.session_state or st.session_state.loaded_for_sid !
     if not _try_load_chat(SESSION_ID):
         _persist_chat(title=f"Session {SESSION_ID[:8]}")
 
-
 if "agent_mode" not in st.session_state:
     st.session_state.agent_mode = "chat"
 
 
+# ============================================================
+# Sanitise history for OpenAI
+# ============================================================
 def _sanitize_history_for_llm(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if not messages:
         return [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -216,6 +349,9 @@ def _sanitize_history_for_llm(messages: List[Dict[str, Any]]) -> List[Dict[str, 
     return out
 
 
+# ============================================================
+# LLM call
+# ============================================================
 def _call_llm(messages: List[Dict[str, Any]]):
     mode = st.session_state.agent_mode
     safe_messages = _sanitize_history_for_llm(messages)
@@ -231,12 +367,14 @@ def _call_llm(messages: List[Dict[str, Any]]):
                 chat_only.append(mm)
             else:
                 chat_only.append(m)
-
         return client.chat.completions.create(model=MODEL, messages=chat_only)
 
     return client.chat.completions.create(model=MODEL, messages=safe_messages, tools=TOOLS, tool_choice="auto")
 
 
+# ============================================================
+# Parsing helpers
+# ============================================================
 def _minutes_from_text(t: str, default_minutes: int = 300) -> int:
     t = (t or "").lower().strip()
     minutes = default_minutes
@@ -249,6 +387,128 @@ def _minutes_from_text(t: str, default_minutes: int = 300) -> int:
     return max(5, min(minutes, 360))
 
 
+def _normalize(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip()).lower()
+
+
+def _resolve_pl_column(user_text: str, ctx: Dict[str, Any]) -> str:
+    """
+    Resolve which PL column the user wants. Uses sheet-derived outcome_columns.
+    """
+    t = _normalize(user_text)
+    derived = (ctx.get("derived") or {})
+    outcomes = derived.get("outcome_columns") or []
+
+    # direct BTTS keyword
+    if "btts" in t:
+        return "BTTS PL"
+
+    # explicit mention match against known outcome columns
+    for col in outcomes:
+        if _normalize(col) in t:
+            return col
+
+    # pattern like "for X PL"
+    m = re.search(r"\bfor\s+(.+?\bpl)\b", t)
+    if m:
+        guess = m.group(1).strip()
+        # try to align case to known outcomes
+        for col in outcomes:
+            if _normalize(col) == _normalize(guess):
+                return col
+        # fallback exact
+        return guess
+
+    # fallback
+    return "BTTS PL"
+
+
+# ============================================================
+# Rendering distilled rules
+# ============================================================
+def _fmt_num(x: Any) -> str:
+    try:
+        return f"{float(x):.2f}"
+    except Exception:
+        return str(x)
+
+
+def _render_rule_spec(spec: Dict[str, Any]) -> str:
+    """
+    spec = {"numeric":[...], "categorical":[...]}
+    """
+    parts: List[str] = []
+
+    for c in (spec.get("categorical") or []):
+        col = c.get("col")
+        if not col:
+            continue
+        if "in" in c and c["in"]:
+            parts.append(f"**{col} IN** {c['in']}")
+        if "not_in" in c and c["not_in"]:
+            parts.append(f"**{col} NOT IN** {c['not_in']}")
+
+    for n in (spec.get("numeric") or []):
+        col = n.get("col")
+        if not col:
+            continue
+        mn = n.get("min", None)
+        mx = n.get("max", None)
+        if mn is not None and mx is not None:
+            parts.append(f"**{col}** in [{_fmt_num(mn)}, {_fmt_num(mx)}]")
+        elif mn is not None:
+            parts.append(f"**{col}** >= {_fmt_num(mn)}")
+        elif mx is not None:
+            parts.append(f"**{col}** <= {_fmt_num(mx)}")
+
+    return "  \n".join(parts) if parts else "(no constraints)"
+
+
+def _render_distilled_top(result_obj: Dict[str, Any], top_n: int = 3) -> str:
+    """
+    Builds a concise markdown summary of distilled strategies.
+    """
+    r = ((result_obj or {}).get("result") or {}).get("result") or {}
+    distilled = r.get("distilled") or {}
+    picked = r.get("picked") or {}
+
+    if not distilled or "top_distilled_rules" not in distilled:
+        return "No distilled strategies found in this result."
+
+    rules = distilled.get("top_distilled_rules") or []
+    rules = rules[:top_n]
+
+    out = []
+    out.append(f"### ✅ Distilled strategies (top {len(rules)})")
+    out.append(f"- **Picked:** `{picked}`")
+    base = distilled.get("best_base_model") or {}
+    out.append(f"- **Base model:** `{base}`")
+    out.append("")
+
+    for i, rr in enumerate(rules, start=1):
+        spec = rr.get("spec") or {}
+        tr = rr.get("train") or {}
+        va = rr.get("val") or {}
+        te = rr.get("test") or {}
+        gl = rr.get("test_game_level") or {}
+        gap = rr.get("gap_train_minus_val")
+
+        out.append(f"#### Strategy #{i}")
+        out.append(_render_rule_spec(spec))
+        out.append("")
+        out.append(f"- **Train:** rows={tr.get('rows')} roi={_fmt_num(tr.get('roi'))} total_pl={_fmt_num(tr.get('total_pl'))}")
+        out.append(f"- **Val:** rows={va.get('rows')} roi={_fmt_num(va.get('roi'))} total_pl={_fmt_num(va.get('total_pl'))}")
+        out.append(f"- **Test:** rows={te.get('rows')} roi={_fmt_num(te.get('roi'))} total_pl={_fmt_num(te.get('total_pl'))}")
+        out.append(f"- **Stability:** gap(train−val)={_fmt_num(gap)}")
+        out.append(f"- **Test risk (by ID):** unique_ids={gl.get('unique_ids')} max_dd={_fmt_num(gl.get('max_dd'))} losing_streak={gl.get('losing_streak')}")
+        out.append("")
+
+    return "\n".join(out)
+
+
+# ============================================================
+# Sheet logging (compact but useful)
+# ============================================================
 def _context_snapshot_text(ctx: Dict[str, Any]) -> str:
     ov = (ctx.get("dataset_overview") or {})
     derived = (ctx.get("derived") or {})
@@ -265,59 +525,76 @@ def _context_snapshot_text(ctx: Dict[str, Any]) -> str:
     )
 
 
-def _log_btts_lab_to_sheet(job_id: str, result_obj: Dict[str, Any]):
+def _log_lab_to_sheet(job_id: str, result_obj: Dict[str, Any], tags: str):
     """
-    Keep the Sheet log compact but useful: baselines + top candidates summary.
+    Keep logs small: baselines + top distilled rules summary.
     """
     try:
-        r = (result_obj or {}).get("result") or {}
-        if not r or "best_candidates" not in r:
+        r = ((result_obj or {}).get("result") or {}).get("result") or {}
+        if not r:
             return
+
+        distilled = (r.get("distilled") or {}).get("top_distilled_rules") or []
+        top3 = distilled[:3]
+
         note = {
             "ts": datetime.utcnow().isoformat(),
-            "kind": "btts_lab_result",
+            "kind": "pl_lab_result",
             "job_id": job_id,
             "picked": r.get("picked"),
             "sheet_enforcement": r.get("sheet_enforcement"),
             "splits": r.get("splits"),
             "features": r.get("features"),
             "baseline": r.get("baseline"),
-            "top_candidates": [
+            "top_distilled_rules": [
                 {
-                    "kind": c.get("kind"),
-                    "model": c.get("model"),
-                    "pick_frac": c.get("pick_frac"),
-                    # keep only key strategy stats to avoid huge rows
-                    "val_top": ((c.get("entry") or {}).get("val_strategies") or [])[:1],
-                    "test_top": ((c.get("entry") or {}).get("test_strategies") or [])[:1],
+                    "spec": rr.get("spec"),
+                    "train": rr.get("train"),
+                    "val": rr.get("val"),
+                    "test": rr.get("test"),
+                    "test_game_level": rr.get("test_game_level"),
+                    "gap_train_minus_val": rr.get("gap_train_minus_val"),
+                    "samples": rr.get("samples"),
                 }
-                for c in (r.get("best_candidates") or [])[:5]
+                for rr in top3
             ],
         }
-        _run_tool("append_research_note", {"note": json.dumps(note, ensure_ascii=False), "tags": "btts,lab,ml,autopilot"})
+
+        _run_tool("append_research_note", {"note": json.dumps(note, ensure_ascii=False), "tags": tags})
     except Exception:
         return
 
 
-def _maybe_start_btts_lab(user_text: str) -> bool:
+# ============================================================
+# Autopilot command intercepts
+# ============================================================
+def _maybe_start_pl_lab(user_text: str) -> bool:
+    """
+    Autopilot shortcut:
+      "Spend the next 2 hours building a strategy for BTTS PL"
+      "Build a strategy for BO 2.5 PL for 60 minutes"
+    """
     if st.session_state.agent_mode != "autopilot":
         return False
 
-    t = (user_text or "").lower()
-    if "btts" not in t or "strategy" not in t:
+    t = _normalize(user_text)
+    wants_strategy = ("strategy" in t) or ("build" in t and "pl" in t)
+    if not wants_strategy:
         return False
 
-    wants_long_run = ("spend" in t) or ("next" in t) or ("hours" in t) or ("best practice" in t) or ("models" in t) or ("xgboost" in t) or ("ml" in t)
-    if not wants_long_run:
-        return False
-
-    minutes = _minutes_from_text(user_text, default_minutes=300)
-    do_hyperopt = ("hyperopt" in t) or ("grid" in t) or ("cv" in t)
-
+    # load context first, always
     ctx = _run_tool("get_research_context", {"limit_notes": 10})
     st.session_state.last_context = ctx
 
-    submitted = _run_tool("start_btts_lab", {"duration_minutes": minutes, "pl_column": "BTTS PL", "do_hyperopt": do_hyperopt, "hyperopt_iter": 12})
+    minutes = _minutes_from_text(user_text, default_minutes=180)
+    do_hyperopt = any(k in t for k in ["hyperopt", "grid", "cv", "bayes", "optuna"])
+
+    pl_col = _resolve_pl_column(user_text, ctx)
+
+    submitted = _run_tool(
+        "start_pl_lab",
+        {"duration_minutes": minutes, "pl_column": pl_col, "do_hyperopt": do_hyperopt, "hyperopt_iter": 12},
+    )
     job_id = submitted.get("job_id")
 
     st.session_state.messages.append({"role": "user", "content": user_text})
@@ -325,12 +602,22 @@ def _maybe_start_btts_lab(user_text: str) -> bool:
 
     if job_id:
         st.session_state.messages.append(
-            {"role": "assistant", "content": f"✅ Started **BTTS Lab** for **{minutes} minutes**.\n\n**Job ID:** `{job_id}`\n\nUse:\n- `Check job {job_id}`\n- `Show results for {job_id}`"}
+            {
+                "role": "assistant",
+                "content": (
+                    f"✅ Started **PL Lab** for **{pl_col}** for **{minutes} minutes**.\n\n"
+                    f"**Job ID:** `{job_id}`\n\n"
+                    "Use:\n"
+                    f"- `Check job {job_id}`\n"
+                    f"- `Show results for {job_id}`"
+                ),
+            }
         )
-        _run_tool("set_research_state", {"key": "last_btts_lab_job_id", "value": job_id})
-        _run_tool("set_research_state", {"key": "last_btts_lab_started_at", "value": datetime.utcnow().isoformat()})
+        _run_tool("set_research_state", {"key": "last_pl_lab_job_id", "value": job_id})
+        _run_tool("set_research_state", {"key": "last_pl_lab_started_at", "value": datetime.utcnow().isoformat()})
+        _run_tool("set_research_state", {"key": "last_pl_lab_pl_column", "value": pl_col})
     else:
-        st.session_state.messages.append({"role": "assistant", "content": f"❌ Failed to start BTTS lab: {submitted}"})
+        st.session_state.messages.append({"role": "assistant", "content": f"❌ Failed to start PL lab: {submitted}"})
 
     _persist_chat()
     return True
@@ -351,9 +638,12 @@ def _maybe_handle_job_queries(user_text: str) -> bool:
     m2 = re.search(r"\bshow results\b.*\b([0-9a-f\-]{10,})", t)
     if m2:
         job_id = m2.group(1)
+
         waited = _run_tool("wait_for_job", {"job_id": job_id, "timeout_s": 1, "poll_s": 1, "auto_download": False})
         job = waited.get("job") or {}
         rp = job.get("result_path")
+        params = job.get("params") or {}
+        bucket = (params.get("_results_bucket") or DEFAULT_RESULTS_BUCKET).strip()
 
         st.session_state.messages.append({"role": "user", "content": user_text})
 
@@ -362,26 +652,38 @@ def _maybe_handle_job_queries(user_text: str) -> bool:
             _persist_chat()
             return True
 
-        res = _run_tool("download_result", {"bucket": DEFAULT_RESULTS_BUCKET, "result_path": rp})
+        res = _run_tool("download_result", {"bucket": bucket, "result_path": rp})
         result_obj = res.get("result") or {}
 
-        # auto-log to sheet if it's BTTS lab
+        # Render distilled strategies nicely if available
+        md = _render_distilled_top(result_obj, top_n=3)
+        st.session_state.messages.append({"role": "assistant", "content": md})
+
+        # Also include compact json (optional, truncated)
+        st.session_state.messages.append(
+            {"role": "assistant", "content": f"```json\n{json.dumps(result_obj, indent=2)[:12000]}\n```"}
+        )
+
+        # Auto-log to sheet
         try:
-            if (result_obj.get("task_type") or "") == "btts_lab":
-                _log_btts_lab_to_sheet(job_id, result_obj)
+            task_type = (result_obj.get("task_type") or "")
+            if task_type in ("pl_lab", "btts_lab"):
+                _log_lab_to_sheet(job_id, result_obj, tags="pl_lab,ml,distilled,autopilot")
         except Exception:
             pass
 
-        st.session_state.messages.append({"role": "assistant", "content": f"```json\n{json.dumps(result_obj, indent=2)[:14000]}\n```"})
         _persist_chat()
         return True
 
     return False
 
 
+# ============================================================
+# Main chat loop
+# ============================================================
 def _chat_with_tools(user_text: str, max_rounds: int = 6):
     if st.session_state.agent_mode == "autopilot":
-        if _maybe_start_btts_lab(user_text):
+        if _maybe_start_pl_lab(user_text):
             return
         if _maybe_handle_job_queries(user_text):
             return
@@ -428,6 +730,9 @@ def _chat_with_tools(user_text: str, max_rounds: int = 6):
     _persist_chat()
 
 
+# ============================================================
+# Sidebar UI
+# ============================================================
 with st.sidebar:
     st.caption(f"Requested model: `{MODEL}`")
     st.caption(f"Data: `{DEFAULT_STORAGE_BUCKET}/{DEFAULT_STORAGE_PATH}`")
@@ -461,6 +766,9 @@ with st.sidebar:
         st.rerun()
 
 
+# ============================================================
+# Main
+# ============================================================
 st.subheader("💬 Chat")
 for m in st.session_state.messages:
     if m.get("role") == "system":
