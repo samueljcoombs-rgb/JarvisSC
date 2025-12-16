@@ -45,30 +45,6 @@ def _now_iso() -> str:
     return datetime.utcnow().isoformat()
 
 
-def _coerce_params_to_dict(params: Any) -> Dict[str, Any]:
-    if isinstance(params, dict):
-        return params
-    if isinstance(params, str):
-        try:
-            parsed = json.loads(params)
-            return parsed if isinstance(parsed, dict) else {}
-        except Exception:
-            return {}
-    return {}
-
-
-def _norm_col(s: str) -> str:
-    # Case/format insensitive comparison for columns
-    return (
-        (s or "")
-        .strip()
-        .lower()
-        .replace(" ", "")
-        .replace("_", "")
-        .replace("-", "")
-    )
-
-
 # ============================================================
 # Google Sheets helpers (fault tolerant)
 # ============================================================
@@ -262,12 +238,7 @@ def _sb():
 
 def _download_from_storage(bucket: str, path: str) -> bytes:
     sb = _sb()
-    try:
-        return sb.storage.from_(bucket).download(path)
-    except StorageException as e:
-        raise RuntimeError(f"Storage download failed for bucket='{bucket}', path='{path}'. Details: {e}") from e
-    except Exception as e:
-        raise RuntimeError(f"Storage download failed for bucket='{bucket}', path='{path}'. Error: {e}") from e
+    return sb.storage.from_(bucket).download(path)
 
 
 def _download_from_url(csv_url: str) -> bytes:
@@ -292,35 +263,39 @@ def _load_csv(storage_bucket: Optional[str] = None, storage_path: Optional[str] 
     return pd.read_csv(StringIO(text), low_memory=False)
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
-def _cached_columns(storage_bucket: str, storage_path: str) -> List[str]:
-    # reads only header if possible; still downloads file, but cached
-    raw = _download_from_storage(storage_bucket, storage_path)
+def _load_csv_header_only(storage_bucket: Optional[str] = None, storage_path: Optional[str] = None, csv_url: Optional[str] = None) -> List[str]:
+    if storage_bucket and storage_path:
+        raw = _download_from_storage(storage_bucket, storage_path)
+    elif csv_url:
+        raw = _download_from_url(csv_url)
+    else:
+        raise ValueError("Provide either (storage_bucket + storage_path) OR csv_url.")
+
     try:
         text = raw.decode("utf-8")
     except Exception:
         text = raw.decode("latin-1", errors="replace")
-    df0 = pd.read_csv(StringIO(text), nrows=0, low_memory=False)
+
+    df0 = pd.read_csv(StringIO(text), nrows=0)
     return df0.columns.tolist()
 
 
-def _resolve_column_name(storage_bucket: str, storage_path: str, requested: str) -> Optional[str]:
-    cols = _cached_columns(storage_bucket, storage_path)
-    if requested in cols:
-        return requested
-    req_n = _norm_col(requested)
-    lookup = {_norm_col(c): c for c in cols}
-    return lookup.get(req_n)
+def _resolve_col_case_insensitive(cols: List[str], wanted: str) -> str:
+    w = (wanted or "").strip().lower()
+    for c in cols:
+        if (c or "").strip().lower() == w:
+            return c
+    return wanted
 
 
 def load_data_basic(storage_bucket: str = "", storage_path: str = "", csv_url: str = "") -> Dict[str, Any]:
     df = _load_csv(storage_bucket or None, storage_path or None, csv_url or None)
-    return {"ok": True, "rows": int(df.shape[0]), "cols": int(df.shape[1]), "head": df.head(5).to_dict(orient="records")}
+    return {"rows": int(df.shape[0]), "cols": int(df.shape[1]), "head": df.head(5).to_dict(orient="records")}
 
 
 def list_columns(storage_bucket: str = "", storage_path: str = "", csv_url: str = "") -> Dict[str, Any]:
     df = _load_csv(storage_bucket or None, storage_path or None, csv_url or None)
-    return {"ok": True, "columns": df.columns.tolist(), "n": int(len(df.columns))}
+    return {"columns": df.columns.tolist(), "n": int(len(df.columns))}
 
 
 # ============================================================
@@ -342,7 +317,7 @@ def _mapping() -> Dict[str, Tuple[str, str]]:
 def basic_roi_for_pl_column(pl_column: str, storage_bucket: str = "", storage_path: str = "", csv_url: str = "") -> Dict[str, Any]:
     df = _load_csv(storage_bucket or None, storage_path or None, csv_url or None)
     if pl_column not in df.columns:
-        return {"ok": False, "error": f"Missing PL column: {pl_column}"}
+        return {"error": f"Missing PL column: {pl_column}"}
 
     side, odds_col = _mapping().get(pl_column, ("back", ""))
     d = df[df[pl_column].notna()].copy()
@@ -352,17 +327,16 @@ def basic_roi_for_pl_column(pl_column: str, storage_bucket: str = "", storage_pa
     total_pl = float(d[pl_column].sum()) if n else 0.0
 
     if n == 0:
-        return {"ok": True, "pl_column": pl_column, "bets": 0, "total_pl": 0.0, "roi": 0.0, "avg_pl": 0.0, "side": side}
+        return {"pl_column": pl_column, "bets": 0, "total_pl": 0.0, "roi": 0.0, "avg_pl": 0.0, "side": side}
 
     if side == "lay":
         if odds_col not in d.columns:
-            return {"ok": False, "error": f"Lay ROI requires odds col '{odds_col}' but it is missing."}
+            return {"error": f"Lay ROI requires odds col '{odds_col}' but it is missing."}
         odds = pd.to_numeric(d[odds_col], errors="coerce").fillna(0.0)
         liability = (odds - 1.0).clip(lower=0.0)
         denom = float(liability.sum())
         roi = (total_pl / denom) if denom > 0 else 0.0
         return {
-            "ok": True,
             "pl_column": pl_column,
             "side": "lay",
             "odds_col": odds_col,
@@ -375,7 +349,6 @@ def basic_roi_for_pl_column(pl_column: str, storage_bucket: str = "", storage_pa
 
     denom = float(n)
     return {
-        "ok": True,
         "pl_column": pl_column,
         "side": "back",
         "odds_col": odds_col or None,
@@ -393,70 +366,15 @@ def basic_roi_for_pl_column(pl_column: str, storage_bucket: str = "", storage_pa
 
 def submit_job(task_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
     sb = _sb()
-    params_dict = _coerce_params_to_dict(params)
-
-    row = {
-        "status": "queued",
-        "task_type": str(task_type),
-        "params": params_dict,  # must be json object (dict)
-        "created_at": _now_iso(),
-        "updated_at": _now_iso(),
-    }
-
+    row = {"status": "queued", "task_type": task_type, "params": params or {}, "created_at": _now_iso(), "updated_at": _now_iso()}
     try:
         res = sb.table("jobs").insert(row).execute()
         data = (res.data or [])
         if not data:
-            return {"ok": False, "error": "Insert returned no rows. Check table schema/RLS.", "raw": str(res)}
-        job = data[0]
-        job["params"] = _coerce_params_to_dict(job.get("params"))
-        return job
+            return {"error": "Insert returned no rows. Check table schema/RLS.", "raw": str(res)}
+        return data[0]
     except Exception as e:
-        return {"ok": False, "error": f"submit_job failed: {e}"}
-
-
-def submit_strategy_search(
-    storage_bucket: str = "",
-    storage_path: str = "",
-    results_bucket: str = "",
-    time_split_ratio: float = 0.7,
-    target_pl_column: str = "",
-) -> Dict[str, Any]:
-    """
-    SAFE wrapper:
-      - never allows inventing task_type
-      - guarantees params is a dict
-      - resolves target_pl_column to exact CSV header (case/space/_ insensitive)
-    """
-    b = (storage_bucket or st.secrets.get("DATA_STORAGE_BUCKET") or os.getenv("DATA_STORAGE_BUCKET") or "football-data").strip()
-    p = (storage_path or st.secrets.get("DATA_STORAGE_PATH") or os.getenv("DATA_STORAGE_PATH") or "football_ai_NNIA.csv").strip()
-    rb = (results_bucket or st.secrets.get("RESULTS_BUCKET") or os.getenv("RESULTS_BUCKET") or "football-results").strip()
-
-    params: Dict[str, Any] = {
-        "storage_bucket": b,
-        "storage_path": p,
-        "_results_bucket": rb,
-        "time_split_ratio": float(time_split_ratio or 0.7),
-    }
-
-    # ✅ canonicalise PL column if provided
-    if (target_pl_column or "").strip():
-        requested = target_pl_column.strip()
-        resolved = _resolve_column_name(b, p, requested)
-        if not resolved:
-            # give a helpful error payload with candidates
-            cols = _cached_columns(b, p)
-            pl_like = [c for c in cols if c.strip().lower().endswith("pl") or " pl" in c.lower()]
-            return {
-                "ok": False,
-                "error": f"target_pl_column '{requested}' not found in CSV columns.",
-                "hint": "Use the exact column name (or any casing/spacing variant).",
-                "example": "BTTS PL",
-                "pl_candidates_sample": pl_like[:50],
-            }
-        params["target_pl_column"] = resolved
-
-    return submit_job("strategy_search", params)
+        return {"error": f"submit_job failed: {e}"}
 
 
 def get_job(job_id: str) -> Dict[str, Any]:
@@ -465,24 +383,16 @@ def get_job(job_id: str) -> Dict[str, Any]:
         res = sb.table("jobs").select("*").eq("job_id", job_id).limit(1).execute()
         data = (res.data or [])
         if not data:
-            return {"ok": False, "error": "job not found", "job_id": job_id}
-        job = data[0]
-        job["params"] = _coerce_params_to_dict(job.get("params"))
-        return job
+            return {"error": "job not found", "job_id": job_id}
+        return data[0]
     except Exception as e:
-        return {"ok": False, "error": f"get_job failed: {e}", "job_id": job_id}
+        return {"error": f"get_job failed: {e}", "job_id": job_id}
 
 
 def download_result(result_path: str, bucket: str = "") -> Dict[str, Any]:
     sb = _sb()
     b = (bucket or st.secrets.get("RESULTS_BUCKET") or os.getenv("RESULTS_BUCKET") or "football-results").strip()
-    try:
-        raw = sb.storage.from_(b).download(result_path)
-    except StorageException as e:
-        return {"ok": False, "bucket": b, "result_path": result_path, "error": f"Storage download failed: {e}"}
-    except Exception as e:
-        return {"ok": False, "bucket": b, "result_path": result_path, "error": f"download_result failed: {e}"}
-
+    raw = sb.storage.from_(b).download(result_path)
     try:
         return {"ok": True, "bucket": b, "result_path": result_path, "result": json.loads(raw.decode("utf-8"))}
     except Exception:
@@ -512,7 +422,88 @@ def wait_for_job(job_id: str, timeout_s: int = 300, poll_s: int = 5, auto_downlo
 
 
 # ============================================================
-# Chat sessions (Supabase Storage) - used by UI (not LLM)
+# SAFE submit wrappers (MODEL should call these, not raw submit_job)
+# ============================================================
+
+def submit_strategy_search(
+    storage_bucket: str = "",
+    storage_path: str = "",
+    results_bucket: str = "",
+    time_split_ratio: float = 0.7,
+    target_pl_column: str = "",
+) -> Dict[str, Any]:
+    sbucket = (storage_bucket or st.secrets.get("DATA_STORAGE_BUCKET") or os.getenv("DATA_STORAGE_BUCKET") or "football-data").strip()
+    spath = (storage_path or st.secrets.get("DATA_STORAGE_PATH") or os.getenv("DATA_STORAGE_PATH") or "football_ai_NNIA.csv").strip()
+    rbucket = (results_bucket or st.secrets.get("RESULTS_BUCKET") or os.getenv("RESULTS_BUCKET") or "football-results").strip()
+
+    cols = _load_csv_header_only(sbucket, spath, None)
+    pl = _resolve_col_case_insensitive(cols, target_pl_column) if target_pl_column else ""
+
+    params: Dict[str, Any] = {
+        "storage_bucket": sbucket,
+        "storage_path": spath,
+        "_results_bucket": rbucket,
+        "time_split_ratio": float(time_split_ratio or 0.7),
+    }
+    # IMPORTANT: worker expects params.pl_column (not target_pl_column)
+    if pl:
+        params["pl_column"] = pl
+
+    return submit_job("strategy_search", params)
+
+
+def submit_feature_audit(
+    storage_bucket: str = "",
+    storage_path: str = "",
+    results_bucket: str = "",
+    target_pl_column: str = "",
+) -> Dict[str, Any]:
+    sbucket = (storage_bucket or st.secrets.get("DATA_STORAGE_BUCKET") or os.getenv("DATA_STORAGE_BUCKET") or "football-data").strip()
+    spath = (storage_path or st.secrets.get("DATA_STORAGE_PATH") or os.getenv("DATA_STORAGE_PATH") or "football_ai_NNIA.csv").strip()
+    rbucket = (results_bucket or st.secrets.get("RESULTS_BUCKET") or os.getenv("RESULTS_BUCKET") or "football-results").strip()
+
+    cols = _load_csv_header_only(sbucket, spath, None)
+    target = _resolve_col_case_insensitive(cols, target_pl_column) if target_pl_column else ""
+
+    params: Dict[str, Any] = {
+        "storage_bucket": sbucket,
+        "storage_path": spath,
+        "_results_bucket": rbucket,
+    }
+    if target:
+        params["target_pl_column"] = target
+
+    return submit_job("feature_audit", params)
+
+
+def submit_feature_rank(
+    storage_bucket: str = "",
+    storage_path: str = "",
+    results_bucket: str = "",
+    target_pl_column: str = "",
+    time_split_ratio: float = 0.7,
+    max_rows: int = 250000,
+) -> Dict[str, Any]:
+    sbucket = (storage_bucket or st.secrets.get("DATA_STORAGE_BUCKET") or os.getenv("DATA_STORAGE_BUCKET") or "football-data").strip()
+    spath = (storage_path or st.secrets.get("DATA_STORAGE_PATH") or os.getenv("DATA_STORAGE_PATH") or "football_ai_NNIA.csv").strip()
+    rbucket = (results_bucket or st.secrets.get("RESULTS_BUCKET") or os.getenv("RESULTS_BUCKET") or "football-results").strip()
+
+    cols = _load_csv_header_only(sbucket, spath, None)
+    target = _resolve_col_case_insensitive(cols, target_pl_column) if target_pl_column else target_pl_column
+
+    params: Dict[str, Any] = {
+        "storage_bucket": sbucket,
+        "storage_path": spath,
+        "_results_bucket": rbucket,
+        "target_pl_column": target,
+        "time_split_ratio": float(time_split_ratio or 0.7),
+        "max_rows": int(max_rows or 250000),
+    }
+    return submit_job("feature_rank", params)
+
+
+# ============================================================
+# Chat sessions (Supabase Storage)
 # ============================================================
 
 def _chat_bucket() -> str:
@@ -535,11 +526,7 @@ def _load_chat_index(sb) -> Dict[str, Any]:
 def _save_chat_index(sb, index: Dict[str, Any]) -> None:
     bucket = _chat_bucket()
     payload = json.dumps(index, ensure_ascii=False, indent=2).encode("utf-8")
-    sb.storage.from_(bucket).upload(
-        path=_chat_index_path(),
-        file=payload,
-        file_options={"content-type": "application/json", "upsert": "true"},
-    )
+    sb.storage.from_(bucket).upload(path=_chat_index_path(), file=payload, file_options={"content-type": "application/json", "upsert": "true"})
 
 
 def list_chats(limit: int = 200) -> Dict[str, Any]:
@@ -563,18 +550,9 @@ def save_chat(session_id: str, messages: List[Dict[str, Any]], title: str = "") 
     ).encode("utf-8")
 
     try:
-        sb.storage.from_(bucket).upload(
-            path=path,
-            file=payload,
-            file_options={"content-type": "application/json", "upsert": "true"},
-        )
+        sb.storage.from_(bucket).upload(path=path, file=payload, file_options={"content-type": "application/json", "upsert": "true"})
     except StorageException as e:
-        return {
-            "ok": False,
-            "error": f"Storage upload failed. Create bucket '{bucket}' and ensure the service role key has access. Details: {e}",
-            "bucket": bucket,
-            "path": path,
-        }
+        return {"ok": False, "error": f"Storage upload failed. Create bucket '{bucket}' in Supabase Storage. Details: {e}", "bucket": bucket, "path": path}
     except Exception as e:
         return {"ok": False, "error": f"save_chat failed: {e}", "bucket": bucket, "path": path}
 
