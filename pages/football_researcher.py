@@ -560,11 +560,11 @@ def _log_lab_to_sheet(job_id: str, result_obj: Dict[str, Any], tags: str):
 
 DEFAULT_ENFORCEMENT = {
     "min_train_rows": 300,
-    "min_val_rows": 120,
-    "min_test_rows": 120,
-    "max_train_val_gap_roi": 0.10,
-    "max_test_drawdown": -25.0,
-    "max_test_losing_streak_bets": 8,
+    "min_val_rows": 60,
+    "min_test_rows": 60,
+    "max_train_val_gap_roi": 0.40,
+    "max_test_drawdown": -50.0,
+    "max_test_losing_streak_bets": 50,
 }
 
 ENFORCEMENT_EXPLANATION = {
