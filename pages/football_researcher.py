@@ -635,7 +635,13 @@ def _maybe_start_narrated_pl_research(user_text: str) -> bool:
 
     submitted = _run_tool(
         "start_pl_lab",
-        {"duration_minutes": minutes, "pl_column": pl_col, "do_hyperopt": do_hyperopt, "hyperopt_iter": 16, "enforcement": enforcement},
+        {
+            "duration_minutes": minutes,
+            "pl_column": pl_col,
+            "do_hyperopt": do_hyperopt,
+            "hyperopt_iter": 16,
+            "enforcement": enforcement,
+        },
     )
     job_id = (submitted or {}).get("job_id") if isinstance(submitted, dict) else None
     if not job_id:
@@ -650,7 +656,7 @@ def _maybe_start_narrated_pl_research(user_text: str) -> bool:
     st.session_state["agent_session_active"] = True
     st.session_state["agent_session_steps_done"] = 0
     st.session_state["agent_session_pl_column"] = pl_col
-    st.session_state["agent_session_minutes_per_job"] = int(duration_minutes)
+    st.session_state["agent_session_minutes_per_job"] = int(minutes)
 
     st.session_state.active_job_last_status = ""
     st.session_state.active_job_last_update_ts = 0.0
