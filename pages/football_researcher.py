@@ -132,7 +132,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "start_pl_lab",
-            "description": "Start best-practice ML lab for any PL column (uses Sheet rules; categoricals supported; distills explicit rules).",
+            "description": "Start best-practice ML lab for any PL column (Sheet rules enforced; categoricals included; distills explicit rules).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -189,40 +189,51 @@ TOOLS = [
 
 
 # ============================================================
-# System prompt
+# System prompt (updated to be “world class” explicit)
 # ============================================================
 SYSTEM_PROMPT = """You are FootballResearcher — an autonomous strategy R&D agent.
 
 NON-NEGOTIABLE SOURCE OF TRUTH
-- You must use Google Sheet tabs via get_research_context():
+- You MUST use Google Sheet tabs via get_research_context():
   dataset_overview, research_rules, column_definitions, evaluation_framework, research_state, research_memory.
-- Treat research_rules as enforcement rules, not suggestions.
+- Treat research_rules as ENFORCEMENT rules, not suggestions.
 
 MISSION / PURPOSE
-- Discover strategies REPEATABLE on future matches.
-- Avoid overfitting and leakage; judged on out-of-sample stability and risk (drawdown / losing streak) in POINTS.
-- Output strategies as explicit filters (numeric ranges + categorical constraints). Keep them simple.
+- Discover strategies that are REPEATABLE on future matches.
+- Avoid overfitting and leakage. You are judged on out-of-sample stability and risk:
+  - P&L, ROI
+  - max drawdown and longest losing streak (in POINTS)
+- Output strategies as explicit filters:
+  - Numeric ranges + categorical constraints (categoricals are REQUIRED where useful)
+  - With minimum sample sizes on train/val/test (and unique IDs where possible)
+- You MUST separate:
+  - discovery (train/val) from final confirmation (test)
+  - do NOT tune thresholds using test results
+
+CAPABILITIES (WHAT YOU CAN DO)
+- Read the “rules + definitions + evaluation framework” from the Google Sheet.
+- Submit compute jobs to a Modal worker via start_pl_lab (recommended) or submit_job.
+- Download and summarise results, distilling explicit strategies that include categoricals.
+
+CONSTRAINTS (IMPORTANT)
+- Each dataset row is a SCAN OUTCOME, not a single match.
+- PL columns are OUTCOMES ONLY and must never be used as predictive features.
+- Result / HOME FORM columns must be ignored per sheet rules.
+- Splits MUST be time-based and leakage-safe (the worker uses time-ordered group splits by ID).
 
 OPERATING PROCEDURE (AUTOPILOT)
-1) Load Sheet context first (get_research_context). Extract:
-   - ignored columns (e.g. Result, HOME FORM, BET RESULT)
-   - outcome columns (PL columns)
-2) Run experiments (jobs) that:
-   - use TIME-BASED splits only (3-way when possible: train/val/test)
-   - never tune thresholds on final test
-   - never use outcomes as predictive features
-3) Always report:
-   - sample size (rows + unique IDs where possible)
-   - stability gap (train vs val and val vs test)
-   - max drawdown + longest losing streak (points) on test
-4) Log significant findings to research_memory as structured JSON (append-only).
-5) Iterate: refine bans, simplify rules, re-test until robust.
+1) Load Sheet context first (get_research_context).
+2) Decide target PL column from the user's request (default: BTTS PL if unspecified).
+3) Run experiments with start_pl_lab using 3-way time split (train/val/test).
+4) Select strategies using VAL ONLY; then report TEST stability + risk.
+5) Log significant findings to research_memory as compact structured JSON.
+6) Iterate: simplify, re-test, penalise fragile strategies.
 
 CHAT MODE RULE
 - In chat mode, do not call tools unless the user explicitly requests.
 
 AUTOPILOT MODE RULE
-- In autopilot, be decisive: pick the next experiment yourself. Only ask user if blocked.
+- In autopilot, be decisive: pick the next experiment yourself. Only ask the user if blocked.
 """
 
 
@@ -388,38 +399,62 @@ def _minutes_from_text(t: str, default_minutes: int = 300) -> int:
 
 
 def _normalize(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "").strip()).lower()
+    s = (s or "").strip().lower()
+    s = re.sub(r"[\(\)\[\]\{\}\,\;\:]+", " ", s)
+    s = s.replace("  ", " ")
+    return re.sub(r"\s+", " ", s).strip()
 
 
 def _resolve_pl_column(user_text: str, ctx: Dict[str, Any]) -> str:
     """
-    Resolve which PL column the user wants. Uses sheet-derived outcome_columns.
+    Resolve which PL column the user wants using sheet-derived outcome_columns.
+    Tries:
+      - obvious aliases (btts, over 2.5, etc)
+      - exact matches against outcome columns
+      - substring matches against outcome columns
+      - fallback default BTTS PL
     """
     t = _normalize(user_text)
     derived = (ctx.get("derived") or {})
-    outcomes = derived.get("outcome_columns") or []
+    outcomes: List[str] = derived.get("outcome_columns") or []
 
-    # direct BTTS keyword
-    if "btts" in t:
-        return "BTTS PL"
+    # common aliases → known PL columns
+    aliases = {
+        "btts": "BTTS PL",
+        "both teams to score": "BTTS PL",
+        "over 2.5": "BO 2.5 PL",
+        "o 2.5": "BO 2.5 PL",
+        "o2.5": "BO 2.5 PL",
+        "bo 2.5": "BO 2.5 PL",
+        "bo2.5": "BO 2.5 PL",
+        "fh over 1.5": "BO1.5 FHG PL",
+        "fh o1.5": "BO1.5 FHG PL",
+        "shg": "SHG PL",
+    }
+    for k, v in aliases.items():
+        if k in t:
+            return v
 
-    # explicit mention match against known outcome columns
-    for col in outcomes:
-        if _normalize(col) in t:
-            return col
+    # direct outcome mention (normalized exact)
+    norm_map = {_normalize(c): c for c in outcomes}
+    for c in outcomes:
+        if _normalize(c) in t:
+            return c
+
+    # looser: if user writes "bo2.5 pl" without spaces etc
+    t_compact = t.replace(" ", "")
+    for c in outcomes:
+        if _normalize(c).replace(" ", "") in t_compact:
+            return c
 
     # pattern like "for X PL"
     m = re.search(r"\bfor\s+(.+?\bpl)\b", t)
     if m:
         guess = m.group(1).strip()
-        # try to align case to known outcomes
-        for col in outcomes:
-            if _normalize(col) == _normalize(guess):
-                return col
-        # fallback exact
+        if _normalize(guess) in norm_map:
+            return norm_map[_normalize(guess)]
         return guess
 
-    # fallback
     return "BTTS PL"
 
 
@@ -434,9 +469,6 @@ def _fmt_num(x: Any) -> str:
 
 
 def _render_rule_spec(spec: Dict[str, Any]) -> str:
-    """
-    spec = {"numeric":[...], "categorical":[...]}
-    """
     parts: List[str] = []
 
     for c in (spec.get("categorical") or []):
@@ -466,19 +498,19 @@ def _render_rule_spec(spec: Dict[str, Any]) -> str:
 
 def _render_distilled_top(result_obj: Dict[str, Any], top_n: int = 3) -> str:
     """
-    Builds a concise markdown summary of distilled strategies.
+    result_obj is the full JSON saved by the worker:
+      { job_id, task_type, params, computed_at, result: {...} }
     """
-    r = ((result_obj or {}).get("result") or {}).get("result") or {}
-    distilled = r.get("distilled") or {}
-    picked = r.get("picked") or {}
+    payload = (result_obj or {}).get("result") or {}
+    distilled = payload.get("distilled") or {}
+    picked = payload.get("picked") or {}
 
     if not distilled or "top_distilled_rules" not in distilled:
         return "No distilled strategies found in this result."
 
-    rules = distilled.get("top_distilled_rules") or []
-    rules = rules[:top_n]
+    rules = (distilled.get("top_distilled_rules") or [])[: max(1, int(top_n))]
 
-    out = []
+    out: List[str] = []
     out.append(f"### ✅ Distilled strategies (top {len(rules)})")
     out.append(f"- **Picked:** `{picked}`")
     base = distilled.get("best_base_model") or {}
@@ -530,22 +562,24 @@ def _log_lab_to_sheet(job_id: str, result_obj: Dict[str, Any], tags: str):
     Keep logs small: baselines + top distilled rules summary.
     """
     try:
-        r = ((result_obj or {}).get("result") or {}).get("result") or {}
-        if not r:
+        payload = (result_obj or {}).get("result") or {}
+        if not payload:
             return
 
-        distilled = (r.get("distilled") or {}).get("top_distilled_rules") or []
-        top3 = distilled[:3]
+        picked = payload.get("picked") or {}
+        pl_col = str((picked.get("pl_column") or "")).strip()
+
+        distilled_rules = ((payload.get("distilled") or {}).get("top_distilled_rules") or [])[:3]
 
         note = {
             "ts": datetime.utcnow().isoformat(),
             "kind": "pl_lab_result",
             "job_id": job_id,
-            "picked": r.get("picked"),
-            "sheet_enforcement": r.get("sheet_enforcement"),
-            "splits": r.get("splits"),
-            "features": r.get("features"),
-            "baseline": r.get("baseline"),
+            "picked": picked,
+            "sheet_enforcement": payload.get("sheet_enforcement"),
+            "splits": payload.get("splits"),
+            "features": payload.get("features"),
+            "baseline": payload.get("baseline"),
             "top_distilled_rules": [
                 {
                     "spec": rr.get("spec"),
@@ -556,11 +590,16 @@ def _log_lab_to_sheet(job_id: str, result_obj: Dict[str, Any], tags: str):
                     "gap_train_minus_val": rr.get("gap_train_minus_val"),
                     "samples": rr.get("samples"),
                 }
-                for rr in top3
+                for rr in distilled_rules
             ],
         }
 
-        _run_tool("append_research_note", {"note": json.dumps(note, ensure_ascii=False), "tags": tags})
+        tag_bits = [t.strip() for t in (tags or "").split(",") if t.strip()]
+        if pl_col:
+            tag_bits.append(pl_col.replace(" ", "_"))
+        final_tags = ",".join(tag_bits)
+
+        _run_tool("append_research_note", {"note": json.dumps(note, ensure_ascii=False), "tags": final_tags})
     except Exception:
         return
 
@@ -573,12 +612,13 @@ def _maybe_start_pl_lab(user_text: str) -> bool:
     Autopilot shortcut:
       "Spend the next 2 hours building a strategy for BTTS PL"
       "Build a strategy for BO 2.5 PL for 60 minutes"
+      "Build a strategy for over 2.5 for 90 minutes"
     """
     if st.session_state.agent_mode != "autopilot":
         return False
 
     t = _normalize(user_text)
-    wants_strategy = ("strategy" in t) or ("build" in t and "pl" in t)
+    wants_strategy = ("strategy" in t) or ("build" in t and ("pl" in t or "btts" in t or "over" in t or "shg" in t))
     if not wants_strategy:
         return False
 
