@@ -4,10 +4,8 @@ import os
 import json
 import uuid
 import re
-import time
-import hashlib
 from datetime import datetime
-from typing import Any, Dict, List, Set, Optional
+from typing import Any, Dict, List, Set
 
 import streamlit as st
 from openai import OpenAI
@@ -37,6 +35,8 @@ DEFAULT_STORAGE_PATH = os.getenv("DATA_STORAGE_PATH") or st.secrets.get("DATA_ST
 DEFAULT_RESULTS_BUCKET = os.getenv("RESULTS_BUCKET") or st.secrets.get("RESULTS_BUCKET", "football-results")
 
 MAX_MESSAGES_TO_KEEP = int(os.getenv("MAX_CHAT_MESSAGES") or st.secrets.get("MAX_CHAT_MESSAGES", 220))
+
+UUID_RE = re.compile(r"\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b", re.I)
 
 
 # ============================================================
@@ -146,8 +146,6 @@ TOOLS = [
                     "pl_column": {"type": "string"},
                     "do_hyperopt": {"type": "boolean"},
                     "hyperopt_iter": {"type": "integer"},
-                    "top_fracs": {"type": "array", "items": {"type": "number"}},
-                    "top_n": {"type": "integer"},
                 },
                 "required": [],
             },
@@ -161,37 +159,6 @@ TOOLS = [
             "parameters": {"type": "object", "properties": {"duration_minutes": {"type": "integer"}}, "required": []},
         },
     },
-
-    # NEW primitives for autonomous iteration
-    {
-        "type": "function",
-        "function": {
-            "name": "start_feature_profile",
-            "description": "Start feature profiling job (missingness, cardinality, drift by month, ID duplication stats).",
-            "parameters": {
-                "type": "object",
-                "properties": {"duration_minutes": {"type": "integer"}},
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "start_rule_validate",
-            "description": "Validate a proposed explicit rule spec on time splits + monthly stability. spec includes numeric/categorical constraints.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "duration_minutes": {"type": "integer"},
-                    "pl_column": {"type": "string"},
-                    "spec": {"type": "object"},
-                },
-                "required": ["spec"],
-            },
-        },
-    },
-
     {
         "type": "function",
         "function": {"name": "list_chats", "description": "List saved chat sessions.", "parameters": {"type": "object", "properties": {"limit": {"type": "integer"}}, "required": []}},
@@ -229,23 +196,21 @@ TOOLS = [
 
 SYSTEM_PROMPT = """You are FootballResearcher — an autonomous strategy R&D agent.
 
-NON-NEGOTIABLE SOURCE OF TRUTH (THE BIBLE)
+NON-NEGOTIABLE SOURCE OF TRUTH
 - You MUST use Google Sheet tabs via get_research_context():
   dataset_overview, research_rules, column_definitions, evaluation_framework, research_state, research_memory.
 - Treat research_rules as ENFORCEMENT rules, not suggestions.
-- Treat column_definitions.role as the ground truth for feature-vs-outcome usage.
-- PL columns are OUTCOMES ONLY. Never use any PL column as a feature.
+- The worker receives enforcement_config from research_state; you must respect it.
 
 MISSION / PURPOSE
-- Discover strategies that are REPEATABLE on future matches (out-of-sample).
-- Avoid overfitting and leakage (dataset is post-scan; risk is high).
-- You are judged on out-of-sample stability and risk:
+- Discover strategies that are REPEATABLE on future matches.
+- Avoid overfitting and leakage. You are judged on out-of-sample stability and risk:
   - P&L, ROI
-  - max drawdown and longest losing streak (in POINTS) using ID-grouping
+  - max drawdown and longest losing streak (in POINTS)
 - Output strategies as explicit filters:
   - Numeric ranges + categorical constraints
-  - With minimum sample sizes on train/val/test and unique IDs where possible
-- You MUST separate discovery (train/val) from final confirmation (test). Never tune on test.
+  - With minimum sample sizes on train/val/test (and unique IDs where possible)
+- You MUST separate discovery (train/val) from final confirmation (test).
 """
 
 
@@ -317,12 +282,6 @@ if "loaded_for_sid" not in st.session_state or st.session_state.loaded_for_sid !
 if "agent_mode" not in st.session_state:
     st.session_state.agent_mode = "chat"
 
-if "bible_hash" not in st.session_state:
-    st.session_state.bible_hash = ""
-
-if "last_context" not in st.session_state:
-    st.session_state.last_context = None
-
 
 # ============================================================
 # Sanitise history for OpenAI
@@ -376,7 +335,7 @@ def _sanitize_history_for_llm(messages: List[Dict[str, Any]]) -> List[Dict[str, 
 
 
 # ============================================================
-# LLM call helpers
+# LLM call
 # ============================================================
 def _call_llm(messages: List[Dict[str, Any]]):
     mode = st.session_state.agent_mode
@@ -398,16 +357,6 @@ def _call_llm(messages: List[Dict[str, Any]]):
     return client.chat.completions.create(model=MODEL, messages=safe_messages, tools=TOOLS, tool_choice="auto")
 
 
-def _call_llm_tools(messages: List[Dict[str, Any]]):
-    safe_messages = _sanitize_history_for_llm(messages)
-    return client.chat.completions.create(model=MODEL, messages=safe_messages, tools=TOOLS, tool_choice="auto")
-
-
-def _call_llm_no_tools(messages: List[Dict[str, Any]]):
-    safe_messages = _sanitize_history_for_llm(messages)
-    return client.chat.completions.create(model=MODEL, messages=safe_messages, tools=TOOLS, tool_choice="none")
-
-
 # ============================================================
 # Parsing helpers
 # ============================================================
@@ -417,8 +366,13 @@ def _minutes_from_text(t: str, default_minutes: int = 30) -> int:
       - "30", "for 30", "30m", "30 min", "30 minutes"
       - "2h", "2 hours", "next 2 hours"
       - "0.5h"
+    Also fixes common typo: "1o minutes" -> "10 minutes".
     """
-    s = (t or "").lower().strip()
+    s = (t or "").strip()
+
+    # Fix common o/0 typo: "1o"->"10", "2o"->"20" etc.
+    s = re.sub(r"\b(\d)\s*[oO]\b", r"\g<1>0", s)
+    s = s.lower().strip()
 
     # hours (float)
     m = re.search(r"\b(\d+(?:\.\d+)?)\s*(h|hr|hrs|hour|hours)\b", s)
@@ -464,15 +418,15 @@ def _resolve_pl_column(user_text: str, ctx: Dict[str, Any]) -> str:
         "over 2.5": "BO 2.5 PL",
         "o2.5": "BO 2.5 PL",
         "bo 2.5": "BO 2.5 PL",
+        "bo2.5": "BO 2.5 PL",
         "fh over 1.5": "BO1.5 FHG PL",
         "shg": "SHG PL",
-        "lu1.5": "LU1.5 PL",
-        "lfghu0.5": "LFGHU0.5 PL",
     }
     for k, v in aliases.items():
         if k in t:
             return v
 
+    # match against outcome columns
     def nn(x: str) -> str:
         return _normalize(x).replace(" ", "")
 
@@ -482,76 +436,6 @@ def _resolve_pl_column(user_text: str, ctx: Dict[str, Any]) -> str:
             return col
 
     return "BTTS PL"
-
-
-# ============================================================
-# Bible injection (Sheet as source-of-truth)
-# ============================================================
-def _hash_ctx(ctx: Dict[str, Any]) -> str:
-    try:
-        payload = json.dumps(ctx, sort_keys=True, ensure_ascii=False).encode("utf-8")
-        return hashlib.sha256(payload).hexdigest()[:16]
-    except Exception:
-        return str(uuid.uuid4())[:8]
-
-
-def _bible_message(ctx: Dict[str, Any]) -> str:
-    """
-    This is what forces GPT to *actually see and use* the sheet data.
-    Keep it structured and explicit.
-    """
-    ov = ctx.get("dataset_overview") or {}
-    rules_rows = ctx.get("research_rules") or []
-    col_defs = ctx.get("column_definitions") or []
-    eval_fw = ctx.get("evaluation_framework") or {}
-    derived = ctx.get("derived") or {}
-
-    # Compact rule list
-    rules = []
-    for r in rules_rows:
-        txt = (r.get("rule") or "").strip()
-        if txt:
-            rules.append(txt)
-
-    # Column roles summary (compact)
-    roles = {}
-    for r in col_defs:
-        c = (r.get("column") or "").strip()
-        role = (r.get("role") or "").strip()
-        if c and role:
-            roles[c] = role
-
-    bible = {
-        "dataset_overview": ov,
-        "research_rules": rules,
-        "column_roles": roles,
-        "evaluation_framework": eval_fw,
-        "derived_constraints": derived,
-        "ts": ctx.get("ts"),
-    }
-
-    return (
-        "📜 BIBLE (Google Sheets) — Source of truth. You MUST follow these.\n"
-        "Here is the machine-readable governance payload:\n"
-        f"```json\n{json.dumps(bible, ensure_ascii=False, indent=2)[:14000]}\n```"
-    )
-
-
-def _ensure_bible_in_context(force: bool = False):
-    """
-    In autopilot mode, always inject the sheet context as a visible message,
-    but only when it changes (hash differs) to avoid bloating history.
-    """
-    if st.session_state.agent_mode != "autopilot":
-        return
-
-    ctx = _run_tool("get_research_context", {"limit_notes": 30})
-    st.session_state.last_context = ctx
-
-    h = _hash_ctx(ctx)
-    if force or (h != st.session_state.bible_hash):
-        st.session_state.bible_hash = h
-        st.session_state.messages.append({"role": "assistant", "content": _bible_message(ctx)})
 
 
 # ============================================================
@@ -607,6 +491,8 @@ def _render_distilled_top(result_obj: Dict[str, Any], top_n: int = 3) -> str:
     out.append(f"- **Picked:** `{picked}`")
     base = distilled.get("best_base_model") or {}
     out.append(f"- **Base model:** `{base}`")
+    enf = payload.get("sheet_enforcement") or {}
+    out.append(f"- **Enforcement:** `{enf}`")
     out.append("")
 
     for i, rr in enumerate(rules, start=1):
@@ -676,7 +562,6 @@ def _log_lab_to_sheet(job_id: str, result_obj: Dict[str, Any], tags: str):
                     "test_game_level": rr.get("test_game_level"),
                     "gap_train_minus_val": rr.get("gap_train_minus_val"),
                     "samples": rr.get("samples"),
-                    "monthly_test": rr.get("monthly_test"),
                 }
                 for rr in distilled_rules
             ],
@@ -693,133 +578,19 @@ def _log_lab_to_sheet(job_id: str, result_obj: Dict[str, Any], tags: str):
 
 
 # ============================================================
-# Autonomous research loop (budgeted multi-step)
-# ============================================================
-def _run_autonomous_research_loop(user_text: str, budget_minutes: int, max_rounds: int = 80):
-    budget_minutes = max(5, min(int(budget_minutes), 360))
-    deadline = time.time() + budget_minutes * 60
-
-    st.session_state.messages.append({"role": "user", "content": user_text})
-    st.session_state.messages = _trim_messages(st.session_state.messages)
-
-    # Force-inject the Bible before loop starts
-    _ensure_bible_in_context(force=True)
-    ctx = st.session_state.last_context or {}
-    st.session_state.messages.append({"role": "assistant", "content": _context_snapshot_text(ctx)})
-
-    st.session_state.messages.append(
-        {
-            "role": "assistant",
-            "content": (
-                "🧠 AUTONOMOUS RESEARCH LOOP START\n"
-                f"- Time budget minutes: {budget_minutes}\n"
-                "- You must iteratively: run jobs → interpret → decide next job → refine.\n"
-                "- Always use TRAIN/VAL to discover and tune, and TEST only for final confirmation.\n"
-                "- Strategies MUST be explicit rules (numeric ranges + categorical constraints) with samples + risk.\n"
-                "- Use feature_profile and rule_validate when helpful.\n"
-                "- Log material findings to research_memory.\n"
-                "- If remaining time < 120s, stop tools and produce final strategies.\n"
-            ),
-        }
-    )
-
-    rounds = 0
-    while rounds < max_rounds and time.time() < deadline:
-        rounds += 1
-        remaining_s = int(deadline - time.time())
-
-        # Keep Bible fresh (if sheet changed mid-run)
-        _ensure_bible_in_context(force=False)
-
-        st.session_state.messages.append(
-            {"role": "assistant", "content": f"[Loop clock] remaining_seconds={remaining_s}. If < 120: produce final write-up, no more tools."}
-        )
-        st.session_state.messages = _trim_messages(st.session_state.messages)
-
-        resp = _call_llm_tools(st.session_state.messages)
-        msg = resp.choices[0].message
-        tool_calls = getattr(msg, "tool_calls", None)
-
-        assistant_msg: Dict[str, Any] = {"role": "assistant", "content": msg.content or ""}
-        if tool_calls:
-            assistant_msg["tool_calls"] = [
-                {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
-                for tc in tool_calls
-            ]
-        st.session_state.messages.append(assistant_msg)
-
-        # If model stops calling tools, exit loop
-        if not tool_calls:
-            break
-
-        # Execute tools with safety clamps
-        for tc in tool_calls:
-            name = tc.function.name
-            args = json.loads(tc.function.arguments or "{}")
-
-            # Clamp waits to avoid wasting the whole budget
-            if name == "wait_for_job":
-                args["timeout_s"] = min(int(args.get("timeout_s") or 60), max(5, min(120, int(deadline - time.time()))))
-                args["poll_s"] = min(int(args.get("poll_s") or 5), 10)
-
-            # Keep iterative jobs short so we can loop
-            if name in ("start_pl_lab", "start_feature_profile", "start_rule_validate"):
-                remaining_min = max(1, int((deadline - time.time()) // 60))
-                args["duration_minutes"] = min(int(args.get("duration_minutes") or 8), max(5, min(12, remaining_min)))
-
-            out = _run_tool(name, args)
-            st.session_state.messages.append({"role": "tool", "tool_call_id": tc.id, "content": json.dumps(out, ensure_ascii=False)})
-
-        st.session_state.messages = _trim_messages(st.session_state.messages)
-
-    # Final answer — force no tools
-    st.session_state.messages.append(
-        {
-            "role": "assistant",
-            "content": (
-                "🧾 FINAL OUTPUT NOW.\n"
-                "Produce your best 1–3 strategies as explicit rules.\n"
-                "For each: train/val/test samples + ROI + total PL + max drawdown + losing streak (by ID) + monthly stability.\n"
-                "If nothing is robust, say so and explain what failed and what to test next.\n"
-            ),
-        }
-    )
-
-    resp_final = _call_llm_no_tools(st.session_state.messages)
-    msg_final = resp_final.choices[0].message
-    st.session_state.messages.append({"role": "assistant", "content": msg_final.content or ""})
-
-    _persist_chat()
-
-
-# ============================================================
 # Autopilot intercepts
 # ============================================================
-def _maybe_run_loop(user_text: str) -> bool:
-    if st.session_state.agent_mode != "autopilot":
-        return False
-    t = _normalize(user_text)
-    wants_loop = any(k in t for k in ["research loop", "autonomous", "iterate", "run loop", "run research"])
-    if not wants_loop:
-        return False
-
-    minutes = _minutes_from_text(user_text, default_minutes=30)
-    _run_autonomous_research_loop(user_text, budget_minutes=minutes, max_rounds=80)
-    return True
-
-
 def _maybe_start_pl_lab(user_text: str) -> bool:
     if st.session_state.agent_mode != "autopilot":
         return False
 
     t = _normalize(user_text)
-    wants_strategy = ("strategy" in t) or ("build" in t and ("pl" in t or "btts" in t or "over" in t or "shg" in t))
+    wants_strategy = ("strategy" in t) or ("build" in t and ("pl" in t or "btts" in t or "over" in t or "shg" in t or "bo2.5" in t))
     if not wants_strategy:
         return False
 
-    # ensure Bible is in model context (and we store ctx in state)
-    _ensure_bible_in_context(force=True)
-    ctx = st.session_state.last_context or {}
+    ctx = _run_tool("get_research_context", {"limit_notes": 10})
+    st.session_state.last_context = ctx
 
     minutes = _minutes_from_text(user_text, default_minutes=30)
     do_hyperopt = any(k in t for k in ["hyperopt", "grid", "cv", "bayes", "optuna"])
@@ -858,51 +629,60 @@ def _maybe_start_pl_lab(user_text: str) -> bool:
     return True
 
 
-def _maybe_handle_job_queries(user_text: str) -> bool:
-    t = (user_text or "").strip().lower()
+def _extract_uuid_from_text(t: str) -> str:
+    m = UUID_RE.search(t or "")
+    return (m.group(1) if m else "").lower().strip()
 
-    m = re.search(r"\bcheck job\b\s+([0-9a-f\-]{10,})", t)
-    if m:
-        job_id = m.group(1)
-        job = _run_tool("get_job", {"job_id": job_id})
+
+def _maybe_handle_job_queries(user_text: str) -> bool:
+    t = (user_text or "").strip()
+
+    # Check job <uuid>
+    if re.search(r"\bcheck job\b", t, re.I):
+        job_id = _extract_uuid_from_text(t)
         st.session_state.messages.append({"role": "user", "content": user_text})
+        if not job_id:
+            st.session_state.messages.append({"role": "assistant", "content": "❌ I need the full UUID (36 chars). Example: `Check job 123e4567-e89b-12d3-a456-426614174000`"})
+            _persist_chat()
+            return True
+        job = _run_tool("get_job", {"job_id": job_id})
         st.session_state.messages.append({"role": "assistant", "content": f"```json\n{json.dumps(job, indent=2)}\n```"})
         _persist_chat()
         return True
 
-    m2 = re.search(r"\bshow results\b.*\b([0-9a-f\-]{10,})", t)
-    if m2:
-        job_id = m2.group(1)
+    # Show results for <uuid>
+    if re.search(r"\bshow results\b", t, re.I):
+        job_id = _extract_uuid_from_text(t)
+        st.session_state.messages.append({"role": "user", "content": user_text})
+        if not job_id:
+            st.session_state.messages.append({"role": "assistant", "content": "❌ I need the full UUID (36 chars). Example: `Show results for 123e4567-e89b-12d3-a456-426614174000`"})
+            _persist_chat()
+            return True
 
-        waited = _run_tool("wait_for_job", {"job_id": job_id, "timeout_s": 1, "poll_s": 1, "auto_download": False})
+        waited = _run_tool("wait_for_job", {"job_id": job_id, "timeout_s": 10, "poll_s": 2, "auto_download": False})
         job = waited.get("job") or {}
         rp = job.get("result_path")
         params = job.get("params") or {}
         bucket = (params.get("_results_bucket") or DEFAULT_RESULTS_BUCKET).strip()
 
-        st.session_state.messages.append({"role": "user", "content": user_text})
-
         if not rp:
-            st.session_state.messages.append({"role": "assistant", "content": f"No result_path yet.\n```json\n{json.dumps(job, indent=2)}\n```"})
+            st.session_state.messages.append({"role": "assistant", "content": f"No result_path yet (still running).\n```json\n{json.dumps(job, indent=2)}\n```"})
             _persist_chat()
             return True
 
         res = _run_tool("download_result", {"bucket": bucket, "result_path": rp})
         result_obj = res.get("result") or {}
 
-        task_type = (result_obj.get("task_type") or "").strip()
+        st.session_state.messages.append({"role": "assistant", "content": _render_distilled_top(result_obj, top_n=3)})
+        st.session_state.messages.append({"role": "assistant", "content": f"```json\n{json.dumps(result_obj, indent=2)[:12000]}\n```"})
 
-        if task_type in ("pl_lab", "btts_lab"):
-            st.session_state.messages.append({"role": "assistant", "content": _render_distilled_top(result_obj, top_n=3)})
-            try:
+        try:
+            task_type = (result_obj.get("task_type") or "")
+            if task_type in ("pl_lab", "btts_lab"):
                 _log_lab_to_sheet(job_id, result_obj, tags="pl_lab,ml,distilled,autopilot")
-            except Exception:
-                pass
-        else:
-            st.session_state.messages.append({"role": "assistant", "content": f"### Result for `{task_type}`\n```json\n{json.dumps(result_obj, indent=2)[:14000]}\n```"})
+        except Exception:
+            pass
 
-        # keep raw too (truncated)
-        st.session_state.messages.append({"role": "assistant", "content": f"```json\n{json.dumps(result_obj, indent=2)[:14000]}\n```"})
         _persist_chat()
         return True
 
@@ -911,15 +691,10 @@ def _maybe_handle_job_queries(user_text: str) -> bool:
 
 def _chat_with_tools(user_text: str, max_rounds: int = 6):
     if st.session_state.agent_mode == "autopilot":
-        if _maybe_run_loop(user_text):
-            return
         if _maybe_start_pl_lab(user_text):
             return
         if _maybe_handle_job_queries(user_text):
             return
-
-        # For normal autopilot chat, inject Bible once (if changed)
-        _ensure_bible_in_context(force=False)
 
     st.session_state.messages.append({"role": "user", "content": user_text})
     st.session_state.messages = _trim_messages(st.session_state.messages)
@@ -979,8 +754,6 @@ with st.sidebar:
         _set_session(new_id)
         st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         st.session_state.loaded_for_sid = new_id
-        st.session_state.bible_hash = ""
-        st.session_state.last_context = None
         _persist_chat(title=f"Session {new_id[:8]}")
         st.rerun()
 
@@ -1007,8 +780,6 @@ with st.sidebar:
     if options[chosen]["session_id"] != _sid():
         _set_session(options[chosen]["session_id"])
         st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-        st.session_state.bible_hash = ""
-        st.session_state.last_context = None
         _try_load_chat(st.session_state.session_id)
         st.rerun()
 
