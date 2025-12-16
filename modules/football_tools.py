@@ -21,7 +21,6 @@ try:
 except Exception:
     StorageException = Exception
 
-
 # ============================================================
 # Google Sheets tabs (agreed names)
 # ============================================================
@@ -40,10 +39,8 @@ TAB_COLUMN_DEFS = "column_definitions"
 TAB_RESEARCH_STATE = "research_state"
 TAB_EVAL_FRAMEWORK = "evaluation_framework"
 
-
 def _now_iso() -> str:
     return datetime.utcnow().isoformat()
-
 
 # ============================================================
 # Google Sheets helpers (fault tolerant)
@@ -56,7 +53,6 @@ def _gs_creds() -> Credentials:
     data = json.loads(raw) if isinstance(raw, str) else raw
     return Credentials.from_service_account_info(data, scopes=SCOPES)
 
-
 def _sheet_url() -> str:
     url = st.secrets.get("FOOTBALL_MEMORY_SHEET_URL") or os.getenv("FOOTBALL_MEMORY_SHEET_URL") or SHEET_URL_DEFAULT
     url = (url or "").strip()
@@ -64,12 +60,10 @@ def _sheet_url() -> str:
         raise RuntimeError("Missing FOOTBALL_MEMORY_SHEET_URL in Streamlit secrets/env.")
     return url
 
-
 @st.cache_resource(show_spinner=False)
 def _sh_cached():
     gc = gspread.authorize(_gs_creds())
     return gc.open_by_url(_sheet_url())
-
 
 def _ws(name: str):
     sh = _sh_cached()
@@ -78,13 +72,11 @@ def _ws(name: str):
     except WorksheetNotFound:
         raise RuntimeError(f"WorksheetNotFound: '{name}'. Create this tab in the Google Sheet.")
 
-
 def _safe_get_all_values(tab: str) -> List[List[str]]:
     try:
         return _ws(tab).get_all_values()
     except Exception:
         return []
-
 
 def _ensure_header(tab: str, header: List[str]) -> Dict[str, Any]:
     try:
@@ -101,11 +93,9 @@ def _ensure_header(tab: str, header: List[str]) -> Dict[str, Any]:
                 return {"ok": True, "changed": True, "inserted": True}
             except Exception:
                 return {"ok": True, "changed": False, "note": "Header short but cannot insert (possibly protected)."}
-
         return {"ok": True, "changed": False}
     except Exception as e:
         return {"ok": False, "error": str(e)}
-
 
 def _read_kv_tab(tab_name: str) -> Dict[str, str]:
     vals = _safe_get_all_values(tab_name)
@@ -120,7 +110,6 @@ def _read_kv_tab(tab_name: str) -> Dict[str, str]:
         if k:
             out[k] = v
     return out
-
 
 def _read_table_tab(tab_name: str) -> List[Dict[str, str]]:
     vals = _safe_get_all_values(tab_name)
@@ -137,24 +126,19 @@ def _read_table_tab(tab_name: str) -> List[Dict[str, str]]:
         rows.append(d)
     return rows
 
-
 # ---------------- Public getters ----------------
 
 def get_dataset_overview() -> Dict[str, Any]:
     return {"tab": TAB_DATASET_OVERVIEW, "data": _read_kv_tab(TAB_DATASET_OVERVIEW)}
 
-
 def get_research_rules() -> Dict[str, Any]:
     return {"tab": TAB_RESEARCH_RULES, "data": _read_table_tab(TAB_RESEARCH_RULES)}
-
 
 def get_column_definitions() -> Dict[str, Any]:
     return {"tab": TAB_COLUMN_DEFS, "data": _read_table_tab(TAB_COLUMN_DEFS)}
 
-
 def get_evaluation_framework() -> Dict[str, Any]:
     return {"tab": TAB_EVAL_FRAMEWORK, "data": _read_table_tab(TAB_EVAL_FRAMEWORK)}
-
 
 def get_recent_research_notes(limit: int = 20) -> Dict[str, Any]:
     vals = _safe_get_all_values(TAB_RESEARCH_MEMORY)
@@ -171,7 +155,6 @@ def get_recent_research_notes(limit: int = 20) -> Dict[str, Any]:
         rows.append(d)
     return {"tab": TAB_RESEARCH_MEMORY, "rows": rows}
 
-
 def append_research_note(note: str, tags: str = "") -> Dict[str, Any]:
     _ensure_header(TAB_RESEARCH_MEMORY, ["timestamp", "note", "tags"])
     try:
@@ -183,17 +166,14 @@ def append_research_note(note: str, tags: str = "") -> Dict[str, Any]:
     except Exception as e:
         return {"ok": False, "error": f"append_research_note failed: {e}"}
 
-
 def get_research_state() -> Dict[str, Any]:
     return {"tab": TAB_RESEARCH_STATE, "data": _read_kv_tab(TAB_RESEARCH_STATE)}
-
 
 def set_research_state(key: str, value: str) -> Dict[str, Any]:
     _ensure_header(TAB_RESEARCH_STATE, ["key", "value"])
     try:
         ws = _ws(TAB_RESEARCH_STATE)
         vals = ws.get_all_values() or []
-
         for idx, row in enumerate(vals[1:], start=2):
             if len(row) >= 1 and (row[0] or "").strip() == key:
                 try:
@@ -208,48 +188,50 @@ def set_research_state(key: str, value: str) -> Dict[str, Any]:
 
         ws.append_row([key, value], value_input_option="RAW")
         return {"ok": True, "key": key, "value": value, "created": True}
-
     except APIError as e:
         return {"ok": False, "error": f"set_research_state APIError: {e}"}
     except Exception as e:
         return {"ok": False, "error": f"set_research_state failed: {e}"}
 
-
 # ============================================================
-# Context fetch + parsing (Bible)
+# Source-of-truth context fetch + derived constraints
 # ============================================================
 
 def _extract_ignored_columns(rules_rows: List[Dict[str, str]]) -> List[str]:
     ignored: List[str] = []
     for r in rules_rows or []:
-        txt = (r.get("rule") or "").strip()
+        txt = (r.get("rule") or r.get("Rule") or "").strip()
         if not txt:
             continue
-        if "ignored completely" in txt.lower():
-            left = txt.split("columns", 1)[0]
-            parts = [p.strip() for p in left.split(",")]
-            for p in parts:
-                if p:
-                    ignored.append(p)
+        low = txt.lower()
+        if "should be ignored" in low or "ignored completely" in low:
+            # quick heuristic: pull backtick-quoted or comma-separated column names if present
+            cols = re.findall(r"`([^`]+)`", txt)
+            if cols:
+                ignored.extend([c.strip() for c in cols if c.strip()])
+                continue
+            if "result" in low:
+                ignored.append("Result")
+            if "home form" in low:
+                ignored.append("HOME FORM")
+    # de-dupe preserve order
     seen = set()
     out = []
     for x in ignored:
-        k = x.lower()
-        if k not in seen:
+        k = x.strip().lower()
+        if k and k not in seen:
             seen.add(k)
             out.append(x)
     return out
 
-
 def _extract_outcome_columns(col_defs: List[Dict[str, str]]) -> List[str]:
     out = []
     for r in col_defs or []:
-        col = (r.get("column") or "").strip()
-        role = (r.get("role") or "").strip().lower()
+        col = (r.get("column") or r.get("Column") or "").strip()
+        role = (r.get("role") or r.get("Role") or "").strip().lower()
         if col and role == "outcome":
             out.append(col)
     return out
-
 
 def get_research_context(limit_notes: int = 20) -> Dict[str, Any]:
     overview = get_dataset_overview().get("data") or {}
@@ -270,13 +252,9 @@ def get_research_context(limit_notes: int = 20) -> Dict[str, Any]:
         "evaluation_framework": eval_fw,
         "research_state": state,
         "recent_notes": notes,
-        "derived": {
-            "ignored_columns": ignored_cols,
-            "outcome_columns": outcome_cols,
-        },
+        "derived": {"ignored_columns": ignored_cols, "outcome_columns": outcome_cols},
         "ts": _now_iso(),
     }
-
 
 # ============================================================
 # Supabase
@@ -290,10 +268,8 @@ def _sb_cached():
         raise RuntimeError("Missing SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY in Streamlit secrets/env.")
     return create_client(url, key)
 
-
 def _sb():
     return _sb_cached()
-
 
 # ============================================================
 # CSV loading (Supabase Storage preferred)
@@ -303,12 +279,10 @@ def _download_from_storage(bucket: str, path: str) -> bytes:
     sb = _sb()
     return sb.storage.from_(bucket).download(path)
 
-
 def _download_from_url(csv_url: str) -> bytes:
     r = requests.get(csv_url, timeout=180)
     r.raise_for_status()
     return r.content
-
 
 def _load_csv(storage_bucket: Optional[str] = None, storage_path: Optional[str] = None, csv_url: Optional[str] = None) -> pd.DataFrame:
     if storage_bucket and storage_path:
@@ -317,27 +291,22 @@ def _load_csv(storage_bucket: Optional[str] = None, storage_path: Optional[str] 
         raw = _download_from_url(csv_url)
     else:
         raise ValueError("Provide either (storage_bucket + storage_path) OR csv_url.")
-
     try:
         text = raw.decode("utf-8")
     except Exception:
         text = raw.decode("latin-1", errors="replace")
-
     return pd.read_csv(StringIO(text), low_memory=False)
-
 
 def load_data_basic(storage_bucket: str = "", storage_path: str = "", csv_url: str = "") -> Dict[str, Any]:
     df = _load_csv(storage_bucket or None, storage_path or None, csv_url or None)
     return {"rows": int(df.shape[0]), "cols": int(df.shape[1]), "head": df.head(5).to_dict(orient="records")}
 
-
 def list_columns(storage_bucket: str = "", storage_path: str = "", csv_url: str = "") -> Dict[str, Any]:
     df = _load_csv(storage_bucket or None, storage_path or None, csv_url or None)
     return {"columns": df.columns.tolist(), "n": int(len(df.columns))}
 
-
 # ============================================================
-# Background jobs (Supabase table + Storage results)
+# Jobs (Supabase table + Storage results)
 # ============================================================
 
 def submit_job(task_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -352,7 +321,6 @@ def submit_job(task_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         return {"error": f"submit_job failed: {e}"}
 
-
 def get_job(job_id: str) -> Dict[str, Any]:
     sb = _sb()
     try:
@@ -364,7 +332,6 @@ def get_job(job_id: str) -> Dict[str, Any]:
     except Exception as e:
         return {"error": f"get_job failed: {e}", "job_id": job_id}
 
-
 def download_result(result_path: str, bucket: str = "") -> Dict[str, Any]:
     sb = _sb()
     b = (bucket or st.secrets.get("RESULTS_BUCKET") or os.getenv("RESULTS_BUCKET") or "football-results").strip()
@@ -374,51 +341,25 @@ def download_result(result_path: str, bucket: str = "") -> Dict[str, Any]:
     except Exception:
         return {"ok": True, "bucket": b, "result_path": result_path, "raw_text": raw.decode("latin-1", errors="replace")}
 
-
 def wait_for_job(job_id: str, timeout_s: int = 300, poll_s: int = 5, auto_download: bool = True) -> Dict[str, Any]:
     deadline = time.time() + int(timeout_s or 300)
     poll = max(1, int(poll_s or 5))
     last_job: Dict[str, Any] = {}
-
     while time.time() < deadline:
         last_job = get_job(job_id)
         if last_job.get("error"):
             return {"status": "error", "error": last_job.get("error"), "job": last_job}
-
         status = (last_job.get("status") or "").lower()
         if status in ("done", "error"):
             out = {"status": status, "job": last_job}
             if status == "done" and auto_download and last_job.get("result_path"):
                 out["result"] = download_result(last_job["result_path"]).get("result")
             return out
-
         time.sleep(poll)
-
     return {"status": "timeout", "job": last_job, "job_id": job_id}
 
-
 # ============================================================
-# Job events (live progress feed)
-# ============================================================
-
-def get_job_events(job_id: str, limit: int = 200) -> Dict[str, Any]:
-    sb = _sb()
-    try:
-        res = (
-            sb.table("job_events")
-            .select("event_id,job_id,ts,level,message,payload")
-            .eq("job_id", job_id)
-            .order("ts", desc=False)
-            .limit(int(limit or 200))
-            .execute()
-        )
-        return {"ok": True, "job_id": job_id, "events": res.data or []}
-    except Exception as e:
-        return {"ok": False, "error": f"get_job_events failed: {e}", "job_id": job_id, "events": []}
-
-
-# ============================================================
-# Lab starters
+# PL lab starter
 # ============================================================
 
 def start_pl_lab(
@@ -427,11 +368,6 @@ def start_pl_lab(
     do_hyperopt: bool = False,
     hyperopt_iter: int = 12,
     enforcement: Optional[Dict[str, Any]] = None,
-    top_fracs: Optional[List[float]] = None,
-    top_n: int = 12,
-    side: Optional[str] = None,
-    odds_col: Optional[str] = None,
-    **_extra_kwargs: Any,
 ) -> Dict[str, Any]:
     ctx = get_research_context(limit_notes=10)
     derived = (ctx.get("derived") or {})
@@ -448,81 +384,15 @@ def start_pl_lab(
         "_results_bucket": results_bucket,
         "pl_column": pl_column,
         "duration_minutes": int(duration_minutes),
-        "top_fracs": top_fracs or [0.05, 0.1, 0.2],
-        "top_n": int(top_n or 12),
+        "top_fracs": [0.05, 0.1, 0.2],
         "do_hyperopt": bool(do_hyperopt),
         "hyperopt_iter": int(hyperopt_iter),
+        "top_n": 12,
         "ignored_columns": ignored_columns,
         "outcome_columns": outcome_columns,
         "enforcement": enforcement or {},
     }
-    if side:
-        params["side"] = side
-    if odds_col:
-        params["odds_col"] = odds_col
-
     return submit_job("pl_lab", params)
-
-
-def start_btts_lab(
-    duration_minutes: int = 300,
-    pl_column: str = "BTTS PL",
-    do_hyperopt: bool = False,
-    hyperopt_iter: int = 12,
-    enforcement: Optional[Dict[str, Any]] = None,
-    top_fracs: Optional[List[float]] = None,
-    top_n: int = 12,
-    **kwargs: Any,
-) -> Dict[str, Any]:
-    return start_pl_lab(
-        duration_minutes=duration_minutes,
-        pl_column=pl_column or "BTTS PL",
-        do_hyperopt=do_hyperopt,
-        hyperopt_iter=hyperopt_iter,
-        enforcement=enforcement,
-        top_fracs=top_fracs,
-        top_n=top_n,
-        **kwargs,
-    )
-
-
-def start_research_campaign(
-    duration_minutes: int = 60,
-    pl_column: str = "BO 2.5 PL",
-    enforcement: Optional[Dict[str, Any]] = None,
-    do_hyperopt: bool = False,
-    hyperopt_iter: int = 20,
-    **kwargs: Any,
-) -> Dict[str, Any]:
-    """
-    Long-running autonomous research loop (worker-side).
-    This is the "world class" orchestrator job that iterates, logs progress, and returns best rules.
-    """
-    ctx = get_research_context(limit_notes=10)
-    derived = (ctx.get("derived") or {})
-    ignored_columns = derived.get("ignored_columns") or []
-    outcome_columns = derived.get("outcome_columns") or []
-
-    storage_bucket = (st.secrets.get("DATA_STORAGE_BUCKET") or os.getenv("DATA_STORAGE_BUCKET") or "football-data").strip()
-    storage_path = (st.secrets.get("DATA_STORAGE_PATH") or os.getenv("DATA_STORAGE_PATH") or "football_ai_NNIA.csv").strip()
-    results_bucket = (st.secrets.get("RESULTS_BUCKET") or os.getenv("RESULTS_BUCKET") or "football-results").strip()
-
-    params = {
-        "storage_bucket": storage_bucket,
-        "storage_path": storage_path,
-        "_results_bucket": results_bucket,
-        "pl_column": pl_column,
-        "duration_minutes": int(duration_minutes),
-        "ignored_columns": ignored_columns,
-        "outcome_columns": outcome_columns,
-        "enforcement": enforcement or {},
-        "do_hyperopt": bool(do_hyperopt),
-        "hyperopt_iter": int(hyperopt_iter),
-        # forward compatible
-        **(kwargs or {}),
-    }
-    return submit_job("research_campaign", params)
-
 
 # ============================================================
 # Chat sessions (Supabase Storage)
@@ -531,10 +401,8 @@ def start_research_campaign(
 def _chat_bucket() -> str:
     return (st.secrets.get("CHAT_BUCKET") or os.getenv("CHAT_BUCKET") or "football-chats").strip()
 
-
 def _chat_index_path() -> str:
     return "sessions/index.json"
-
 
 def _load_chat_index(sb) -> Dict[str, Any]:
     bucket = _chat_bucket()
@@ -543,7 +411,6 @@ def _load_chat_index(sb) -> Dict[str, Any]:
         return json.loads(raw.decode("utf-8"))
     except Exception:
         return {"sessions": []}
-
 
 def _save_chat_index(sb, index: Dict[str, Any]) -> None:
     bucket = _chat_bucket()
@@ -554,7 +421,6 @@ def _save_chat_index(sb, index: Dict[str, Any]) -> None:
         file_options={"content-type": "application/json", "upsert": "true"},
     )
 
-
 def list_chats(limit: int = 200) -> Dict[str, Any]:
     sb = _sb()
     bucket = _chat_bucket()
@@ -563,18 +429,11 @@ def list_chats(limit: int = 200) -> Dict[str, Any]:
     sessions = sessions[-int(limit):] if limit else sessions[-200:]
     return {"ok": True, "bucket": bucket, "sessions": sessions}
 
-
 def save_chat(session_id: str, messages: List[Dict[str, Any]], title: str = "") -> Dict[str, Any]:
     sb = _sb()
     bucket = _chat_bucket()
     path = f"sessions/{session_id}.json"
-
-    payload = json.dumps(
-        {"session_id": session_id, "title": title or "", "messages": messages, "saved_at": _now_iso()},
-        ensure_ascii=False,
-        indent=2,
-    ).encode("utf-8")
-
+    payload = json.dumps({"session_id": session_id, "title": title or "", "messages": messages, "saved_at": _now_iso()}, ensure_ascii=False, indent=2).encode("utf-8")
     try:
         sb.storage.from_(bucket).upload(path=path, file=payload, file_options={"content-type": "application/json", "upsert": "true"})
     except StorageException as e:
@@ -582,6 +441,7 @@ def save_chat(session_id: str, messages: List[Dict[str, Any]], title: str = "") 
     except Exception as e:
         return {"ok": False, "error": f"save_chat failed: {e}", "bucket": bucket, "path": path}
 
+    # update index best-effort
     try:
         idx = _load_chat_index(sb)
         sessions = idx.get("sessions") or []
@@ -599,7 +459,6 @@ def save_chat(session_id: str, messages: List[Dict[str, Any]], title: str = "") 
 
     return {"ok": True, "bucket": bucket, "path": path}
 
-
 def load_chat(session_id: str) -> Dict[str, Any]:
     sb = _sb()
     bucket = _chat_bucket()
@@ -609,7 +468,6 @@ def load_chat(session_id: str) -> Dict[str, Any]:
         return {"ok": True, "bucket": bucket, "path": path, "data": json.loads(raw.decode("utf-8"))}
     except Exception:
         return {"ok": False, "bucket": bucket, "path": path, "data": {}}
-
 
 def rename_chat(session_id: str, title: str) -> Dict[str, Any]:
     sb = _sb()
@@ -631,7 +489,6 @@ def rename_chat(session_id: str, title: str) -> Dict[str, Any]:
         pass
     return {"ok": True, "session_id": session_id, "title": title}
 
-
 def delete_chat(session_id: str) -> Dict[str, Any]:
     sb = _sb()
     bucket = _chat_bucket()
@@ -639,7 +496,6 @@ def delete_chat(session_id: str) -> Dict[str, Any]:
         sb.storage.from_(bucket).remove([f"sessions/{session_id}.json"])
     except Exception:
         pass
-
     idx = _load_chat_index(sb)
     sessions = idx.get("sessions") or []
     idx["sessions"] = [s for s in sessions if s.get("session_id") != session_id]
@@ -647,5 +503,4 @@ def delete_chat(session_id: str) -> Dict[str, Any]:
         _save_chat_index(sb, idx)
     except Exception:
         pass
-
     return {"ok": True, "deleted": True, "session_id": session_id}
