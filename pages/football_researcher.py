@@ -10,6 +10,13 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import streamlit as st
+
+# Optional dependency for non-blocking auto refresh
+try:
+    from streamlit_autorefresh import st_autorefresh
+except Exception:
+    st_autorefresh = None
+
 from openai import OpenAI, BadRequestError
 
 from modules import football_tools as functions
@@ -879,7 +886,15 @@ with st.sidebar:
 # If a job is active, auto-refresh so you get status updates without manual input.
 if st.session_state.get("active_job_id") and st.session_state.get("autopilot_narrate", True):
     st.caption("Autopilot is monitoring a running job. This page will auto-refresh for live updates.")
-    st.autorefresh(interval=5000, key="autopilot_refresh")
+    if st_autorefresh is None:
+        st.info("Live auto-refresh needs the 'streamlit-autorefresh' package. Add it to requirements.txt. For now, use the button below.")
+        if st.button("Refresh now"):
+            st.rerun()
+    (
+        st_autorefresh(interval=5000, key="autopilot_refresh")
+        if st_autorefresh is not None
+        else None
+    )
 
 # Tick once per run
 _autopilot_tick()
