@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import os
 import json
-import time
 import re
+import time
 from datetime import datetime
 from io import StringIO
 from typing import Any, Dict, List, Optional
@@ -234,6 +234,15 @@ def _extract_outcome_columns(col_defs: List[Dict[str, str]]) -> List[str]:
             out.append(col)
     return out
 
+
+def _parse_csv_list(v):
+    if v is None:
+        return []
+    if not isinstance(v, str):
+        v = str(v)
+    parts = [p.strip() for p in v.replace("\n", ",").split(",")]
+    return [p for p in parts if p]
+
 def get_research_context(limit_notes: int = 20) -> Dict[str, Any]:
     overview = get_dataset_overview().get("data") or {}
     rules_rows = get_research_rules().get("data") or []
@@ -253,7 +262,9 @@ def get_research_context(limit_notes: int = 20) -> Dict[str, Any]:
         "evaluation_framework": eval_fw,
         "research_state": state,
         "recent_notes": notes,
-        "derived": {"ignored_columns": ignored_cols, "outcome_columns": outcome_cols},
+        "derived": {
+            "ignored_feature_columns": ignored_feature_columns,
+"ignored_columns": ignored_cols, "outcome_columns": outcome_cols},
         "ts": _now_iso(),
     }
 
