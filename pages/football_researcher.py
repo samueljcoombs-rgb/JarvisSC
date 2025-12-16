@@ -5,8 +5,9 @@ import json
 import uuid
 import re
 import time
+import hashlib
 from datetime import datetime
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Set, Optional
 
 import streamlit as st
 from openai import OpenAI
@@ -145,6 +146,8 @@ TOOLS = [
                     "pl_column": {"type": "string"},
                     "do_hyperopt": {"type": "boolean"},
                     "hyperopt_iter": {"type": "integer"},
+                    "top_fracs": {"type": "array", "items": {"type": "number"}},
+                    "top_n": {"type": "integer"},
                 },
                 "required": [],
             },
@@ -158,18 +161,16 @@ TOOLS = [
             "parameters": {"type": "object", "properties": {"duration_minutes": {"type": "integer"}}, "required": []},
         },
     },
-    # NEW: Small primitives for autonomous iteration
+
+    # NEW primitives for autonomous iteration
     {
         "type": "function",
         "function": {
             "name": "start_feature_profile",
-            "description": "Start a feature profiling job (missingness, cardinality, time-window stability summary).",
+            "description": "Start feature profiling job (missingness, cardinality, drift by month, ID duplication stats).",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "duration_minutes": {"type": "integer"},
-                    "pl_column": {"type": "string"},
-                },
+                "properties": {"duration_minutes": {"type": "integer"}},
                 "required": [],
             },
         },
@@ -178,7 +179,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "start_rule_validate",
-            "description": "Validate a proposed explicit rule spec (numeric ranges + categorical constraints) on train/val/test with risk + stability.",
+            "description": "Validate a proposed explicit rule spec on time splits + monthly stability. spec includes numeric/categorical constraints.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -190,6 +191,7 @@ TOOLS = [
             },
         },
     },
+
     {
         "type": "function",
         "function": {"name": "list_chats", "description": "List saved chat sessions.", "parameters": {"type": "object", "properties": {"limit": {"type": "integer"}}, "required": []}},
@@ -231,26 +233,19 @@ NON-NEGOTIABLE SOURCE OF TRUTH (THE BIBLE)
 - You MUST use Google Sheet tabs via get_research_context():
   dataset_overview, research_rules, column_definitions, evaluation_framework, research_state, research_memory.
 - Treat research_rules as ENFORCEMENT rules, not suggestions.
-- You MUST read recent research_memory before starting new analysis.
-- You MUST use derived.enforcement limits (min samples, max gaps, risk limits) when choosing/validating strategies.
+- Treat column_definitions.role as the ground truth for feature-vs-outcome usage.
+- PL columns are OUTCOMES ONLY. Never use any PL column as a feature.
 
 MISSION / PURPOSE
-- Discover strategies that are REPEATABLE on future matches.
-- The dataset is POST-SCAN. Each row = the historical outcome of a scan condition, NOT a match/bet.
-- PL columns are OUTCOMES ONLY: never use PL columns (or proxies) as predictive features.
-- NO GAMES is an aggregated count: must NOT be summed across rows; treat carefully.
-- You are judged on out-of-sample stability and risk (points):
-  - P&L and ROI
-  - max drawdown and longest losing streak (by ID aggregation)
+- Discover strategies that are REPEATABLE on future matches (out-of-sample).
+- Avoid overfitting and leakage (dataset is post-scan; risk is high).
+- You are judged on out-of-sample stability and risk:
+  - P&L, ROI
+  - max drawdown and longest losing streak (in POINTS) using ID-grouping
 - Output strategies as explicit filters:
-  - Numeric ranges + categorical constraints (MODE/MARKET/DRIFT etc.)
+  - Numeric ranges + categorical constraints
   - With minimum sample sizes on train/val/test and unique IDs where possible
-
-VALIDATION DISCIPLINE
-- Always time-split: train on earlier data; validate on later; final test untouched.
-- Never tune thresholds using test.
-- Prefer simple, stable strategies over complex, fragile ones.
-- Log significant findings using append_research_note.
+- You MUST separate discovery (train/val) from final confirmation (test). Never tune on test.
 """
 
 
@@ -322,6 +317,12 @@ if "loaded_for_sid" not in st.session_state or st.session_state.loaded_for_sid !
 if "agent_mode" not in st.session_state:
     st.session_state.agent_mode = "chat"
 
+if "bible_hash" not in st.session_state:
+    st.session_state.bible_hash = ""
+
+if "last_context" not in st.session_state:
+    st.session_state.last_context = None
+
 
 # ============================================================
 # Sanitise history for OpenAI
@@ -375,7 +376,7 @@ def _sanitize_history_for_llm(messages: List[Dict[str, Any]]) -> List[Dict[str, 
 
 
 # ============================================================
-# LLM calls
+# LLM call helpers
 # ============================================================
 def _call_llm(messages: List[Dict[str, Any]]):
     mode = st.session_state.agent_mode
@@ -484,6 +485,76 @@ def _resolve_pl_column(user_text: str, ctx: Dict[str, Any]) -> str:
 
 
 # ============================================================
+# Bible injection (Sheet as source-of-truth)
+# ============================================================
+def _hash_ctx(ctx: Dict[str, Any]) -> str:
+    try:
+        payload = json.dumps(ctx, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()[:16]
+    except Exception:
+        return str(uuid.uuid4())[:8]
+
+
+def _bible_message(ctx: Dict[str, Any]) -> str:
+    """
+    This is what forces GPT to *actually see and use* the sheet data.
+    Keep it structured and explicit.
+    """
+    ov = ctx.get("dataset_overview") or {}
+    rules_rows = ctx.get("research_rules") or []
+    col_defs = ctx.get("column_definitions") or []
+    eval_fw = ctx.get("evaluation_framework") or {}
+    derived = ctx.get("derived") or {}
+
+    # Compact rule list
+    rules = []
+    for r in rules_rows:
+        txt = (r.get("rule") or "").strip()
+        if txt:
+            rules.append(txt)
+
+    # Column roles summary (compact)
+    roles = {}
+    for r in col_defs:
+        c = (r.get("column") or "").strip()
+        role = (r.get("role") or "").strip()
+        if c and role:
+            roles[c] = role
+
+    bible = {
+        "dataset_overview": ov,
+        "research_rules": rules,
+        "column_roles": roles,
+        "evaluation_framework": eval_fw,
+        "derived_constraints": derived,
+        "ts": ctx.get("ts"),
+    }
+
+    return (
+        "📜 BIBLE (Google Sheets) — Source of truth. You MUST follow these.\n"
+        "Here is the machine-readable governance payload:\n"
+        f"```json\n{json.dumps(bible, ensure_ascii=False, indent=2)[:14000]}\n```"
+    )
+
+
+def _ensure_bible_in_context(force: bool = False):
+    """
+    In autopilot mode, always inject the sheet context as a visible message,
+    but only when it changes (hash differs) to avoid bloating history.
+    """
+    if st.session_state.agent_mode != "autopilot":
+        return
+
+    ctx = _run_tool("get_research_context", {"limit_notes": 30})
+    st.session_state.last_context = ctx
+
+    h = _hash_ctx(ctx)
+    if force or (h != st.session_state.bible_hash):
+        st.session_state.bible_hash = h
+        st.session_state.messages.append({"role": "assistant", "content": _bible_message(ctx)})
+
+
+# ============================================================
 # Rendering distilled rules (unchanged)
 # ============================================================
 def _fmt_num(x: Any) -> str:
@@ -567,14 +638,9 @@ def _context_snapshot_text(ctx: Dict[str, Any]) -> str:
     enforcement = derived.get("enforcement") or {}
     primary_goal = ov.get("primary_goal", "")
     fmt = ov.get("strategy_output_format", "")
-    row_def = ov.get("row_definition", "")
-    warn = ov.get("analysis_warning", "")
-
     return (
-        f"Context loaded (Sheet Bible).\n"
+        f"Context loaded.\n"
         f"- primary_goal: {primary_goal}\n"
-        f"- row_definition: {row_def}\n"
-        f"- warning: {warn}\n"
         f"- strategy_output_format: {fmt}\n"
         f"- ignored_columns: {ignored}\n"
         f"- outcome_columns: {outcomes}\n"
@@ -610,6 +676,7 @@ def _log_lab_to_sheet(job_id: str, result_obj: Dict[str, Any], tags: str):
                     "test_game_level": rr.get("test_game_level"),
                     "gap_train_minus_val": rr.get("gap_train_minus_val"),
                     "samples": rr.get("samples"),
+                    "monthly_test": rr.get("monthly_test"),
                 }
                 for rr in distilled_rules
             ],
@@ -626,32 +693,32 @@ def _log_lab_to_sheet(job_id: str, result_obj: Dict[str, Any], tags: str):
 
 
 # ============================================================
-# NEW: Autonomous research loop
+# Autonomous research loop (budgeted multi-step)
 # ============================================================
 def _run_autonomous_research_loop(user_text: str, budget_minutes: int, max_rounds: int = 80):
     budget_minutes = max(5, min(int(budget_minutes), 360))
     deadline = time.time() + budget_minutes * 60
 
-    # Add user request once
     st.session_state.messages.append({"role": "user", "content": user_text})
     st.session_state.messages = _trim_messages(st.session_state.messages)
 
-    # Load sheet context immediately (Bible) and inject it to the model
-    ctx = _run_tool("get_research_context", {"limit_notes": 40})
-    st.session_state.last_context = ctx
-
+    # Force-inject the Bible before loop starts
+    _ensure_bible_in_context(force=True)
+    ctx = st.session_state.last_context or {}
     st.session_state.messages.append({"role": "assistant", "content": _context_snapshot_text(ctx)})
+
     st.session_state.messages.append(
         {
             "role": "assistant",
             "content": (
                 "🧠 AUTONOMOUS RESEARCH LOOP START\n"
-                f"- Budget: {budget_minutes} minutes\n"
-                "- You must iterate: run jobs → interpret results → decide next job params.\n"
-                "- Always obey Sheet rules: no leakage, 3-way time split, never tune on test.\n"
-                "- Prefer short jobs so you can iterate multiple times.\n"
-                "- Log significant findings to research_memory.\n"
-                "- When remaining time < 120s, stop tools and write final strategies.\n"
+                f"- Time budget minutes: {budget_minutes}\n"
+                "- You must iteratively: run jobs → interpret → decide next job → refine.\n"
+                "- Always use TRAIN/VAL to discover and tune, and TEST only for final confirmation.\n"
+                "- Strategies MUST be explicit rules (numeric ranges + categorical constraints) with samples + risk.\n"
+                "- Use feature_profile and rule_validate when helpful.\n"
+                "- Log material findings to research_memory.\n"
+                "- If remaining time < 120s, stop tools and produce final strategies.\n"
             ),
         }
     )
@@ -661,20 +728,15 @@ def _run_autonomous_research_loop(user_text: str, budget_minutes: int, max_round
         rounds += 1
         remaining_s = int(deadline - time.time())
 
+        # Keep Bible fresh (if sheet changed mid-run)
+        _ensure_bible_in_context(force=False)
+
         st.session_state.messages.append(
-            {"role": "assistant", "content": f"[Loop clock] Remaining seconds: {remaining_s}. If < 120, start final write-up."}
+            {"role": "assistant", "content": f"[Loop clock] remaining_seconds={remaining_s}. If < 120: produce final write-up, no more tools."}
         )
+        st.session_state.messages = _trim_messages(st.session_state.messages)
 
-        try:
-            resp = _call_llm_tools(st.session_state.messages)
-        except BadRequestError as e:
-            st.error("OpenAI BadRequestError (full details below).")
-            try:
-                st.json(e.response.json())
-            except Exception:
-                st.exception(e)
-            raise
-
+        resp = _call_llm_tools(st.session_state.messages)
         msg = resp.choices[0].message
         tool_calls = getattr(msg, "tool_calls", None)
 
@@ -686,20 +748,21 @@ def _run_autonomous_research_loop(user_text: str, budget_minutes: int, max_round
             ]
         st.session_state.messages.append(assistant_msg)
 
+        # If model stops calling tools, exit loop
         if not tool_calls:
             break
 
-        # Execute tools with guardrails
+        # Execute tools with safety clamps
         for tc in tool_calls:
             name = tc.function.name
             args = json.loads(tc.function.arguments or "{}")
 
-            # Clamp waits to keep loop responsive
+            # Clamp waits to avoid wasting the whole budget
             if name == "wait_for_job":
                 args["timeout_s"] = min(int(args.get("timeout_s") or 60), max(5, min(120, int(deadline - time.time()))))
                 args["poll_s"] = min(int(args.get("poll_s") or 5), 10)
 
-            # Keep job durations short inside the loop for iterative control
+            # Keep iterative jobs short so we can loop
             if name in ("start_pl_lab", "start_feature_profile", "start_rule_validate"):
                 remaining_min = max(1, int((deadline - time.time()) // 60))
                 args["duration_minutes"] = min(int(args.get("duration_minutes") or 8), max(5, min(12, remaining_min)))
@@ -709,20 +772,15 @@ def _run_autonomous_research_loop(user_text: str, budget_minutes: int, max_round
 
         st.session_state.messages = _trim_messages(st.session_state.messages)
 
-        # If nearly out of time, break to final
-        if int(deadline - time.time()) < 90:
-            break
-
-    # Final write-up without tools
+    # Final answer — force no tools
     st.session_state.messages.append(
         {
             "role": "assistant",
             "content": (
                 "🧾 FINAL OUTPUT NOW.\n"
                 "Produce your best 1–3 strategies as explicit rules.\n"
-                "For each: train/val/test sample sizes + ROI + total PL + max drawdown + losing streak (by ID).\n"
-                "Explain why it makes logical sense (not just random), referencing MODE/MARKET/DRIFT/DIFF logic.\n"
-                "If nothing is robust, say so and explain what failed and what to try next."
+                "For each: train/val/test samples + ROI + total PL + max drawdown + losing streak (by ID) + monthly stability.\n"
+                "If nothing is robust, say so and explain what failed and what to test next.\n"
             ),
         }
     )
@@ -740,27 +798,13 @@ def _run_autonomous_research_loop(user_text: str, budget_minutes: int, max_round
 def _maybe_run_loop(user_text: str) -> bool:
     if st.session_state.agent_mode != "autopilot":
         return False
-
     t = _normalize(user_text)
-
-    # Trigger phrases for autonomous multi-step loop
-    wants_loop = any(
-        k in t
-        for k in [
-            "run research loop",
-            "research loop",
-            "autonomous loop",
-            "autonomously",
-            "iterate",
-            "keep iterating",
-            "full loop",
-        ]
-    )
+    wants_loop = any(k in t for k in ["research loop", "autonomous", "iterate", "run loop", "run research"])
     if not wants_loop:
         return False
 
     minutes = _minutes_from_text(user_text, default_minutes=30)
-    _run_autonomous_research_loop(user_text=user_text, budget_minutes=minutes, max_rounds=90)
+    _run_autonomous_research_loop(user_text, budget_minutes=minutes, max_rounds=80)
     return True
 
 
@@ -773,8 +817,9 @@ def _maybe_start_pl_lab(user_text: str) -> bool:
     if not wants_strategy:
         return False
 
-    ctx = _run_tool("get_research_context", {"limit_notes": 10})
-    st.session_state.last_context = ctx
+    # ensure Bible is in model context (and we store ctx in state)
+    _ensure_bible_in_context(force=True)
+    ctx = st.session_state.last_context or {}
 
     minutes = _minutes_from_text(user_text, default_minutes=30)
     do_hyperopt = any(k in t for k in ["hyperopt", "grid", "cv", "bayes", "optuna"])
@@ -845,17 +890,19 @@ def _maybe_handle_job_queries(user_text: str) -> bool:
         res = _run_tool("download_result", {"bucket": bucket, "result_path": rp})
         result_obj = res.get("result") or {}
 
-        # Render distilled strategies if present, otherwise show raw
-        st.session_state.messages.append({"role": "assistant", "content": _render_distilled_top(result_obj, top_n=3)})
-        st.session_state.messages.append({"role": "assistant", "content": f"```json\n{json.dumps(result_obj, indent=2)[:12000]}\n```"})
+        task_type = (result_obj.get("task_type") or "").strip()
 
-        try:
-            task_type = (result_obj.get("task_type") or "")
-            if task_type in ("pl_lab", "btts_lab"):
+        if task_type in ("pl_lab", "btts_lab"):
+            st.session_state.messages.append({"role": "assistant", "content": _render_distilled_top(result_obj, top_n=3)})
+            try:
                 _log_lab_to_sheet(job_id, result_obj, tags="pl_lab,ml,distilled,autopilot")
-        except Exception:
-            pass
+            except Exception:
+                pass
+        else:
+            st.session_state.messages.append({"role": "assistant", "content": f"### Result for `{task_type}`\n```json\n{json.dumps(result_obj, indent=2)[:14000]}\n```"})
 
+        # keep raw too (truncated)
+        st.session_state.messages.append({"role": "assistant", "content": f"```json\n{json.dumps(result_obj, indent=2)[:14000]}\n```"})
         _persist_chat()
         return True
 
@@ -870,6 +917,9 @@ def _chat_with_tools(user_text: str, max_rounds: int = 6):
             return
         if _maybe_handle_job_queries(user_text):
             return
+
+        # For normal autopilot chat, inject Bible once (if changed)
+        _ensure_bible_in_context(force=False)
 
     st.session_state.messages.append({"role": "user", "content": user_text})
     st.session_state.messages = _trim_messages(st.session_state.messages)
@@ -929,6 +979,8 @@ with st.sidebar:
         _set_session(new_id)
         st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         st.session_state.loaded_for_sid = new_id
+        st.session_state.bible_hash = ""
+        st.session_state.last_context = None
         _persist_chat(title=f"Session {new_id[:8]}")
         st.rerun()
 
@@ -955,6 +1007,8 @@ with st.sidebar:
     if options[chosen]["session_id"] != _sid():
         _set_session(options[chosen]["session_id"])
         st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        st.session_state.bible_hash = ""
+        st.session_state.last_context = None
         _try_load_chat(st.session_state.session_id)
         st.rerun()
 
