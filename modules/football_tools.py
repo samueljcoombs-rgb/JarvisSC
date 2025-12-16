@@ -5,7 +5,7 @@ import json
 import time
 from datetime import datetime
 from io import StringIO
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import requests
@@ -216,14 +216,10 @@ def set_research_state(key: str, value: str) -> Dict[str, Any]:
 
 
 # ============================================================
-# One-shot "source of truth" context fetch + parsing
+# Context fetch + parsing (Bible)
 # ============================================================
 
 def _extract_ignored_columns(rules_rows: List[Dict[str, str]]) -> List[str]:
-    """
-    Looks for rules like: 'Result, HOME FORM columns should be ignored completely'
-    Returns normalized column names (as written).
-    """
     ignored: List[str] = []
     for r in rules_rows or []:
         txt = (r.get("rule") or "").strip()
@@ -402,7 +398,27 @@ def wait_for_job(job_id: str, timeout_s: int = 300, poll_s: int = 5, auto_downlo
 
 
 # ============================================================
-# PL lab starter (UPDATED: accepts enforcement/top_fracs/top_n)
+# Job events (live progress feed)
+# ============================================================
+
+def get_job_events(job_id: str, limit: int = 200) -> Dict[str, Any]:
+    sb = _sb()
+    try:
+        res = (
+            sb.table("job_events")
+            .select("event_id,job_id,ts,level,message,payload")
+            .eq("job_id", job_id)
+            .order("ts", desc=False)
+            .limit(int(limit or 200))
+            .execute()
+        )
+        return {"ok": True, "job_id": job_id, "events": res.data or []}
+    except Exception as e:
+        return {"ok": False, "error": f"get_job_events failed: {e}", "job_id": job_id, "events": []}
+
+
+# ============================================================
+# Lab starters
 # ============================================================
 
 def start_pl_lab(
@@ -413,11 +429,10 @@ def start_pl_lab(
     enforcement: Optional[Dict[str, Any]] = None,
     top_fracs: Optional[List[float]] = None,
     top_n: int = 12,
+    side: Optional[str] = None,
+    odds_col: Optional[str] = None,
+    **_extra_kwargs: Any,
 ) -> Dict[str, Any]:
-    """
-    General lab starter for ANY PL column.
-    Uses Sheet-derived enforcement (ignored_columns / outcome_columns).
-    """
     ctx = get_research_context(limit_notes=10)
     derived = (ctx.get("derived") or {})
     ignored_columns = derived.get("ignored_columns") or []
@@ -434,13 +449,18 @@ def start_pl_lab(
         "pl_column": pl_column,
         "duration_minutes": int(duration_minutes),
         "top_fracs": top_fracs or [0.05, 0.1, 0.2],
+        "top_n": int(top_n or 12),
         "do_hyperopt": bool(do_hyperopt),
         "hyperopt_iter": int(hyperopt_iter),
-        "top_n": int(top_n or 12),
         "ignored_columns": ignored_columns,
         "outcome_columns": outcome_columns,
         "enforcement": enforcement or {},
     }
+    if side:
+        params["side"] = side
+    if odds_col:
+        params["odds_col"] = odds_col
+
     return submit_job("pl_lab", params)
 
 
@@ -452,10 +472,8 @@ def start_btts_lab(
     enforcement: Optional[Dict[str, Any]] = None,
     top_fracs: Optional[List[float]] = None,
     top_n: int = 12,
+    **kwargs: Any,
 ) -> Dict[str, Any]:
-    """
-    Backward-compatible wrapper. Uses the same pl_lab worker pathway.
-    """
     return start_pl_lab(
         duration_minutes=duration_minutes,
         pl_column=pl_column or "BTTS PL",
@@ -464,7 +482,46 @@ def start_btts_lab(
         enforcement=enforcement,
         top_fracs=top_fracs,
         top_n=top_n,
+        **kwargs,
     )
+
+
+def start_research_campaign(
+    duration_minutes: int = 60,
+    pl_column: str = "BO 2.5 PL",
+    enforcement: Optional[Dict[str, Any]] = None,
+    do_hyperopt: bool = False,
+    hyperopt_iter: int = 20,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """
+    Long-running autonomous research loop (worker-side).
+    This is the "world class" orchestrator job that iterates, logs progress, and returns best rules.
+    """
+    ctx = get_research_context(limit_notes=10)
+    derived = (ctx.get("derived") or {})
+    ignored_columns = derived.get("ignored_columns") or []
+    outcome_columns = derived.get("outcome_columns") or []
+
+    storage_bucket = (st.secrets.get("DATA_STORAGE_BUCKET") or os.getenv("DATA_STORAGE_BUCKET") or "football-data").strip()
+    storage_path = (st.secrets.get("DATA_STORAGE_PATH") or os.getenv("DATA_STORAGE_PATH") or "football_ai_NNIA.csv").strip()
+    results_bucket = (st.secrets.get("RESULTS_BUCKET") or os.getenv("RESULTS_BUCKET") or "football-results").strip()
+
+    params = {
+        "storage_bucket": storage_bucket,
+        "storage_path": storage_path,
+        "_results_bucket": results_bucket,
+        "pl_column": pl_column,
+        "duration_minutes": int(duration_minutes),
+        "ignored_columns": ignored_columns,
+        "outcome_columns": outcome_columns,
+        "enforcement": enforcement or {},
+        "do_hyperopt": bool(do_hyperopt),
+        "hyperopt_iter": int(hyperopt_iter),
+        # forward compatible
+        **(kwargs or {}),
+    }
+    return submit_job("research_campaign", params)
 
 
 # ============================================================
