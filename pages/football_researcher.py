@@ -4,9 +4,9 @@ import os
 import json
 import uuid
 import re
-import time
+import inspect
 from datetime import datetime
-from typing import Any, Dict, List, Set, Optional, Tuple
+from typing import Any, Dict, List, Set, Optional
 
 import streamlit as st
 from openai import OpenAI
@@ -39,13 +39,19 @@ MAX_MESSAGES_TO_KEEP = int(os.getenv("MAX_CHAT_MESSAGES") or st.secrets.get("MAX
 
 
 # ============================================================
-# Tool runner
+# Tool runner (robust: never TypeError on signature drift)
 # ============================================================
 def _run_tool(name: str, args: Dict[str, Any]) -> Any:
     fn = getattr(functions, name, None)
     if not fn:
         raise RuntimeError(f"Unknown tool: {name}")
-    return fn(**args)
+
+    sig = inspect.signature(fn)
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+        return fn(**(args or {}))
+
+    filtered = {k: v for k, v in (args or {}).items() if k in sig.parameters}
+    return fn(**filtered)
 
 
 def _sid() -> str:
@@ -54,7 +60,6 @@ def _sid() -> str:
 
 # ============================================================
 # Tools schema
-# NOTE: every array must include `items` in JSON schema
 # ============================================================
 TOOLS = [
     {
@@ -101,18 +106,8 @@ TOOLS = [
             "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "csv_url": {"type": "string"}}, "required": []},
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "submit_job",
-            "description": "Submit Modal worker job.",
-            "parameters": {"type": "object", "properties": {"task_type": {"type": "string"}, "params": {"type": "object"}}, "required": ["task_type", "params"]},
-        },
-    },
-    {
-        "type": "function",
-        "function": {"name": "get_job", "description": "Get job status by job_id.", "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]}},
-    },
+    {"type": "function", "function": {"name": "submit_job", "description": "Submit Modal worker job.", "parameters": {"type": "object", "properties": {"task_type": {"type": "string"}, "params": {"type": "object"}}, "required": ["task_type", "params"]}}},
+    {"type": "function", "function": {"name": "get_job", "description": "Get job status by job_id.", "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]}}},
     {
         "type": "function",
         "function": {
@@ -125,14 +120,7 @@ TOOLS = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "download_result",
-            "description": "Download a result JSON from storage by path.",
-            "parameters": {"type": "object", "properties": {"result_path": {"type": "string"}, "bucket": {"type": "string"}}, "required": ["result_path"]},
-        },
-    },
+    {"type": "function", "function": {"name": "download_result", "description": "Download a result JSON from storage by path.", "parameters": {"type": "object", "properties": {"result_path": {"type": "string"}, "bucket": {"type": "string"}}, "required": ["result_path"]}}},
     {
         "type": "function",
         "function": {
@@ -156,43 +144,27 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "start_btts_lab",
-            "description": "Convenience wrapper around start_pl_lab for BTTS PL.",
-            "parameters": {"type": "object", "properties": {"duration_minutes": {"type": "integer"}}, "required": []},
-        },
-    },
-    {
-        "type": "function",
-        "function": {"name": "list_chats", "description": "List saved chat sessions.", "parameters": {"type": "object", "properties": {"limit": {"type": "integer"}}, "required": []}},
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "save_chat",
-            "description": "Save chat session.",
+            "name": "start_research_campaign",
+            "description": "Start autonomous multi-step research campaign (iterates, logs live progress, returns best explicit strategies).",
             "parameters": {
                 "type": "object",
-                "properties": {"session_id": {"type": "string"}, "messages": {"type": "array", "items": {"type": "object"}}, "title": {"type": "string"}},
-                "required": ["session_id", "messages"],
+                "properties": {
+                    "duration_minutes": {"type": "integer"},
+                    "pl_column": {"type": "string"},
+                    "enforcement": {"type": "object"},
+                    "do_hyperopt": {"type": "boolean"},
+                    "hyperopt_iter": {"type": "integer"},
+                },
+                "required": [],
             },
         },
     },
-    {
-        "type": "function",
-        "function": {"name": "load_chat", "description": "Load chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}}, "required": ["session_id"]}},
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "rename_chat",
-            "description": "Rename chat session.",
-            "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}, "title": {"type": "string"}}, "required": ["session_id", "title"]},
-        },
-    },
-    {
-        "type": "function",
-        "function": {"name": "delete_chat", "description": "Delete chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}}, "required": ["session_id"]}},
-    },
+    {"type": "function", "function": {"name": "get_job_events", "description": "Fetch live progress events for a job_id.", "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["job_id"]}}},
+    {"type": "function", "function": {"name": "list_chats", "description": "List saved chat sessions.", "parameters": {"type": "object", "properties": {"limit": {"type": "integer"}}, "required": []}}},
+    {"type": "function", "function": {"name": "save_chat", "description": "Save chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}, "messages": {"type": "array", "items": {"type": "object"}}, "title": {"type": "string"}}, "required": ["session_id", "messages"]}}},
+    {"type": "function", "function": {"name": "load_chat", "description": "Load chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}}, "required": ["session_id"]}}},
+    {"type": "function", "function": {"name": "rename_chat", "description": "Rename chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}, "title": {"type": "string"}}, "required": ["session_id", "title"]}}},
+    {"type": "function", "function": {"name": "delete_chat", "description": "Delete chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}}, "required": ["session_id"]}}},
 ]
 
 
@@ -212,6 +184,11 @@ MISSION / PURPOSE
   - Numeric ranges + categorical constraints
   - With minimum sample sizes on train/val/test (and unique IDs where possible)
 - You MUST separate discovery (train/val) from final confirmation (test).
+
+IMPORTANT
+- This dataset is post-scan: each row is a scan outcome, not a match.
+- PL columns are OUTCOMES ONLY. They must never be features.
+- 'NO GAMES' is aggregated and must not be summed; treat rows as bet-instances for ROI.
 """
 
 
@@ -282,6 +259,9 @@ if "loaded_for_sid" not in st.session_state or st.session_state.loaded_for_sid !
 
 if "agent_mode" not in st.session_state:
     st.session_state.agent_mode = "chat"
+
+if "active_campaign_job_id" not in st.session_state:
+    st.session_state.active_campaign_job_id = ""
 
 
 # ============================================================
@@ -361,48 +341,37 @@ def _call_llm(messages: List[Dict[str, Any]]):
 # ============================================================
 # Parsing helpers
 # ============================================================
-_UUID_RE = re.compile(r"\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b", re.I)
+_UUID_RE = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.IGNORECASE)
 
+def _fix_common_number_typos(s: str) -> str:
+    # “1o minutes” -> “10 minutes”
+    return re.sub(r"\b(\d)o\b", r"\g<1>0", s, flags=re.IGNORECASE)
 
 def _minutes_from_text(t: str, default_minutes: int = 30) -> int:
-    """
-    Supports:
-      - "30", "for 30", "30m", "30 min", "30 minutes"
-      - "2h", "2 hours", "next 2 hours"
-      - "0.5h"
-      - "1o minutes" (typo) -> 10
-    """
-    s = (t or "").lower().strip()
+    s = _fix_common_number_typos((t or "").lower().strip())
 
-    # common typo: 1o -> 10, 2o -> 20 (only when bounded)
-    s = re.sub(r"\b(\d)o\b", lambda m: f"{m.group(1)}0", s)
-
-    # hours (float)
     m = re.search(r"\b(\d+(?:\.\d+)?)\s*(h|hr|hrs|hour|hours)\b", s)
     if m:
         mins = int(round(float(m.group(1)) * 60))
-        return max(5, min(mins, 360))
+        return max(5, min(mins, 720))
 
-    # minutes
     m2 = re.search(r"\b(\d+)\s*(m|min|mins|minute|minutes)\b", s)
     if m2:
         mins = int(m2.group(1))
-        return max(5, min(mins, 360))
+        return max(5, min(mins, 720))
 
-    # "for 30" (assume minutes)
     m3 = re.search(r"\bfor\s+(\d{1,3})\b", s)
     if m3:
         mins = int(m3.group(1))
-        return max(5, min(mins, 360))
+        return max(5, min(mins, 720))
 
-    # bare "30" anywhere (only if it's the ONLY number-ish thing)
     nums = re.findall(r"\b(\d{1,3})\b", s)
     if len(nums) == 1:
         mins = int(nums[0])
-        if 5 <= mins <= 360:
+        if 5 <= mins <= 720:
             return mins
 
-    return max(5, min(int(default_minutes), 360))
+    return max(5, min(int(default_minutes), 720))
 
 
 def _normalize(s: str) -> str:
@@ -420,8 +389,8 @@ def _resolve_pl_column(user_text: str, ctx: Dict[str, Any]) -> str:
         "both teams to score": "BTTS PL",
         "over 2.5": "BO 2.5 PL",
         "o2.5": "BO 2.5 PL",
-        "bo2.5": "BO 2.5 PL",
         "bo 2.5": "BO 2.5 PL",
+        "bo2.5": "BO 2.5 PL",
         "fh over 1.5": "BO1.5 FHG PL",
         "shg": "SHG PL",
     }
@@ -437,22 +406,20 @@ def _resolve_pl_column(user_text: str, ctx: Dict[str, Any]) -> str:
         if nn(col) in t_compact:
             return col
 
-    return "BTTS PL"
+    return "BO 2.5 PL"
 
 
 # ============================================================
-# Rendering distilled rules (unchanged)
+# Rendering helpers
 # ============================================================
 def _fmt_num(x: Any) -> str:
     try:
-        return f"{float(x):.2f}"
+        return f"{float(x):.4f}"
     except Exception:
         return str(x)
 
-
 def _render_rule_spec(spec: Dict[str, Any]) -> str:
     parts: List[str] = []
-
     for c in (spec.get("categorical") or []):
         col = c.get("col")
         if not col:
@@ -461,7 +428,6 @@ def _render_rule_spec(spec: Dict[str, Any]) -> str:
             parts.append(f"**{col} IN** {c['in']}")
         if "not_in" in c and c["not_in"]:
             parts.append(f"**{col} NOT IN** {c['not_in']}")
-
     for n in (spec.get("numeric") or []):
         col = n.get("col")
         if not col:
@@ -474,7 +440,6 @@ def _render_rule_spec(spec: Dict[str, Any]) -> str:
             parts.append(f"**{col}** >= {_fmt_num(mn)}")
         elif mx is not None:
             parts.append(f"**{col}** <= {_fmt_num(mx)}")
-
     return "  \n".join(parts) if parts else "(no constraints)"
 
 
@@ -487,16 +452,11 @@ def _render_distilled_top(result_obj: Dict[str, Any], top_n: int = 3) -> str:
         return "No distilled strategies found in this result."
 
     rules = (distilled.get("top_distilled_rules") or [])[: max(1, int(top_n))]
-
     out: List[str] = []
     out.append(f"### ✅ Distilled strategies (top {len(rules)})")
     out.append(f"- **Picked:** `{picked}`")
     base = distilled.get("best_base_model") or {}
     out.append(f"- **Base model:** `{base}`")
-
-    enf = payload.get("enforcement") or {}
-    if enf:
-        out.append(f"- **Enforcement:** `{enf}`")
     out.append("")
 
     for i, rr in enumerate(rules, start=1):
@@ -536,55 +496,10 @@ def _context_snapshot_text(ctx: Dict[str, Any]) -> str:
     )
 
 
-def _log_lab_to_sheet(job_id: str, result_obj: Dict[str, Any], tags: str):
-    try:
-        payload = (result_obj or {}).get("result") or {}
-        if not payload:
-            return
-        picked = payload.get("picked") or {}
-        pl_col = str((picked.get("pl_column") or "")).strip()
-
-        distilled_rules = ((payload.get("distilled") or {}).get("top_distilled_rules") or [])[:3]
-
-        note = {
-            "ts": datetime.utcnow().isoformat(),
-            "kind": "pl_lab_result",
-            "job_id": job_id,
-            "picked": picked,
-            "sheet_enforcement": payload.get("sheet_enforcement"),
-            "enforcement": payload.get("enforcement"),
-            "splits": payload.get("splits"),
-            "features": payload.get("features"),
-            "baseline": payload.get("baseline"),
-            "top_distilled_rules": [
-                {
-                    "spec": rr.get("spec"),
-                    "train": rr.get("train"),
-                    "val": rr.get("val"),
-                    "test": rr.get("test"),
-                    "test_game_level": rr.get("test_game_level"),
-                    "gap_train_minus_val": rr.get("gap_train_minus_val"),
-                    "samples": rr.get("samples"),
-                }
-                for rr in distilled_rules
-            ],
-        }
-
-        tag_bits = [t.strip() for t in (tags or "").split(",") if t.strip()]
-        if pl_col:
-            tag_bits.append(pl_col.replace(" ", "_"))
-        final_tags = ",".join(tag_bits)
-
-        _run_tool("append_research_note", {"note": json.dumps(note, ensure_ascii=False), "tags": final_tags})
-    except Exception:
-        return
-
-
 # ============================================================
-# NEW: Narrated autopilot loop helpers
+# Enforcement defaults + explanations
 # ============================================================
 def _default_enforcement() -> Dict[str, Any]:
-    # sensible “starter” guardrails; tune later in sheet/state
     return {
         "min_train_rows": 300,
         "min_val_rows": 120,
@@ -594,312 +509,63 @@ def _default_enforcement() -> Dict[str, Any]:
         "max_test_losing_streak_bets": 8,
     }
 
-
-def _poll_job_with_status(job_id: str, label: str, budget_s: int) -> Dict[str, Any]:
-    t0 = time.time()
-    last_status = None
-    last_job = None
-
-    with st.status(label, expanded=True) as status:
-        while True:
-            job = _run_tool("get_job", {"job_id": job_id})
-            last_job = job
-            st.write(f"Status: `{job.get('status')}` | updated_at={job.get('updated_at')}")
-            if job.get("error"):
-                status.update(state="error", label=f"{label} — error")
-                return {"ok": False, "job": job, "error": job.get("error")}
-
-            s = (job.get("status") or "").lower().strip()
-            if s in ("done", "error"):
-                if s == "done":
-                    status.update(state="complete", label=f"{label} — complete")
-                else:
-                    status.update(state="error", label=f"{label} — failed")
-                return {"ok": True, "job": job}
-
-            if time.time() - t0 > float(budget_s):
-                status.update(state="error", label=f"{label} — timed out in app (job may still be running)")
-                return {"ok": False, "job": job, "error": "app_timeout"}
-
-            if last_status != s:
-                last_status = s
-            time.sleep(2)
-
-
-def _download_job_result(job: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], str]:
-    rp = job.get("result_path")
-    if not rp:
-        return None, "No result_path"
-    params = job.get("params") or {}
-    bucket = (params.get("_results_bucket") or DEFAULT_RESULTS_BUCKET).strip()
-    res = _run_tool("download_result", {"bucket": bucket, "result_path": rp})
-    return res.get("result") or None, ""
-
-
-def _interpret_next_step(result_obj: Dict[str, Any], pl_col: str) -> str:
-    """
-    Keep this deterministic and “Bible-aligned” for now:
-    - If we found ≥1 distilled rule, propose the best one + a second “robustness run”.
-    - Otherwise propose widening or turning on hyperopt.
-    """
-    payload = (result_obj or {}).get("result") or {}
-    distilled = (payload.get("distilled") or {})
-    rules = distilled.get("top_distilled_rules") or []
-    enf = payload.get("enforcement") or {}
-
-    if not rules:
-        return (
-            "I didn’t get any distilled rules that passed the minimum sample / risk constraints. "
-            "Next I’ll either (a) widen the candidate set (e.g. include top 20%) or (b) switch on hyperopt "
-            "to see if a different base model produces better separable signals — while still enforcing the same train/val/test discipline."
-        )
-
-    best = rules[0]
-    va_roi = float((best.get("val") or {}).get("roi", 0.0) or 0.0)
-    te_roi = float((best.get("test") or {}).get("roi", 0.0) or 0.0)
-    gap = float(best.get("gap_train_minus_val") or 0.0)
-    gl = best.get("test_game_level") or {}
-    dd = float(gl.get("max_dd") or 0.0)
-    ls = gl.get("losing_streak") or {}
-    ls_bets = ls.get("bets")
-
+def _enforcement_explain(e: Dict[str, Any]) -> str:
     return (
-        f"Top candidate looks promising under the enforcement rules ({enf}).\n\n"
-        f"- Val ROI={va_roi:.3f}, Test ROI={te_roi:.3f}\n"
-        f"- Gap(train−val)={gap:.3f} (we want this small)\n"
-        f"- Test max drawdown={dd:.2f} pts; losing streak={ls_bets} bets\n\n"
-        "Next I’ll do a follow-up robustness run (same PL/market) to see if the *same style of rule* keeps appearing, "
-        "or if this was just a one-off split artifact. If it’s stable, we’ll lock the final rule and log it as a candidate strategy."
+        "### 🛡️ Enforcement (anti-overfit guardrails)\n"
+        f"- **min_train_rows={e.get('min_train_rows')}**: rule must have enough samples in train to be learnable.\n"
+        f"- **min_val_rows={e.get('min_val_rows')}**: enough samples to tune on validation, not noise.\n"
+        f"- **min_test_rows={e.get('min_test_rows')}**: enough unseen samples to trust the conclusion.\n"
+        f"- **max_train_val_gap_roi={e.get('max_train_val_gap_roi')}**: stability cap; big gaps imply overfit.\n"
+        f"- **max_test_drawdown={e.get('max_test_drawdown')}**: test-period max drawdown (points, game-level by ID).\n"
+        f"- **max_test_losing_streak_bets={e.get('max_test_losing_streak_bets')}**: test-period worst losing streak (bets, game-level by ID).\n"
     )
 
 
 # ============================================================
-# Autopilot intercepts (UPDATED: narrated + auto-poll + auto-results)
+# Job event rendering
 # ============================================================
-def _maybe_run_narrated_pl_research(user_text: str) -> bool:
-    if st.session_state.agent_mode != "autopilot":
-        return False
-
-    t = _normalize(user_text)
-    wants_strategy = ("strategy" in t) or ("build" in t and ("pl" in t or "btts" in t or "over" in t or "shg" in t or "o2.5" in t or "bo 2.5" in t))
-    if not wants_strategy:
-        return False
-
-    # 1) Load Bible + resolve target PL
-    ctx = _run_tool("get_research_context", {"limit_notes": 20})
-    st.session_state.last_context = ctx
-    minutes = _minutes_from_text(user_text, default_minutes=10)
-    pl_col = _resolve_pl_column(user_text, ctx)
-
-    # 2) Narrate plan in chat
-    st.session_state.messages.append({"role": "user", "content": user_text})
-    st.session_state.messages.append({"role": "assistant", "content": _context_snapshot_text(ctx)})
-
-    enforcement = _default_enforcement()
-
-    st.session_state.messages.append(
-        {
-            "role": "assistant",
-            "content": (
-                f"✅ Yes — I’ll build a **{pl_col}** strategy.\n\n"
-                f"**What I’m going to do (Bible-aligned):**\n"
-                f"1) Run an ML lab using *only safe features* (no PL/outcomes/leaky fields), with a strict **time split (train/val/test)**.\n"
-                f"2) Distill the best-performing signal into **explicit rules** (numeric ranges + categorical constraints).\n"
-                f"3) Enforce minimum samples + stability + risk constraints:\n"
-                f"   - min train/val/test rows\n"
-                f"   - max train→val ROI gap\n"
-                f"   - max test drawdown (points)\n"
-                f"   - max test losing streak (bets)\n"
-                f"4) When results come back, I’ll explain *why* the strategy might work and what I’ll do next.\n\n"
-                f"**Time budget:** {minutes} minutes\n"
-                f"**Enforcement:** `{enforcement}`"
-            ),
-        }
-    )
-    _persist_chat()
-
-    # 3) Run loop until budget is used (1–2 jobs typically)
-    start_wall = time.time()
-    wall_budget_s = max(60, int(minutes * 60))
-
-    # Job 1: main lab
-    job1_minutes = max(5, min(int(round(minutes * 0.7)), 60))
-    submitted = _run_tool(
-        "start_pl_lab",
-        {
-            "duration_minutes": job1_minutes,
-            "pl_column": pl_col,
-            "do_hyperopt": False,
-            "hyperopt_iter": 12,
-            "enforcement": enforcement,
-            "top_fracs": [0.05, 0.1, 0.2],
-            "top_n": 12,
-        },
-    )
-    job_id = submitted.get("job_id")
-
-    if not job_id:
-        st.session_state.messages.append({"role": "assistant", "content": f"❌ Failed to start PL lab: {submitted}"})
-        _persist_chat()
-        return True
-
-    st.session_state.messages.append(
-        {
-            "role": "assistant",
-            "content": f"🚀 Started **PL Lab** for **{pl_col}** (job duration={job1_minutes}m).  \n**Job ID:** `{job_id}`\n\nI’m now running it and will post results as soon as they’re ready.",
-        }
-    )
-    _run_tool("set_research_state", {"key": "last_pl_lab_job_id", "value": job_id})
-    _run_tool("set_research_state", {"key": "last_pl_lab_started_at", "value": datetime.utcnow().isoformat()})
-    _run_tool("set_research_state", {"key": "last_pl_lab_pl_column", "value": pl_col})
-    _persist_chat()
-
-    remaining_s = max(30, wall_budget_s - int(time.time() - start_wall))
-    polled = _poll_job_with_status(job_id, f"Running PL Lab ({pl_col})", budget_s=remaining_s)
-
-    if not polled.get("ok"):
-        st.session_state.messages.append(
-            {
-                "role": "assistant",
-                "content": (
-                    "⚠️ I didn’t receive a completed result within the app’s time budget. "
-                    "The job may still be running on the worker.\n\n"
-                    f"You can still manually check with:\n- `Check job {job_id}`\n- `Show results for {job_id}`"
-                ),
-            }
-        )
-        _persist_chat()
-        return True
-
-    job = polled.get("job") or {}
-    if (job.get("status") or "").lower() != "done":
-        st.session_state.messages.append({"role": "assistant", "content": f"❌ Job finished with status={job.get('status')}. Error={job.get('error')}"})
-        _persist_chat()
-        return True
-
-    result_obj, err = _download_job_result(job)
-    if not result_obj:
-        st.session_state.messages.append({"role": "assistant", "content": f"❌ Job done but couldn’t download results: {err}\n```json\n{json.dumps(job, indent=2)}\n```"})
-        _persist_chat()
-        return True
-
-    # 4) Post results + interpretation
-    st.session_state.messages.append({"role": "assistant", "content": "✅ Results received. Here are the top distilled candidates:"})
-    st.session_state.messages.append({"role": "assistant", "content": _render_distilled_top(result_obj, top_n=3)})
-
-    interpretation = _interpret_next_step(result_obj, pl_col)
-    st.session_state.messages.append({"role": "assistant", "content": interpretation})
-
-    # log to sheet
-    try:
-        _log_lab_to_sheet(job_id, result_obj, tags="pl_lab,ml,distilled,autopilot,narrated")
-    except Exception:
-        pass
-
-    # 5) Optional follow-up job if time remains: hyperopt run
-    elapsed = int(time.time() - start_wall)
-    remaining = wall_budget_s - elapsed
-    if remaining >= 120:  # at least ~2 minutes left
-        follow_minutes = max(5, min(int(round(remaining / 60)), 30))
-        st.session_state.messages.append(
-            {
-                "role": "assistant",
-                "content": (
-                    f"🔁 Time remaining: ~{int(remaining/60)}m. I’m going to run a follow-up **hyperopt** lab "
-                    f"({follow_minutes}m) to see if we get a more stable/distillable rule (still using the same strict splitting + enforcement)."
-                ),
-            }
-        )
-        _persist_chat()
-
-        submitted2 = _run_tool(
-            "start_pl_lab",
-            {
-                "duration_minutes": follow_minutes,
-                "pl_column": pl_col,
-                "do_hyperopt": True,
-                "hyperopt_iter": 12,
-                "enforcement": enforcement,
-                "top_fracs": [0.05, 0.1, 0.2],
-                "top_n": 12,
-            },
-        )
-        job2 = submitted2.get("job_id")
-        if job2:
-            st.session_state.messages.append({"role": "assistant", "content": f"🚀 Started hyperopt follow-up. **Job ID:** `{job2}`"})
-            _persist_chat()
-
-            remaining2 = max(30, wall_budget_s - int(time.time() - start_wall))
-            polled2 = _poll_job_with_status(job2, f"Running hyperopt PL Lab ({pl_col})", budget_s=remaining2)
-            if polled2.get("ok") and ((polled2.get("job") or {}).get("status") or "").lower() == "done":
-                job_obj2 = polled2["job"]
-                res2, err2 = _download_job_result(job_obj2)
-                if res2:
-                    st.session_state.messages.append({"role": "assistant", "content": "✅ Hyperopt results received. Top distilled candidates:"})
-                    st.session_state.messages.append({"role": "assistant", "content": _render_distilled_top(res2, top_n=3)})
-                    st.session_state.messages.append({"role": "assistant", "content": _interpret_next_step(res2, pl_col)})
-                    try:
-                        _log_lab_to_sheet(job2, res2, tags="pl_lab,ml,distilled,autopilot,narrated,hyperopt")
-                    except Exception:
-                        pass
-                else:
-                    st.session_state.messages.append({"role": "assistant", "content": f"⚠️ Hyperopt job done but couldn’t download results: {err2}"})
-            else:
-                st.session_state.messages.append(
-                    {
-                        "role": "assistant",
-                        "content": (
-                            "⚠️ Hyperopt follow-up didn’t complete within the remaining app budget. "
-                            f"You can manually check:\n- `Check job {job2}`\n- `Show results for {job2}`"
-                        ),
-                    }
-                )
-
-    st.session_state.messages.append(
-        {
-            "role": "assistant",
-            "content": (
-                "🏁 Done for this run.\n\n"
-                "If you want, tell me:\n"
-                "- tighter/looser risk limits (drawdown / streak)\n"
-                "- minimum trade frequency you’re comfortable with\n"
-                "- and whether to prioritise XG-mode vs Quick League/Team\n"
-                "…and I’ll rerun with those constraints baked into the enforcement."
-            ),
-        }
-    )
-
-    _persist_chat()
-    return True
+def _render_events(events: List[Dict[str, Any]]) -> str:
+    if not events:
+        return "_No events yet._"
+    lines = []
+    for ev in events:
+        ts = str(ev.get("ts", ""))[:19].replace("T", " ")
+        lvl = (ev.get("level") or "info").upper()
+        msg = (ev.get("message") or "").strip()
+        lines.append(f"- `{ts}` **{lvl}** — {msg}")
+    return "\n".join(lines)
 
 
-def _extract_uuid_anywhere(text: str) -> Optional[str]:
-    m = _UUID_RE.search(text or "")
-    return m.group(1) if m else None
-
-
+# ============================================================
+# Autopilot intercepts
+# ============================================================
 def _maybe_handle_job_queries(user_text: str) -> bool:
     t = (user_text or "").strip()
 
-    # allow “check job <uuid> show results for <uuid>” in one line
-    uuids = _UUID_RE.findall(t.lower())
-    if not uuids:
+    ids = _UUID_RE.findall(t.lower())
+    if not ids:
         return False
 
-    lower = t.lower()
-    did_any = False
-    st.session_state.messages.append({"role": "user", "content": user_text})
+    wants_check = "check job" in t.lower()
+    wants_show = "show results" in t.lower() or "results for" in t.lower() or "show result" in t.lower()
+    wants_progress = "progress" in t.lower() or "events" in t.lower() or "live" in t.lower()
 
-    if "check job" in lower:
-        job_id = _extract_uuid_anywhere(t)
-        if job_id:
+    # If multiple UUIDs in one message, process in order.
+    handled_any = False
+    for job_id in ids:
+        if wants_check:
             job = _run_tool("get_job", {"job_id": job_id})
+            st.session_state.messages.append({"role": "user", "content": user_text})
             st.session_state.messages.append({"role": "assistant", "content": f"```json\n{json.dumps(job, indent=2)}\n```"})
-            did_any = True
+            handled_any = True
 
-    if "show results" in lower:
-        job_id = _extract_uuid_anywhere(t)
-        if job_id:
+        if wants_progress:
+            ev = _run_tool("get_job_events", {"job_id": job_id, "limit": 250})
+            events = ev.get("events") or []
+            st.session_state.messages.append({"role": "assistant", "content": f"### 📡 Live progress for `{job_id}`\n{_render_events(events)}"})
+            handled_any = True
+
+        if wants_show:
             waited = _run_tool("wait_for_job", {"job_id": job_id, "timeout_s": 1, "poll_s": 1, "auto_download": False})
             job = waited.get("job") or {}
             rp = job.get("result_path")
@@ -908,33 +574,105 @@ def _maybe_handle_job_queries(user_text: str) -> bool:
 
             if not rp:
                 st.session_state.messages.append({"role": "assistant", "content": f"No result_path yet.\n```json\n{json.dumps(job, indent=2)}\n```"})
-                _persist_chat()
-                return True
+                handled_any = True
+                continue
 
             res = _run_tool("download_result", {"bucket": bucket, "result_path": rp})
             result_obj = res.get("result") or {}
 
             st.session_state.messages.append({"role": "assistant", "content": _render_distilled_top(result_obj, top_n=3)})
             st.session_state.messages.append({"role": "assistant", "content": f"```json\n{json.dumps(result_obj, indent=2)[:12000]}\n```"})
+            handled_any = True
 
-            try:
-                task_type = (result_obj.get("task_type") or "")
-                if task_type in ("pl_lab", "btts_lab"):
-                    _log_lab_to_sheet(job_id, result_obj, tags="pl_lab,ml,distilled,autopilot,manual_fetch")
-            except Exception:
-                pass
-
-            did_any = True
-
-    if did_any:
+    if handled_any:
         _persist_chat()
-    return did_any
+        return True
+
+    return False
 
 
+def _maybe_start_worldclass_campaign(user_text: str) -> bool:
+    if st.session_state.agent_mode != "autopilot":
+        return False
+
+    t = _normalize(user_text)
+    wants_strategy = ("strategy" in t) or ("build" in t and ("pl" in t or "btts" in t or "over" in t or "shg" in t))
+    if not wants_strategy:
+        return False
+
+    ctx = _run_tool("get_research_context", {"limit_notes": 10})
+    st.session_state.last_context = ctx
+
+    minutes = _minutes_from_text(user_text, default_minutes=10)
+    pl_col = _resolve_pl_column(user_text, ctx)
+
+    enforcement = _default_enforcement()
+
+    st.session_state.messages.append({"role": "user", "content": user_text})
+    st.session_state.messages.append({"role": "assistant", "content": _context_snapshot_text(ctx)})
+    st.session_state.messages.append({"role": "assistant", "content": _enforcement_explain(enforcement)})
+
+    # Narrative “researcher talk”
+    st.session_state.messages.append(
+        {
+            "role": "assistant",
+            "content": (
+                "### 🧠 Plan (autonomous research campaign)\n"
+                "I will:\n"
+                "1) Load Bible constraints (already done).\n"
+                "2) Run a sequence of experiments on **train/val only** to discover candidate rule-sets.\n"
+                "3) Distill the best-performing candidates into **explicit filters** (numeric ranges + categoricals).\n"
+                "4) Validate on **final test** (untouched), report ROI + drawdown + losing streak.\n"
+                "5) Iterate until the time budget ends, keeping only stable/risk-acceptable rules.\n"
+                "\n"
+                "You’ll see live progress in the sidebar feed (and you can type `progress <job_id>` anytime)."
+            ),
+        }
+    )
+
+    submitted = _run_tool(
+        "start_research_campaign",
+        {
+            "duration_minutes": minutes,
+            "pl_column": pl_col,
+            "enforcement": enforcement,
+            "do_hyperopt": False,
+            "hyperopt_iter": 20,
+        },
+    )
+    job_id = submitted.get("job_id")
+
+    if job_id:
+        st.session_state.active_campaign_job_id = job_id
+        st.session_state.messages.append(
+            {
+                "role": "assistant",
+                "content": (
+                    f"✅ Started **Research Campaign** for **{pl_col}** for **{minutes} minutes**.\n\n"
+                    f"**Job ID:** `{job_id}`\n\n"
+                    "Commands:\n"
+                    f"- `progress {job_id}` (live narration)\n"
+                    f"- `check job {job_id}`\n"
+                    f"- `show results for {job_id}`"
+                ),
+            }
+        )
+        _run_tool("set_research_state", {"key": "active_campaign_job_id", "value": job_id})
+        _run_tool("set_research_state", {"key": "active_campaign_started_at", "value": datetime.utcnow().isoformat()})
+        _run_tool("set_research_state", {"key": "active_campaign_pl_column", "value": pl_col})
+    else:
+        st.session_state.messages.append({"role": "assistant", "content": f"❌ Failed to start campaign: {submitted}"})
+
+    _persist_chat()
+    return True
+
+
+# ============================================================
+# Main chat loop
+# ============================================================
 def _chat_with_tools(user_text: str, max_rounds: int = 6):
     if st.session_state.agent_mode == "autopilot":
-        # NEW: narrated autopilot research loop
-        if _maybe_run_narrated_pl_research(user_text):
+        if _maybe_start_worldclass_campaign(user_text):
             return
         if _maybe_handle_job_queries(user_text):
             return
@@ -1001,6 +739,18 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
+
+    st.subheader("📡 Live Campaign Feed")
+    job_id = st.text_input("Active campaign job_id", value=st.session_state.active_campaign_job_id or "")
+    st.session_state.active_campaign_job_id = job_id.strip()
+
+    if st.button("Refresh feed"):
+        if st.session_state.active_campaign_job_id:
+            ev = _run_tool("get_job_events", {"job_id": st.session_state.active_campaign_job_id, "limit": 250})
+            events = ev.get("events") or []
+            st.markdown(_render_events(events))
+        else:
+            st.info("No active campaign job id set.")
 
     if st.session_state.get("last_chat_save_error"):
         st.warning(f"Chat persistence warning: {st.session_state.last_chat_save_error}")
