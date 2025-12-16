@@ -4,8 +4,9 @@ import os
 import json
 import uuid
 import re
+import time
 from datetime import datetime
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Set, Optional, Tuple
 
 import streamlit as st
 from openai import OpenAI
@@ -36,8 +37,6 @@ DEFAULT_RESULTS_BUCKET = os.getenv("RESULTS_BUCKET") or st.secrets.get("RESULTS_
 
 MAX_MESSAGES_TO_KEEP = int(os.getenv("MAX_CHAT_MESSAGES") or st.secrets.get("MAX_CHAT_MESSAGES", 220))
 
-UUID_RE = re.compile(r"\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b", re.I)
-
 
 # ============================================================
 # Tool runner
@@ -62,7 +61,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_research_context",
-            "description": "Fetch all Google Sheet tabs + derived constraints (ignored_columns, outcome_columns, enforcement).",
+            "description": "Fetch all Google Sheet tabs + derived constraints (ignored_columns, outcome_columns).",
             "parameters": {"type": "object", "properties": {"limit_notes": {"type": "integer"}}, "required": []},
         },
     },
@@ -138,7 +137,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "start_pl_lab",
-            "description": "Start best-practice ML lab for any PL column (Sheet rules enforced; categoricals included; distills explicit rules).",
+            "description": "Start ML lab for any PL column (Sheet rules enforced; categoricals included; distills explicit rules).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -146,6 +145,9 @@ TOOLS = [
                     "pl_column": {"type": "string"},
                     "do_hyperopt": {"type": "boolean"},
                     "hyperopt_iter": {"type": "integer"},
+                    "enforcement": {"type": "object"},
+                    "top_fracs": {"type": "array", "items": {"type": "number"}},
+                    "top_n": {"type": "integer"},
                 },
                 "required": [],
             },
@@ -200,7 +202,6 @@ NON-NEGOTIABLE SOURCE OF TRUTH
 - You MUST use Google Sheet tabs via get_research_context():
   dataset_overview, research_rules, column_definitions, evaluation_framework, research_state, research_memory.
 - Treat research_rules as ENFORCEMENT rules, not suggestions.
-- The worker receives enforcement_config from research_state; you must respect it.
 
 MISSION / PURPOSE
 - Discover strategies that are REPEATABLE on future matches.
@@ -360,19 +361,21 @@ def _call_llm(messages: List[Dict[str, Any]]):
 # ============================================================
 # Parsing helpers
 # ============================================================
+_UUID_RE = re.compile(r"\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b", re.I)
+
+
 def _minutes_from_text(t: str, default_minutes: int = 30) -> int:
     """
     Supports:
       - "30", "for 30", "30m", "30 min", "30 minutes"
       - "2h", "2 hours", "next 2 hours"
       - "0.5h"
-    Also fixes common typo: "1o minutes" -> "10 minutes".
+      - "1o minutes" (typo) -> 10
     """
-    s = (t or "").strip()
+    s = (t or "").lower().strip()
 
-    # Fix common o/0 typo: "1o"->"10", "2o"->"20" etc.
-    s = re.sub(r"\b(\d)\s*[oO]\b", r"\g<1>0", s)
-    s = s.lower().strip()
+    # common typo: 1o -> 10, 2o -> 20 (only when bounded)
+    s = re.sub(r"\b(\d)o\b", lambda m: f"{m.group(1)}0", s)
 
     # hours (float)
     m = re.search(r"\b(\d+(?:\.\d+)?)\s*(h|hr|hrs|hour|hours)\b", s)
@@ -417,8 +420,8 @@ def _resolve_pl_column(user_text: str, ctx: Dict[str, Any]) -> str:
         "both teams to score": "BTTS PL",
         "over 2.5": "BO 2.5 PL",
         "o2.5": "BO 2.5 PL",
-        "bo 2.5": "BO 2.5 PL",
         "bo2.5": "BO 2.5 PL",
+        "bo 2.5": "BO 2.5 PL",
         "fh over 1.5": "BO1.5 FHG PL",
         "shg": "SHG PL",
     }
@@ -426,7 +429,6 @@ def _resolve_pl_column(user_text: str, ctx: Dict[str, Any]) -> str:
         if k in t:
             return v
 
-    # match against outcome columns
     def nn(x: str) -> str:
         return _normalize(x).replace(" ", "")
 
@@ -491,8 +493,10 @@ def _render_distilled_top(result_obj: Dict[str, Any], top_n: int = 3) -> str:
     out.append(f"- **Picked:** `{picked}`")
     base = distilled.get("best_base_model") or {}
     out.append(f"- **Base model:** `{base}`")
-    enf = payload.get("sheet_enforcement") or {}
-    out.append(f"- **Enforcement:** `{enf}`")
+
+    enf = payload.get("enforcement") or {}
+    if enf:
+        out.append(f"- **Enforcement:** `{enf}`")
     out.append("")
 
     for i, rr in enumerate(rules, start=1):
@@ -521,7 +525,6 @@ def _context_snapshot_text(ctx: Dict[str, Any]) -> str:
     derived = (ctx.get("derived") or {})
     ignored = derived.get("ignored_columns") or []
     outcomes = derived.get("outcome_columns") or []
-    enforcement = derived.get("enforcement") or {}
     primary_goal = ov.get("primary_goal", "")
     fmt = ov.get("strategy_output_format", "")
     return (
@@ -530,7 +533,6 @@ def _context_snapshot_text(ctx: Dict[str, Any]) -> str:
         f"- strategy_output_format: {fmt}\n"
         f"- ignored_columns: {ignored}\n"
         f"- outcome_columns: {outcomes}\n"
-        f"- enforcement: {enforcement}\n"
     )
 
 
@@ -550,6 +552,7 @@ def _log_lab_to_sheet(job_id: str, result_obj: Dict[str, Any], tags: str):
             "job_id": job_id,
             "picked": picked,
             "sheet_enforcement": payload.get("sheet_enforcement"),
+            "enforcement": payload.get("enforcement"),
             "splits": payload.get("splits"),
             "features": payload.get("features"),
             "baseline": payload.get("baseline"),
@@ -578,120 +581,360 @@ def _log_lab_to_sheet(job_id: str, result_obj: Dict[str, Any], tags: str):
 
 
 # ============================================================
-# Autopilot intercepts
+# NEW: Narrated autopilot loop helpers
 # ============================================================
-def _maybe_start_pl_lab(user_text: str) -> bool:
+def _default_enforcement() -> Dict[str, Any]:
+    # sensible “starter” guardrails; tune later in sheet/state
+    return {
+        "min_train_rows": 300,
+        "min_val_rows": 120,
+        "min_test_rows": 120,
+        "max_train_val_gap_roi": 0.10,
+        "max_test_drawdown": -25.0,
+        "max_test_losing_streak_bets": 8,
+    }
+
+
+def _poll_job_with_status(job_id: str, label: str, budget_s: int) -> Dict[str, Any]:
+    t0 = time.time()
+    last_status = None
+    last_job = None
+
+    with st.status(label, expanded=True) as status:
+        while True:
+            job = _run_tool("get_job", {"job_id": job_id})
+            last_job = job
+            st.write(f"Status: `{job.get('status')}` | updated_at={job.get('updated_at')}")
+            if job.get("error"):
+                status.update(state="error", label=f"{label} — error")
+                return {"ok": False, "job": job, "error": job.get("error")}
+
+            s = (job.get("status") or "").lower().strip()
+            if s in ("done", "error"):
+                if s == "done":
+                    status.update(state="complete", label=f"{label} — complete")
+                else:
+                    status.update(state="error", label=f"{label} — failed")
+                return {"ok": True, "job": job}
+
+            if time.time() - t0 > float(budget_s):
+                status.update(state="error", label=f"{label} — timed out in app (job may still be running)")
+                return {"ok": False, "job": job, "error": "app_timeout"}
+
+            if last_status != s:
+                last_status = s
+            time.sleep(2)
+
+
+def _download_job_result(job: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], str]:
+    rp = job.get("result_path")
+    if not rp:
+        return None, "No result_path"
+    params = job.get("params") or {}
+    bucket = (params.get("_results_bucket") or DEFAULT_RESULTS_BUCKET).strip()
+    res = _run_tool("download_result", {"bucket": bucket, "result_path": rp})
+    return res.get("result") or None, ""
+
+
+def _interpret_next_step(result_obj: Dict[str, Any], pl_col: str) -> str:
+    """
+    Keep this deterministic and “Bible-aligned” for now:
+    - If we found ≥1 distilled rule, propose the best one + a second “robustness run”.
+    - Otherwise propose widening or turning on hyperopt.
+    """
+    payload = (result_obj or {}).get("result") or {}
+    distilled = (payload.get("distilled") or {})
+    rules = distilled.get("top_distilled_rules") or []
+    enf = payload.get("enforcement") or {}
+
+    if not rules:
+        return (
+            "I didn’t get any distilled rules that passed the minimum sample / risk constraints. "
+            "Next I’ll either (a) widen the candidate set (e.g. include top 20%) or (b) switch on hyperopt "
+            "to see if a different base model produces better separable signals — while still enforcing the same train/val/test discipline."
+        )
+
+    best = rules[0]
+    va_roi = float((best.get("val") or {}).get("roi", 0.0) or 0.0)
+    te_roi = float((best.get("test") or {}).get("roi", 0.0) or 0.0)
+    gap = float(best.get("gap_train_minus_val") or 0.0)
+    gl = best.get("test_game_level") or {}
+    dd = float(gl.get("max_dd") or 0.0)
+    ls = gl.get("losing_streak") or {}
+    ls_bets = ls.get("bets")
+
+    return (
+        f"Top candidate looks promising under the enforcement rules ({enf}).\n\n"
+        f"- Val ROI={va_roi:.3f}, Test ROI={te_roi:.3f}\n"
+        f"- Gap(train−val)={gap:.3f} (we want this small)\n"
+        f"- Test max drawdown={dd:.2f} pts; losing streak={ls_bets} bets\n\n"
+        "Next I’ll do a follow-up robustness run (same PL/market) to see if the *same style of rule* keeps appearing, "
+        "or if this was just a one-off split artifact. If it’s stable, we’ll lock the final rule and log it as a candidate strategy."
+    )
+
+
+# ============================================================
+# Autopilot intercepts (UPDATED: narrated + auto-poll + auto-results)
+# ============================================================
+def _maybe_run_narrated_pl_research(user_text: str) -> bool:
     if st.session_state.agent_mode != "autopilot":
         return False
 
     t = _normalize(user_text)
-    wants_strategy = ("strategy" in t) or ("build" in t and ("pl" in t or "btts" in t or "over" in t or "shg" in t or "bo2.5" in t))
+    wants_strategy = ("strategy" in t) or ("build" in t and ("pl" in t or "btts" in t or "over" in t or "shg" in t or "o2.5" in t or "bo 2.5" in t))
     if not wants_strategy:
         return False
 
-    ctx = _run_tool("get_research_context", {"limit_notes": 10})
+    # 1) Load Bible + resolve target PL
+    ctx = _run_tool("get_research_context", {"limit_notes": 20})
     st.session_state.last_context = ctx
-
-    minutes = _minutes_from_text(user_text, default_minutes=30)
-    do_hyperopt = any(k in t for k in ["hyperopt", "grid", "cv", "bayes", "optuna"])
-
+    minutes = _minutes_from_text(user_text, default_minutes=10)
     pl_col = _resolve_pl_column(user_text, ctx)
 
-    submitted = _run_tool(
-        "start_pl_lab",
-        {"duration_minutes": minutes, "pl_column": pl_col, "do_hyperopt": do_hyperopt, "hyperopt_iter": 12},
-    )
-    job_id = submitted.get("job_id")
-
+    # 2) Narrate plan in chat
     st.session_state.messages.append({"role": "user", "content": user_text})
     st.session_state.messages.append({"role": "assistant", "content": _context_snapshot_text(ctx)})
 
-    if job_id:
+    enforcement = _default_enforcement()
+
+    st.session_state.messages.append(
+        {
+            "role": "assistant",
+            "content": (
+                f"✅ Yes — I’ll build a **{pl_col}** strategy.\n\n"
+                f"**What I’m going to do (Bible-aligned):**\n"
+                f"1) Run an ML lab using *only safe features* (no PL/outcomes/leaky fields), with a strict **time split (train/val/test)**.\n"
+                f"2) Distill the best-performing signal into **explicit rules** (numeric ranges + categorical constraints).\n"
+                f"3) Enforce minimum samples + stability + risk constraints:\n"
+                f"   - min train/val/test rows\n"
+                f"   - max train→val ROI gap\n"
+                f"   - max test drawdown (points)\n"
+                f"   - max test losing streak (bets)\n"
+                f"4) When results come back, I’ll explain *why* the strategy might work and what I’ll do next.\n\n"
+                f"**Time budget:** {minutes} minutes\n"
+                f"**Enforcement:** `{enforcement}`"
+            ),
+        }
+    )
+    _persist_chat()
+
+    # 3) Run loop until budget is used (1–2 jobs typically)
+    start_wall = time.time()
+    wall_budget_s = max(60, int(minutes * 60))
+
+    # Job 1: main lab
+    job1_minutes = max(5, min(int(round(minutes * 0.7)), 60))
+    submitted = _run_tool(
+        "start_pl_lab",
+        {
+            "duration_minutes": job1_minutes,
+            "pl_column": pl_col,
+            "do_hyperopt": False,
+            "hyperopt_iter": 12,
+            "enforcement": enforcement,
+            "top_fracs": [0.05, 0.1, 0.2],
+            "top_n": 12,
+        },
+    )
+    job_id = submitted.get("job_id")
+
+    if not job_id:
+        st.session_state.messages.append({"role": "assistant", "content": f"❌ Failed to start PL lab: {submitted}"})
+        _persist_chat()
+        return True
+
+    st.session_state.messages.append(
+        {
+            "role": "assistant",
+            "content": f"🚀 Started **PL Lab** for **{pl_col}** (job duration={job1_minutes}m).  \n**Job ID:** `{job_id}`\n\nI’m now running it and will post results as soon as they’re ready.",
+        }
+    )
+    _run_tool("set_research_state", {"key": "last_pl_lab_job_id", "value": job_id})
+    _run_tool("set_research_state", {"key": "last_pl_lab_started_at", "value": datetime.utcnow().isoformat()})
+    _run_tool("set_research_state", {"key": "last_pl_lab_pl_column", "value": pl_col})
+    _persist_chat()
+
+    remaining_s = max(30, wall_budget_s - int(time.time() - start_wall))
+    polled = _poll_job_with_status(job_id, f"Running PL Lab ({pl_col})", budget_s=remaining_s)
+
+    if not polled.get("ok"):
         st.session_state.messages.append(
             {
                 "role": "assistant",
                 "content": (
-                    f"✅ Started **PL Lab** for **{pl_col}** for **{minutes} minutes**.\n\n"
-                    f"**Job ID:** `{job_id}`\n\n"
-                    "Use:\n"
-                    f"- `Check job {job_id}`\n"
-                    f"- `Show results for {job_id}`"
+                    "⚠️ I didn’t receive a completed result within the app’s time budget. "
+                    "The job may still be running on the worker.\n\n"
+                    f"You can still manually check with:\n- `Check job {job_id}`\n- `Show results for {job_id}`"
                 ),
             }
         )
-        _run_tool("set_research_state", {"key": "last_pl_lab_job_id", "value": job_id})
-        _run_tool("set_research_state", {"key": "last_pl_lab_started_at", "value": datetime.utcnow().isoformat()})
-        _run_tool("set_research_state", {"key": "last_pl_lab_pl_column", "value": pl_col})
-    else:
-        st.session_state.messages.append({"role": "assistant", "content": f"❌ Failed to start PL lab: {submitted}"})
+        _persist_chat()
+        return True
+
+    job = polled.get("job") or {}
+    if (job.get("status") or "").lower() != "done":
+        st.session_state.messages.append({"role": "assistant", "content": f"❌ Job finished with status={job.get('status')}. Error={job.get('error')}"})
+        _persist_chat()
+        return True
+
+    result_obj, err = _download_job_result(job)
+    if not result_obj:
+        st.session_state.messages.append({"role": "assistant", "content": f"❌ Job done but couldn’t download results: {err}\n```json\n{json.dumps(job, indent=2)}\n```"})
+        _persist_chat()
+        return True
+
+    # 4) Post results + interpretation
+    st.session_state.messages.append({"role": "assistant", "content": "✅ Results received. Here are the top distilled candidates:"})
+    st.session_state.messages.append({"role": "assistant", "content": _render_distilled_top(result_obj, top_n=3)})
+
+    interpretation = _interpret_next_step(result_obj, pl_col)
+    st.session_state.messages.append({"role": "assistant", "content": interpretation})
+
+    # log to sheet
+    try:
+        _log_lab_to_sheet(job_id, result_obj, tags="pl_lab,ml,distilled,autopilot,narrated")
+    except Exception:
+        pass
+
+    # 5) Optional follow-up job if time remains: hyperopt run
+    elapsed = int(time.time() - start_wall)
+    remaining = wall_budget_s - elapsed
+    if remaining >= 120:  # at least ~2 minutes left
+        follow_minutes = max(5, min(int(round(remaining / 60)), 30))
+        st.session_state.messages.append(
+            {
+                "role": "assistant",
+                "content": (
+                    f"🔁 Time remaining: ~{int(remaining/60)}m. I’m going to run a follow-up **hyperopt** lab "
+                    f"({follow_minutes}m) to see if we get a more stable/distillable rule (still using the same strict splitting + enforcement)."
+                ),
+            }
+        )
+        _persist_chat()
+
+        submitted2 = _run_tool(
+            "start_pl_lab",
+            {
+                "duration_minutes": follow_minutes,
+                "pl_column": pl_col,
+                "do_hyperopt": True,
+                "hyperopt_iter": 12,
+                "enforcement": enforcement,
+                "top_fracs": [0.05, 0.1, 0.2],
+                "top_n": 12,
+            },
+        )
+        job2 = submitted2.get("job_id")
+        if job2:
+            st.session_state.messages.append({"role": "assistant", "content": f"🚀 Started hyperopt follow-up. **Job ID:** `{job2}`"})
+            _persist_chat()
+
+            remaining2 = max(30, wall_budget_s - int(time.time() - start_wall))
+            polled2 = _poll_job_with_status(job2, f"Running hyperopt PL Lab ({pl_col})", budget_s=remaining2)
+            if polled2.get("ok") and ((polled2.get("job") or {}).get("status") or "").lower() == "done":
+                job_obj2 = polled2["job"]
+                res2, err2 = _download_job_result(job_obj2)
+                if res2:
+                    st.session_state.messages.append({"role": "assistant", "content": "✅ Hyperopt results received. Top distilled candidates:"})
+                    st.session_state.messages.append({"role": "assistant", "content": _render_distilled_top(res2, top_n=3)})
+                    st.session_state.messages.append({"role": "assistant", "content": _interpret_next_step(res2, pl_col)})
+                    try:
+                        _log_lab_to_sheet(job2, res2, tags="pl_lab,ml,distilled,autopilot,narrated,hyperopt")
+                    except Exception:
+                        pass
+                else:
+                    st.session_state.messages.append({"role": "assistant", "content": f"⚠️ Hyperopt job done but couldn’t download results: {err2}"})
+            else:
+                st.session_state.messages.append(
+                    {
+                        "role": "assistant",
+                        "content": (
+                            "⚠️ Hyperopt follow-up didn’t complete within the remaining app budget. "
+                            f"You can manually check:\n- `Check job {job2}`\n- `Show results for {job2}`"
+                        ),
+                    }
+                )
+
+    st.session_state.messages.append(
+        {
+            "role": "assistant",
+            "content": (
+                "🏁 Done for this run.\n\n"
+                "If you want, tell me:\n"
+                "- tighter/looser risk limits (drawdown / streak)\n"
+                "- minimum trade frequency you’re comfortable with\n"
+                "- and whether to prioritise XG-mode vs Quick League/Team\n"
+                "…and I’ll rerun with those constraints baked into the enforcement."
+            ),
+        }
+    )
 
     _persist_chat()
     return True
 
 
-def _extract_uuid_from_text(t: str) -> str:
-    m = UUID_RE.search(t or "")
-    return (m.group(1) if m else "").lower().strip()
+def _extract_uuid_anywhere(text: str) -> Optional[str]:
+    m = _UUID_RE.search(text or "")
+    return m.group(1) if m else None
 
 
 def _maybe_handle_job_queries(user_text: str) -> bool:
     t = (user_text or "").strip()
 
-    # Check job <uuid>
-    if re.search(r"\bcheck job\b", t, re.I):
-        job_id = _extract_uuid_from_text(t)
-        st.session_state.messages.append({"role": "user", "content": user_text})
-        if not job_id:
-            st.session_state.messages.append({"role": "assistant", "content": "❌ I need the full UUID (36 chars). Example: `Check job 123e4567-e89b-12d3-a456-426614174000`"})
-            _persist_chat()
-            return True
-        job = _run_tool("get_job", {"job_id": job_id})
-        st.session_state.messages.append({"role": "assistant", "content": f"```json\n{json.dumps(job, indent=2)}\n```"})
+    # allow “check job <uuid> show results for <uuid>” in one line
+    uuids = _UUID_RE.findall(t.lower())
+    if not uuids:
+        return False
+
+    lower = t.lower()
+    did_any = False
+    st.session_state.messages.append({"role": "user", "content": user_text})
+
+    if "check job" in lower:
+        job_id = _extract_uuid_anywhere(t)
+        if job_id:
+            job = _run_tool("get_job", {"job_id": job_id})
+            st.session_state.messages.append({"role": "assistant", "content": f"```json\n{json.dumps(job, indent=2)}\n```"})
+            did_any = True
+
+    if "show results" in lower:
+        job_id = _extract_uuid_anywhere(t)
+        if job_id:
+            waited = _run_tool("wait_for_job", {"job_id": job_id, "timeout_s": 1, "poll_s": 1, "auto_download": False})
+            job = waited.get("job") or {}
+            rp = job.get("result_path")
+            params = job.get("params") or {}
+            bucket = (params.get("_results_bucket") or DEFAULT_RESULTS_BUCKET).strip()
+
+            if not rp:
+                st.session_state.messages.append({"role": "assistant", "content": f"No result_path yet.\n```json\n{json.dumps(job, indent=2)}\n```"})
+                _persist_chat()
+                return True
+
+            res = _run_tool("download_result", {"bucket": bucket, "result_path": rp})
+            result_obj = res.get("result") or {}
+
+            st.session_state.messages.append({"role": "assistant", "content": _render_distilled_top(result_obj, top_n=3)})
+            st.session_state.messages.append({"role": "assistant", "content": f"```json\n{json.dumps(result_obj, indent=2)[:12000]}\n```"})
+
+            try:
+                task_type = (result_obj.get("task_type") or "")
+                if task_type in ("pl_lab", "btts_lab"):
+                    _log_lab_to_sheet(job_id, result_obj, tags="pl_lab,ml,distilled,autopilot,manual_fetch")
+            except Exception:
+                pass
+
+            did_any = True
+
+    if did_any:
         _persist_chat()
-        return True
-
-    # Show results for <uuid>
-    if re.search(r"\bshow results\b", t, re.I):
-        job_id = _extract_uuid_from_text(t)
-        st.session_state.messages.append({"role": "user", "content": user_text})
-        if not job_id:
-            st.session_state.messages.append({"role": "assistant", "content": "❌ I need the full UUID (36 chars). Example: `Show results for 123e4567-e89b-12d3-a456-426614174000`"})
-            _persist_chat()
-            return True
-
-        waited = _run_tool("wait_for_job", {"job_id": job_id, "timeout_s": 10, "poll_s": 2, "auto_download": False})
-        job = waited.get("job") or {}
-        rp = job.get("result_path")
-        params = job.get("params") or {}
-        bucket = (params.get("_results_bucket") or DEFAULT_RESULTS_BUCKET).strip()
-
-        if not rp:
-            st.session_state.messages.append({"role": "assistant", "content": f"No result_path yet (still running).\n```json\n{json.dumps(job, indent=2)}\n```"})
-            _persist_chat()
-            return True
-
-        res = _run_tool("download_result", {"bucket": bucket, "result_path": rp})
-        result_obj = res.get("result") or {}
-
-        st.session_state.messages.append({"role": "assistant", "content": _render_distilled_top(result_obj, top_n=3)})
-        st.session_state.messages.append({"role": "assistant", "content": f"```json\n{json.dumps(result_obj, indent=2)[:12000]}\n```"})
-
-        try:
-            task_type = (result_obj.get("task_type") or "")
-            if task_type in ("pl_lab", "btts_lab"):
-                _log_lab_to_sheet(job_id, result_obj, tags="pl_lab,ml,distilled,autopilot")
-        except Exception:
-            pass
-
-        _persist_chat()
-        return True
-
-    return False
+    return did_any
 
 
 def _chat_with_tools(user_text: str, max_rounds: int = 6):
     if st.session_state.agent_mode == "autopilot":
-        if _maybe_start_pl_lab(user_text):
+        # NEW: narrated autopilot research loop
+        if _maybe_run_narrated_pl_research(user_text):
             return
         if _maybe_handle_job_queries(user_text):
             return
