@@ -562,7 +562,7 @@ DEFAULT_ENFORCEMENT = {
     "min_train_rows": 300,
     "min_val_rows": 60,
     "min_test_rows": 60,
-    "max_train_val_gap_roi": 0.40,
+    "max_train_val_gap_roi": 0.4,
     "max_test_drawdown": -50.0,
     "max_test_losing_streak_bets": 50,
 }
@@ -606,6 +606,7 @@ def _maybe_start_narrated_pl_research(user_text: str) -> bool:
         return True
 
     ctx = _run_tool("get_research_context", {"limit_notes": 20})
+    st.session_state["cached_research_context"] = ctx
     st.session_state.last_context = ctx
 
     minutes = _minutes_from_text(user_text, default_minutes=10)
@@ -797,6 +798,11 @@ Context JSON:
 
 
 def _autopilot_tick():
+    # Cached Bible context (loaded when strategy run starts).
+    ctx_local = st.session_state.get('cached_research_context')
+    if not isinstance(ctx_local, dict):
+        ctx_local = {}
+
     job_id = st.session_state.get("active_job_id") or ""
 
     # Stream worker events (narrated progress)
@@ -882,7 +888,7 @@ def _autopilot_tick():
 
         # LLM decides what to try next based on results (Bible-safe)
         decision = _agent_choose_next_action(
-            ctx=ctx if isinstance(ctx, dict) else {},
+            ctx=ctx_local,
             last_task_type=str(job.get("task_type") or ""),
             last_result=(result_obj.get("result") or {}) if isinstance(result_obj, dict) else {}
         )
