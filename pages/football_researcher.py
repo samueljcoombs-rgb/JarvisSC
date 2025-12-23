@@ -44,6 +44,59 @@ DEFAULT_RESULTS_BUCKET = os.getenv("RESULTS_BUCKET") or st.secrets.get("RESULTS_
 MAX_MESSAGES_TO_KEEP = int(os.getenv("MAX_CHAT_MESSAGES") or st.secrets.get("MAX_CHAT_MESSAGES", 220))
 
 # ============================================================
+# Autopilot diagnostics helpers
+# ============================================================
+
+def _safe_json_load(s: str, default):
+    try:
+        return json.loads(s)
+    except Exception:
+        return default
+
+
+def _summarize_near_misses(near_misses: list, max_items: int = 8) -> dict:
+    """Summarise why candidate rules failed so the agent can pick the next experiment."""
+    if not near_misses:
+        return {"count": 0, "by_reason": {}, "top": []}
+
+    by_reason = {}
+    for nm in near_misses:
+        reason = (nm or {}).get("reason", "unknown")
+        by_reason[reason] = by_reason.get(reason, 0) + 1
+
+    top = []
+    for nm in near_misses[:max_items]:
+        spec = (nm or {}).get("rule", [])
+        gate = (nm or {}).get("gate", {})
+        top.append({"rule": spec, "reason": (nm or {}).get("reason"), "gate": gate})
+
+    return {"count": len(near_misses), "by_reason": by_reason, "top": top}
+
+
+def _record_action_in_state(ctx: dict, action: dict, result_summary: dict) -> None:
+    """Persist a compact action log into research_state (key/value sheet) to avoid repetition."""
+    rs = (ctx or {}).get("research_state") or {}
+    key = "agent_recent_actions_json"
+    hist = _safe_json_load(str(rs.get(key, "[]")), [])
+    if not isinstance(hist, list):
+        hist = []
+
+    entry = {
+        "ts": datetime.utcnow().isoformat(),
+        "action": action,
+        "result": result_summary,
+    }
+    hist.append(entry)
+    # Keep last 50
+    hist = hist[-50:]
+
+    try:
+        _run_tool("set_research_state", {"key": key, "value": json.dumps(hist)})
+    except Exception:
+        # Don't hard-fail UI if the sheet write is temporarily unavailable
+        pass
+
+# ============================================================
 # Tool runner (signature-safe, never hard-crashes on kwargs drift)
 # ============================================================
 
@@ -75,112 +128,250 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_research_context",
-            "description": "Fetch all Google Sheet tabs + derived constraints (ignored_columns, outcome_columns).",
-            "parameters": {"type": "object", "properties": {"limit_notes": {"type": "integer"}}, "required": []},
-        },
+            "description": "Fetch the current governance/bible context, column definitions, and recent notes from Google Sheets and the app state.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit_notes": {"type": "integer", "default": 20}
+                }
+            }
+        }
     },
     {
         "type": "function",
         "function": {
             "name": "append_research_note",
-            "description": "Append to research_memory.",
-            "parameters": {"type": "object", "properties": {"note": {"type": "string"}, "tags": {"type": "string"}}, "required": ["note"]},
-        },
+            "description": "Append a research note to the research_memory tab in Google Sheets.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "note": {"type": "string"}
+                },
+                "required": ["note"]
+            }
+        }
     },
-    {"type": "function", "function": {"name": "get_research_state", "description": "Get research_state KV.", "parameters": {"type": "object", "properties": {}, "required": []}}},
     {
         "type": "function",
         "function": {
             "name": "set_research_state",
-            "description": "Set research_state KV.",
-            "parameters": {"type": "object", "properties": {"key": {"type": "string"}, "value": {"type": "string"}}, "required": ["key", "value"]},
-        },
+            "description": "Set key-value pairs in the Google Sheets research_state tab (used for defaults and gates).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "updates": {
+                        "type": "object",
+                        "additionalProperties": True
+                    }
+                },
+                "required": ["updates"]
+            }
+        }
     },
     {
         "type": "function",
         "function": {
-            "name": "load_data_basic",
-            "description": "Load CSV preview (first rows).",
-            "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "csv_url": {"type": "string"}}, "required": []},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_columns",
-            "description": "List CSV columns.",
-            "parameters": {"type": "object", "properties": {"storage_bucket": {"type": "string"}, "storage_path": {"type": "string"}, "csv_url": {"type": "string"}}, "required": []},
-        },
+            "name": "submit_job",
+            "description": "Submit a raw job to the Supabase jobs queue (advanced; prefer start_* helpers).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_type": {"type": "string"},
+                    "params": {"type": "object"}
+                },
+                "required": ["task_type", "params"]
+            }
+        }
     },
     {
         "type": "function",
         "function": {
             "name": "start_pl_lab",
-            "description": "Start best-practice ML lab for any PL column (Sheet rules enforced; categoricals included; distills explicit rules).",
+            "description": "Queue a PL Lab job that trains models and distills explicit filter rules.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "duration_minutes": {"type": "integer"},
                     "pl_column": {"type": "string"},
-                    "do_hyperopt": {"type": "boolean"},
-                    "hyperopt_iter": {"type": "integer"},
+                    "duration_minutes": {"type": "integer", "default": 30},
+                    "do_hyperopt": {"type": "boolean", "default": False},
+                    "hyperopt_iter": {"type": "integer", "default": 0},
                     "enforcement": {"type": "object"},
+                    "row_filters": {"type": "array", "items": {"type": "object"}}
                 },
-                "required": [],
-            },
-        },
+                "required": ["pl_column"]
+            }
+        }
     },
     {
         "type": "function",
-        "function": {"name": "get_job", "description": "Get job status by job_id.", "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]}},
+        "function": {
+            "name": "start_subgroup_scan",
+            "description": "Queue a subgroup scan job to find profitable stable categorical buckets.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pl_column": {"type": "string"},
+                    "duration_minutes": {"type": "integer", "default": 30},
+                    "group_cols": {"type": "array", "items": {"type": "string"}},
+                    "max_groups": {"type": "integer", "default": 50},
+                    "enforcement": {"type": "object"},
+                    "row_filters": {"type": "array", "items": {"type": "object"}}
+                },
+                "required": ["pl_column"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "start_bracket_sweep",
+            "description": "Queue a bracket sweep job to search numeric quantile brackets for stable profit.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pl_column": {"type": "string"},
+                    "duration_minutes": {"type": "integer", "default": 30},
+                    "sweep_cols": {"type": "array", "items": {"type": "string"}},
+                    "n_bins": {"type": "integer", "default": 12},
+                    "max_results": {"type": "integer", "default": 50},
+                    "enforcement": {"type": "object"},
+                    "row_filters": {"type": "array", "items": {"type": "object"}}
+                },
+                "required": ["pl_column"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "start_hyperopt_pl_lab",
+            "description": "Queue an Optuna-driven hyperopt job (val-only tuning) then distill to rules.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pl_column": {"type": "string"},
+                    "duration_minutes": {"type": "integer", "default": 120},
+                    "hyperopt_trials": {"type": "integer", "default": 30},
+                    "top_fracs": {"type": "array", "items": {"type": "number"}},
+                    "enforcement": {"type": "object"},
+                    "row_filters": {"type": "array", "items": {"type": "object"}}
+                },
+                "required": ["pl_column"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_job",
+            "description": "Fetch a job row from Supabase by job_id.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string"}
+                },
+                "required": ["job_id"]
+            }
+        }
     },
     {
         "type": "function",
         "function": {
             "name": "wait_for_job",
-            "description": "Wait for job completion; optionally downloads results.",
+            "description": "Poll Supabase until a job is done/failed, then return the final job row.",
             "parameters": {
                 "type": "object",
-                "properties": {"job_id": {"type": "string"}, "timeout_s": {"type": "integer"}, "poll_s": {"type": "integer"}, "auto_download": {"type": "boolean"}},
-                "required": ["job_id"],
-            },
-        },
+                "properties": {
+                    "job_id": {"type": "string"},
+                    "timeout_seconds": {"type": "integer", "default": 600}
+                },
+                "required": ["job_id"]
+            }
+        }
     },
     {
         "type": "function",
         "function": {
             "name": "download_result",
-            "description": "Download a result JSON from storage by path.",
-            "parameters": {"type": "object", "properties": {"bucket": {"type": "string"}, "result_path": {"type": "string"}}, "required": ["result_path"]},
-        },
+            "description": "Download a raw result file (JSON) from Supabase Storage given a bucket and path.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "bucket": {"type": "string"},
+                    "path": {"type": "string"}
+                },
+                "required": ["bucket", "path"]
+            }
+        }
     },
     {
         "type": "function",
-        "function": {"name": "list_chats", "description": "List saved chat sessions.", "parameters": {"type": "object", "properties": {"limit": {"type": "integer"}}, "required": []}},
+        "function": {
+            "name": "get_result_json",
+            "description": "Download and parse the result JSON for a given job_id.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string"}
+                },
+                "required": ["job_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_job_events",
+            "description": "Fetch latest job events for a job_id.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string"},
+                    "limit": {"type": "integer", "default": 100}
+                },
+                "required": ["job_id"]
+            }
+        }
     },
     {
         "type": "function",
         "function": {
             "name": "save_chat",
-            "description": "Save chat session.",
+            "description": "Save the current chat session to Supabase (or local store) for persistence.",
             "parameters": {
                 "type": "object",
-                "properties": {"session_id": {"type": "string"}, "messages": {"type": "array", "items": {"type": "object"}}, "title": {"type": "string"}},
-                "required": ["session_id", "messages"],
-            },
-        },
+                "properties": {
+                    "chat_id": {"type": "string"},
+                    "messages": {"type": "array", "items": {"type": "object"}}
+                },
+                "required": ["chat_id", "messages"]
+            }
+        }
     },
-    {"type": "function", "function": {"name": "load_chat", "description": "Load chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}}, "required": ["session_id"]}}},
     {
         "type": "function",
         "function": {
-            "name": "rename_chat",
-            "description": "Rename chat session.",
-            "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}, "title": {"type": "string"}}, "required": ["session_id", "title"]},
-        },
+            "name": "load_chat",
+            "description": "Load a chat session by chat_id.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "chat_id": {"type": "string"}
+                },
+                "required": ["chat_id"]
+            }
+        }
     },
-    {"type": "function", "function": {"name": "delete_chat", "description": "Delete chat session.", "parameters": {"type": "object", "properties": {"session_id": {"type": "string"}}, "required": ["session_id"]}}},
+    {
+        "type": "function",
+        "function": {
+            "name": "list_chats",
+            "description": "List recent chat sessions.",
+            "parameters": {"type": "object", "properties": {}}
+        }
+    }
 ]
+
 
 SYSTEM_PROMPT = """You are FootballResearcher - an autonomous strategy R&D agent.
 
@@ -509,6 +700,19 @@ def _render_distilled_top(result_obj: Dict[str, Any], top_n: int = 3) -> str:
         out.append(f"- Test: rows={te.get('rows')} roi={_fmt_num(te.get('roi'))} total_pl={_fmt_num(te.get('total_pl'))}")
         out.append(f"- Stability: gap(train-val)={_fmt_num(gap)}")
         out.append(f"- Test risk (by ID): unique_ids={gl.get('unique_ids')} max_dd={_fmt_num(gl.get('max_dd'))} losing_streak={gl.get('losing_streak')}")
+        tf = rr.get("trade_frequency") or {}
+        if tf:
+            out.append(f"- Test trade frequency: bets/week={_fmt_num(tf.get('bets_per_week'))} games/week={_fmt_num(tf.get('games_per_week'))} (span_weeks={_fmt_num(tf.get('weeks'))})")
+        ms = rr.get("test_monthly_stats") or {}
+        if ms and ms.get("months"):
+            out.append(
+                f"- Test regime check: months={ms.get('months')} monthly_roi_std={_fmt_num(ms.get('roi_std'))} neg_month_frac={_fmt_num(ms.get('negative_month_frac'))}"
+            )
+            try:
+                if float(ms.get('roi_std') or 0.0) > 0.25:
+                    out.append("  - ⚠️ High month-to-month variance; consider regime/subgroup filters.")
+            except Exception:
+                pass
         out.append("")
     return "\n".join(out)
 
@@ -566,6 +770,78 @@ DEFAULT_ENFORCEMENT = {
     "max_test_drawdown": -50.0,
     "max_test_losing_streak_bets": 50.0,
 }
+
+
+def _choose_diagnostic_task(payload: dict, ctx: dict, recent_actions: list) -> tuple[str, dict]:
+    """Fallback when the agent tries to stop without producing passing rules.
+
+    Preference order:
+      1) bracket_sweep on top numeric features
+      2) subgroup_scan on top categorical features
+      3) hyperopt_pl_lab (short)
+    """
+    dataset = (ctx.get("dataset") or {})
+    storage_bucket = dataset.get("storage_bucket")
+    storage_path = dataset.get("storage_path")
+
+    picked = payload.get("picked") or {}
+    pl_col = picked.get("pl_column")
+    side = picked.get("side") or "back"
+    odds_col = picked.get("odds_col")
+    row_filters = picked.get("row_filters") or {}
+
+    ftypes = payload.get("feature_types") or {}
+    numeric = set(ftypes.get("numeric") or [])
+    categorical = set(ftypes.get("categorical") or [])
+
+    imp = payload.get("feature_importance") or []
+    ranked = [d.get("feature") for d in imp if isinstance(d, dict) and d.get("feature")]
+
+    top_num = [c for c in ranked if c in numeric][:4] or list(numeric)[:4]
+    top_cat = [c for c in ranked if c in categorical][:3] or list(categorical)[:3]
+
+    # avoid repeating the exact same task_type consecutively
+    last_task = None
+    if recent_actions:
+        last_task = recent_actions[-1].get("task_type")
+
+    if last_task != "bracket_sweep" and top_num:
+        return "bracket_sweep", {
+            "storage_bucket": storage_bucket,
+            "storage_path": storage_path,
+            "pl_column": pl_col,
+            "side": side,
+            "odds_col": odds_col,
+            "row_filters": row_filters,
+            "focus_numeric_cols": top_num,
+            "bins": 8,
+            "max_rules": 40,
+        }
+
+    if last_task != "subgroup_scan" and (top_cat or top_num):
+        return "subgroup_scan", {
+            "storage_bucket": storage_bucket,
+            "storage_path": storage_path,
+            "pl_column": pl_col,
+            "side": side,
+            "odds_col": odds_col,
+            "row_filters": row_filters,
+            "group_by_cols": top_cat,
+            "focus_numeric_cols": top_num[:3],
+            "min_rows": int((ctx.get("enforcement_gates") or {}).get("min_val_rows", 60)),
+            "top_k": 30,
+        }
+
+    return "hyperopt_pl_lab", {
+        "storage_bucket": storage_bucket,
+        "storage_path": storage_path,
+        "pl_column": pl_col,
+        "side": side,
+        "odds_col": odds_col,
+        "row_filters": row_filters,
+        "trials": 15,
+        "time_budget_sec": 600,
+    }
 
 ENFORCEMENT_EXPLANATION = {
     "min_train_rows": "Minimum number of scan-rows needed in TRAIN for a rule to be considered (avoid tiny-sample mirages).",
@@ -743,6 +1019,18 @@ def _agent_choose_next_action(*, ctx: dict, last_task_type: str, last_result: di
     outcome_cols = ctx.get("outcome_columns") or []
     ignored_feat = ctx.get("ignored_feature_columns") or []
     filters = st.session_state.get("agent_session_filters") or {}
+    recent_actions = []
+    try:
+        ra_raw = (ctx.get('research_state') or {}).get('recent_actions')
+        if isinstance(ra_raw, str) and ra_raw.strip():
+            recent_actions = json.loads(ra_raw)
+        elif isinstance(ra_raw, list):
+            recent_actions = ra_raw
+    except Exception:
+        recent_actions = []
+
+    near_misses = ((last_result or {}).get('distilled') or {}).get('near_misses') or []
+    near_summary = _summarize_near_misses(near_misses, max_items=8)
 
     system = """You are Jarvis Football Research Agent.
 You must follow the Bible rules:
@@ -751,7 +1039,13 @@ You must follow the Bible rules:
 - Always split by time (train/val/test). Do not tune on test.
 - Strategies must become explicit filters (ranges + categorical constraints) with minimum samples.
 - Prefer simple stable rules; penalize overfit/regime dependence.
-You can choose what job to run next, within the available job types."""
+You can choose what job to run next, within the available job types.
+
+Behaviour requirements (very important):
+- If the latest job produced NO passing rules, do NOT stop. First summarise why (use near_misses_summary, feature_importance, drift_report, monthly stats), then run a diagnostic/refinement job.
+- Prefer these fallbacks when stuck: bracket_sweep -> categorical_scan -> rule_search -> hyperopt -> explain_best_model.
+- Avoid repeating recently-tried experiments (recent_actions) unless you explicitly explain what is changing.
+- Always keep strategies leakage-safe and tune ONLY on train/val."""
 
     user = {
         "goal": "Build a BO2.5 strategy with explicit filters that generalise to future matches.",
@@ -767,7 +1061,9 @@ You can choose what job to run next, within the available job types."""
         "outcome_columns": outcome_cols,
         "ignored_feature_columns": ignored_feat,
         "available_job_types": allowed,
-        "instruction": "Choose the next job to run (or stop). If choosing a job, provide params. Keep params small. Only use train/val for decision-making; test is for final reporting only."
+        "near_misses_summary": near_summary,
+        "recent_actions": recent_actions,
+        "instruction": "Choose the next job to run. If there are no passing rules yet, you MUST continue with a diagnostic/refinement job (do not stop). Keep params small and focused. Only use train/val for decision-making; test is for final reporting only."
     }
 
     prompt = f"""Return STRICT JSON with this schema:
@@ -864,23 +1160,72 @@ def _autopilot_tick():
 
     _append("assistant", _render_distilled_top(result_obj, top_n=3))
 
-    # Interpretation (short, but explicit about next step)
+    # Interpretation (still short, but diagnostic even on failure)
     payload = (result_obj or {}).get("result") or {}
     distilled = (payload.get("distilled") or {})
-    rules = (distilled.get("top_distilled_rules") or [])[:3]
+    rules = distilled.get("top_distilled_rules") or []
+    near_misses = distilled.get("near_misses") or []
+    nm = _summarize_near_misses(near_misses)
 
     interp: List[str] = []
     interp.append("### 🧠 Interpretation + next step")
-    if not rules:
-        interp.append("- No rules passed the gates. Next move: run again with **longer duration** or enable **hyperopt**, or relax gates slightly (but never tune on test).")
+    if rules:
+        interp.append(f"- Found **{len(rules)}** rule candidates that passed the current gates (showing top {min(3, len(rules))}).")
+        interp.append("- Next: refine brackets/odds bands and verify regime stability (monthly/seasonal), then re-validate on the strict time-split.")
     else:
-        interp.append("- These are explicit filters derived from the best model's ranking signal, then re-scored on train/val/test.")
-        interp.append("- If the top rule is stable (val close to train AND test drawdown/losing streak within limits), we promote it to 'candidate strategy' and log it to research_memory.")
-        interp.append("- Next: run a **reality check** across time windows (e.g. monthly) to spot regime dependence, then run a second job focused on refining brackets/odds bands.")
+        interp.append("- **No rules passed the gates** in this run. That doesn't mean there's no signal; it means nothing met the current stability/risk requirements.")
+        if nm.get("top_gates"):
+            interp.append("- Most common failure gates: " + ", ".join([f"{k} ({v})" for k, v in nm["top_gates"]]))
+        if nm.get("top_candidates"):
+            interp.append("- Example near-miss candidates:")
+            for c in nm["top_candidates"]:
+                parts = []
+                if c.get("filter_summary"):
+                    parts.append(c["filter_summary"])
+                if c.get("failed_gates"):
+                    parts.append("failed: " + ", ".join(c["failed_gates"]))
+                if c.get("val_roi") is not None:
+                    parts.append(f"val ROI {c['val_roi']:+.3f}")
+                if c.get("test_roi") is not None:
+                    parts.append(f"test ROI {c['test_roi']:+.3f}")
+                interp.append("  - " + " | ".join(parts))
+        b_warn = ((payload.get("baseline") or {}).get("test_regime_warning") or {})
+        if b_warn.get("warn"):
+            interp.append(
+                f"- ⚠️ Regime instability warning: test monthly ROI std {float(b_warn.get('roi_std', 0.0)):.3f} > {float(b_warn.get('roi_std_warn_threshold', 0.25)):.2f}. Consider subgroup/regime filters."
+            )
+        interp.append("- Next: run a **diagnostic** job (bracket_sweep/subgroup_scan/hyperopt_pl_lab) using the strongest features and near-miss patterns.")
     _append("assistant", "\n".join(interp))
 
     # Log to sheet
     _log_lab_to_sheet(job_id, result_obj, tags="pl_lab,bo2.5,narrated_autopilot")
+
+    # Persist a compact action/result memory to research_state to avoid repetition
+    try:
+        ra = []
+        ra_raw = (ctx_local.get("research_state") or {}).get("recent_actions")
+        if isinstance(ra_raw, str) and ra_raw.strip():
+            ra = json.loads(ra_raw)
+        elif isinstance(ra_raw, list):
+            ra = ra_raw
+        # derive a compact summary
+        baseline_test = ((payload.get("baseline") or {}).get("test") or {})
+        top_rule = None
+        if rules:
+            top_rule = rules[0].get("filter_summary") or rules[0].get("filter")
+        ra.append({
+            "ts_utc": datetime.utcnow().isoformat(),
+            "job_id": str(job_id),
+            "task_type": str(job.get("task_type") or ""),
+            "pl_column": str(payload.get("picked") or payload.get("pl_column") or ""),
+            "passed_rules": bool(rules),
+            "baseline_test_roi": float(baseline_test.get("roi", 0.0)),
+            "top_rule": top_rule,
+        })
+        ra = ra[-60:]
+        _run_tool("set_research_state", {"key": "recent_actions", "value": json.dumps(ra)})
+    except Exception:
+        pass
 
     # Decide next step if agent session is active and budget remains
     if st.session_state.get("agent_session_active") and st.session_state.get("agent_session_steps_done", 0) < st.session_state.get("agent_session_max_steps", 8):
@@ -896,10 +1241,31 @@ def _autopilot_tick():
         _append_chat("assistant", "🧠 Agent decision: " + (decision.get("narration") or ""))
 
         if decision.get("stop"):
-            _append_chat("assistant", "🛑 Agent stopped (no further actions).")
-            st.session_state["agent_session_active"] = False
-            st.session_state.active_job_id = ""
-            return
+            if not rules:
+                # Do not stop on a failure-to-distill / failure-to-pass-gates. Run a diagnostic tool next.
+                recent_actions = []
+                try:
+                    ra_raw = (ctx_local.get("research_state") or {}).get("recent_actions")
+                    if ra_raw:
+                        recent_actions = json.loads(ra_raw) if isinstance(ra_raw, str) else list(ra_raw)
+                except Exception:
+                    recent_actions = []
+                task_type, auto_params, why = _choose_diagnostic_task(payload, ctx_local, recent_actions)
+                _append_chat(
+                    "assistant",
+                    f"🟡 No passing rules yet, so I won't stop. Next I will run **{task_type}**. {why}",
+                )
+                decision = {
+                    "stop": False,
+                    "next_task_type": task_type,
+                    "next_params": auto_params,
+                    "narration": f"Auto-diagnostic because no rules passed. {why}",
+                }
+            else:
+                _append_chat("assistant", "🛑 Agent stopped (no further actions).")
+                st.session_state["agent_session_active"] = False
+                st.session_state.active_job_id = ""
+                return
 
         next_task = decision.get("next_task_type")
         next_params = decision.get("next_params") or {}
