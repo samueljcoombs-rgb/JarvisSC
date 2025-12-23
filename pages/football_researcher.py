@@ -564,7 +564,7 @@ DEFAULT_ENFORCEMENT = {
     "min_test_rows": 60,
     "max_train_val_gap_roi": 0.4,
     "max_test_drawdown": -50.0,
-    "max_test_losing_streak_bets": 50,
+    "max_test_losing_streak_bets": 50.0,
 }
 
 ENFORCEMENT_EXPLANATION = {
