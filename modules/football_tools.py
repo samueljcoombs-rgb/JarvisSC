@@ -22,6 +22,134 @@ try:
 except Exception:
     StorageException = Exception
 
+
+
+# ============================================================
+# New research job types (server-side tools)
+# ============================================================
+
+def start_subgroup_scan(
+    pl_column: str,
+    duration_minutes: int = 30,
+    group_cols: Optional[List[str]] = None,
+    max_groups: int = 50,
+    enforcement: Optional[Dict[str, Any]] = None,
+    row_filters: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """
+    Queue a subgroup scan job (categorical buckets).
+    Returns a jobs row payload (includes job_id).
+    """
+    ctx = get_research_context(limit_notes=10)
+    derived = (ctx.get("derived") or {})
+    ignored_columns = derived.get("ignored_columns") or []
+    outcome_columns = derived.get("outcome_columns") or []
+    ignored_feature_columns = derived.get("ignored_feature_columns") or ctx.get("ignored_feature_columns") or []
+
+    storage_bucket = (st.secrets.get("DATA_STORAGE_BUCKET") or os.getenv("DATA_STORAGE_BUCKET") or "football-data").strip()
+    storage_path = (st.secrets.get("DATA_STORAGE_PATH") or os.getenv("DATA_STORAGE_PATH") or "football_ai_NNIA.csv").strip()
+    results_bucket = (st.secrets.get("RESULTS_BUCKET") or os.getenv("RESULTS_BUCKET") or "football-results").strip()
+
+    params = {
+        "storage_bucket": storage_bucket,
+        "storage_path": storage_path,
+        "_results_bucket": results_bucket,
+        "pl_column": pl_column,
+        "duration_minutes": int(duration_minutes),
+        "group_cols": group_cols or ["MODE", "MARKET", "LEAGUE", "BRACKET"],
+        "max_groups": int(max_groups),
+        "ignored_columns": ignored_columns,
+        "outcome_columns": outcome_columns,
+        "ignored_feature_columns": ignored_feature_columns,
+        "row_filters": row_filters or [],
+        "enforcement": enforcement or {},
+    }
+    return submit_job("subgroup_scan", params)
+
+def start_bracket_sweep(
+    pl_column: str,
+    duration_minutes: int = 30,
+    sweep_cols: Optional[List[str]] = None,
+    n_bins: int = 12,
+    max_results: int = 50,
+    enforcement: Optional[Dict[str, Any]] = None,
+    row_filters: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """
+    Queue a bracket sweep job (numeric quantile ranges).
+    """
+    ctx = get_research_context(limit_notes=10)
+    derived = (ctx.get("derived") or {})
+    ignored_columns = derived.get("ignored_columns") or []
+    outcome_columns = derived.get("outcome_columns") or []
+    ignored_feature_columns = derived.get("ignored_feature_columns") or ctx.get("ignored_feature_columns") or []
+
+    storage_bucket = (st.secrets.get("DATA_STORAGE_BUCKET") or os.getenv("DATA_STORAGE_BUCKET") or "football-data").strip()
+    storage_path = (st.secrets.get("DATA_STORAGE_PATH") or os.getenv("DATA_STORAGE_PATH") or "football_ai_NNIA.csv").strip()
+    results_bucket = (st.secrets.get("RESULTS_BUCKET") or os.getenv("RESULTS_BUCKET") or "football-results").strip()
+
+    params = {
+        "storage_bucket": storage_bucket,
+        "storage_path": storage_path,
+        "_results_bucket": results_bucket,
+        "pl_column": pl_column,
+        "duration_minutes": int(duration_minutes),
+        "sweep_cols": sweep_cols or [],
+        "n_bins": int(n_bins),
+        "max_results": int(max_results),
+        "ignored_columns": ignored_columns,
+        "outcome_columns": outcome_columns,
+        "ignored_feature_columns": ignored_feature_columns,
+        "row_filters": row_filters or [],
+        "enforcement": enforcement or {},
+    }
+    return submit_job("bracket_sweep", params)
+
+def start_hyperopt_pl_lab(
+    pl_column: str,
+    duration_minutes: int = 120,
+    hyperopt_trials: int = 30,
+    top_fracs: Optional[List[float]] = None,
+    enforcement: Optional[Dict[str, Any]] = None,
+    row_filters: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """
+    Queue an Optuna-driven hyperopt PL lab job (val-only tuning, test report).
+    """
+    ctx = get_research_context(limit_notes=10)
+    derived = (ctx.get("derived") or {})
+    ignored_columns = derived.get("ignored_columns") or []
+    outcome_columns = derived.get("outcome_columns") or []
+    ignored_feature_columns = derived.get("ignored_feature_columns") or ctx.get("ignored_feature_columns") or []
+
+    storage_bucket = (st.secrets.get("DATA_STORAGE_BUCKET") or os.getenv("DATA_STORAGE_BUCKET") or "football-data").strip()
+    storage_path = (st.secrets.get("DATA_STORAGE_PATH") or os.getenv("DATA_STORAGE_PATH") or "football_ai_NNIA.csv").strip()
+    results_bucket = (st.secrets.get("RESULTS_BUCKET") or os.getenv("RESULTS_BUCKET") or "football-results").strip()
+
+    params = {
+        "storage_bucket": storage_bucket,
+        "storage_path": storage_path,
+        "_results_bucket": results_bucket,
+        "pl_column": pl_column,
+        "duration_minutes": int(duration_minutes),
+        "hyperopt_trials": int(hyperopt_trials),
+        "top_fracs": top_fracs or [0.05, 0.1, 0.2],
+        "ignored_columns": ignored_columns,
+        "outcome_columns": outcome_columns,
+        "ignored_feature_columns": ignored_feature_columns,
+        "row_filters": row_filters or [],
+        "enforcement": enforcement or {},
+    }
+    return submit_job("hyperopt_pl_lab", params)
+
+def get_job_events(job_id: str, limit: int = 100) -> Dict[str, Any]:
+    """
+    Fetch latest job events for a job_id (requires public.job_events).
+    """
+    sb = _sb()
+    rows = sb.table("job_events").select("*").eq("job_id", job_id).order("ts", desc=True).limit(int(limit)).execute().data
+    return {"job_id": job_id, "events": rows}
+
 # ============================================================
 # Google Sheets tabs (agreed names)
 # ============================================================
@@ -408,6 +536,7 @@ def start_pl_lab(
     ignored_columns = derived.get("ignored_columns") or []
     outcome_columns = derived.get("outcome_columns") or []
 
+    ignored_feature_columns = derived.get("ignored_feature_columns") or ctx.get("ignored_feature_columns") or []
     storage_bucket = (st.secrets.get("DATA_STORAGE_BUCKET") or os.getenv("DATA_STORAGE_BUCKET") or "football-data").strip()
     storage_path = (st.secrets.get("DATA_STORAGE_PATH") or os.getenv("DATA_STORAGE_PATH") or "football_ai_NNIA.csv").strip()
     results_bucket = (st.secrets.get("RESULTS_BUCKET") or os.getenv("RESULTS_BUCKET") or "football-results").strip()
@@ -418,12 +547,15 @@ def start_pl_lab(
         "_results_bucket": results_bucket,
         "pl_column": pl_column,
         "duration_minutes": int(duration_minutes),
+        "duration_minutes": int(duration_minutes),
         "top_fracs": [0.05, 0.1, 0.2],
         "do_hyperopt": bool(do_hyperopt),
+        "hyperopt_iter": int(hyperopt_iter),
         "hyperopt_iter": int(hyperopt_iter),
         "top_n": 12,
         "ignored_columns": ignored_columns,
         "outcome_columns": outcome_columns,
+        "ignored_feature_columns": ignored_feature_columns,
         "enforcement": enforcement or {},
     }
     return submit_job("pl_lab", params)
