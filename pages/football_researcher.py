@@ -258,6 +258,25 @@ TOOLS = [
             }
         }
     },
+        {
+        "type": "function",
+        "function": {
+            "name": "subgroup_scan",
+            "description": "Run a subgroup scan (alias for start_subgroup_scan).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pl_column": {"type": "string"},
+                    "duration_minutes": {"type": "integer", "default": 30},
+                    "group_cols": {"type": "array", "items": {"type": "string"}},
+                    "max_groups": {"type": "integer", "default": 50},
+                    "enforcement": {"type": "object"},
+                    "row_filters": {"type": "array", "items": {"type": "object"}}
+                },
+                "required": ["pl_column"]
+            }
+        }
+    },
     {
         "type": "function",
         "function": {
@@ -278,11 +297,50 @@ TOOLS = [
             }
         }
     },
+        {
+        "type": "function",
+        "function": {
+            "name": "bracket_sweep",
+            "description": "Run a bracket sweep (alias for start_bracket_sweep).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pl_column": {"type": "string"},
+                    "duration_minutes": {"type": "integer", "default": 30},
+                    "sweep_cols": {"type": "array", "items": {"type": "string"}},
+                    "n_bins": {"type": "integer", "default": 12},
+                    "max_results": {"type": "integer", "default": 50},
+                    "enforcement": {"type": "object"},
+                    "row_filters": {"type": "array", "items": {"type": "object"}}
+                },
+                "required": ["pl_column"]
+            }
+        }
+    },
     {
         "type": "function",
         "function": {
             "name": "start_hyperopt_pl_lab",
             "description": "Queue an Optuna-driven hyperopt job (val-only tuning) then distill to rules.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pl_column": {"type": "string"},
+                    "duration_minutes": {"type": "integer", "default": 120},
+                    "hyperopt_trials": {"type": "integer", "default": 30},
+                    "top_fracs": {"type": "array", "items": {"type": "number"}},
+                    "enforcement": {"type": "object"},
+                    "row_filters": {"type": "array", "items": {"type": "object"}}
+                },
+                "required": ["pl_column"]
+            }
+        }
+    },
+        {
+        "type": "function",
+        "function": {
+            "name": "hyperopt_pl_lab",
+            "description": "Run hyperopt PL lab (alias for start_hyperopt_pl_lab).",
             "parameters": {
                 "type": "object",
                 "properties": {
