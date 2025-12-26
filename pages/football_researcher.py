@@ -404,7 +404,9 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "job_id": {"type": "string"},
-                    "timeout_seconds": {"type": "integer", "default": 600}
+                    "timeout_s": {"type": "integer", "default": 600},
+                    "poll_s": {"type": "integer", "default": 2},
+                    "auto_download": {"type": "boolean", "default": false}
                 },
                 "required": ["job_id"]
             }
@@ -756,9 +758,17 @@ def _resolve_pl_column(user_text: str, ctx: Dict[str, Any]) -> str:
         return _normalize(x).replace(" ", "")
 
     t_compact = t.replace(" ", "")
-    for col in outcomes:
-        if nn(col) in t_compact:
+    # Prefer specific PL columns over generic "PL"
+    outcomes_sorted = sorted([str(c) for c in outcomes], key=lambda s: len(s), reverse=True)
+    explicit_generic_pl = (" pl " in f" {t} ") or t.strip().endswith("pl")
+    for col in outcomes_sorted:
+        col_n = nn(col)
+        if col_n == "pl":
+            continue
+        if col_n and col_n in t_compact:
             return col
+    if explicit_generic_pl and "PL" in outcomes:
+        return "PL"
 
     # default
     return "BO 2.5 PL"
