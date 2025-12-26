@@ -11,6 +11,15 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import streamlit as st
 
+
+import sys
+from pathlib import Path
+
+# Ensure repository root is on sys.path so 'jarvissc' package imports work on Streamlit Cloud
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 # Optional dependency for non-blocking auto refresh
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -19,7 +28,11 @@ except Exception:
 
 from openai import OpenAI, BadRequestError
 
-from modules import football_tools as functions
+# --- tool imports (robust across local/Cloud) ---
+try:
+    from jarvissc.modules import football_tools as functions
+except Exception:
+    from modules import football_tools as functions
 
 # ============================================================
 # OpenAI client + model
@@ -153,32 +166,6 @@ def _run_tool(name: str, args: Optional[Dict[str, Any]] = None) -> Any:
             "error": f"Tool {resolved_name} failed: {type(e).__name__}: {e}",
         }
 
-
-
-def _coerce_row_filters(filters_any: Any) -> List[Dict[str, Any]]:
-    """Normalize various filter shapes into worker-friendly row_filters (list of dicts).
-
-    Accepts:
-      - None / empty -> []
-      - list[dict] already in {col,op,value} form (passes through)
-      - dict[str, Any] -> equality/membership filters
-    """
-    if not filters_any:
-        return []
-    if isinstance(filters_any, list):
-        return [f for f in filters_any if isinstance(f, dict)]
-    if isinstance(filters_any, dict):
-        out: List[Dict[str, Any]] = []
-        for k, v in filters_any.items():
-            if k is None:
-                continue
-            col = str(k)
-            if isinstance(v, (list, tuple, set)):
-                out.append({"col": col, "op": "in", "value": list(v)})
-            else:
-                out.append({"col": col, "op": "==", "value": v})
-        return out
-    return []
 # =================================
 # Tools schema
 
@@ -404,9 +391,7 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "job_id": {"type": "string"},
-                    "timeout_s": {"type": "integer", "default": 600},
-                    "poll_s": {"type": "integer", "default": 2},
-                    "auto_download": {"type": "boolean", "default": false}
+                    "timeout_seconds": {"type": "integer", "default": 600}
                 },
                 "required": ["job_id"]
             }
@@ -758,17 +743,9 @@ def _resolve_pl_column(user_text: str, ctx: Dict[str, Any]) -> str:
         return _normalize(x).replace(" ", "")
 
     t_compact = t.replace(" ", "")
-    # Prefer specific PL columns over generic "PL"
-    outcomes_sorted = sorted([str(c) for c in outcomes], key=lambda s: len(s), reverse=True)
-    explicit_generic_pl = (" pl " in f" {t} ") or t.strip().endswith("pl")
-    for col in outcomes_sorted:
-        col_n = nn(col)
-        if col_n == "pl":
-            continue
-        if col_n and col_n in t_compact:
+    for col in outcomes:
+        if nn(col) in t_compact:
             return col
-    if explicit_generic_pl and "PL" in outcomes:
-        return "PL"
 
     # default
     return "BO 2.5 PL"
@@ -901,95 +878,6 @@ DEFAULT_ENFORCEMENT = {
     "max_test_drawdown": -50.0,
     "max_test_losing_streak_bets": 50.0,
 }
-
-
-
-def _render_result_analysis(payload: dict) -> str:
-    """User-facing analysis of a job result (compact, Bible-aligned)."""
-    picked = payload.get("picked") or {}
-    baseline = payload.get("baseline") or {}
-    splits = payload.get("splits") or {}
-    features = payload.get("features") or {}
-    monthly_stats = (baseline.get("test_monthly_stats") or {})
-    regime_warn = (baseline.get("test_regime_warning") or {})
-
-    def _fmt(x, nd=3):
-        try:
-            if x is None:
-                return "n/a"
-            return f"{float(x):.{nd}f}"
-        except Exception:
-            return str(x)
-
-    b_train = baseline.get("train") or {}
-    b_val = baseline.get("val") or {}
-    b_test = baseline.get("test") or {}
-
-    lines: List[str] = []
-    lines.append("### 📊 Quick analysis (what we learned)")
-    lines.append(f"- Market picked: `{picked}`")
-    lines.append(
-        f"- Splits (rows): train **{splits.get('train_rows','?')}**, val **{splits.get('val_rows','?')}**, test **{splits.get('test_rows','?')}**"
-    )
-    lines.append(
-        f"- Features used: total **{features.get('n_features_total','?')}** (numeric **{features.get('n_numeric','?')}**, categorical **{features.get('n_categorical','?')}**)"
-    )
-    lines.append("")
-    lines.append("**Baseline performance (strict time-split):**")
-    lines.append(
-        f"- Train ROI: **{_fmt(b_train.get('roi'))}** | Val ROI: **{_fmt(b_val.get('roi'))}** | Test ROI: **{_fmt(b_test.get('roi'))}**"
-    )
-    if b_test.get("max_drawdown") is not None:
-        lines.append(f"- Test max drawdown: **{_fmt(b_test.get('max_drawdown'))}**")
-    if b_test.get("losing_streak_bets") is not None:
-        lines.append(f"- Test losing streak (bets): **{b_test.get('losing_streak_bets')}**")
-    if b_test.get("n_bets") is not None:
-        lines.append(f"- Test bets: **{b_test.get('n_bets')}**")
-
-    lines.append("")
-    lines.append("**Regime / monthly stability check (test):**")
-    if monthly_stats:
-        lines.append(
-            f"- Monthly ROI mean: **{_fmt(monthly_stats.get('roi_mean'))}**, std: **{_fmt(monthly_stats.get('roi_std'))}**, best: **{_fmt(monthly_stats.get('roi_max'))}**, worst: **{_fmt(monthly_stats.get('roi_min'))}**"
-        )
-    if regime_warn:
-        lines.append(
-            f"- Regime warning: **{bool(regime_warn.get('flag'))}** (ROI std {_fmt(regime_warn.get('roi_std'))} vs threshold {_fmt(regime_warn.get('roi_std_warn_threshold'))})"
-        )
-
-    return "\n".join(lines)
-
-
-def _render_next_job_commentary(next_task: str, why: str, merged_params: dict) -> str:
-    """Explain to the user what the next job will do and why we're doing it."""
-    picked = {
-        "pl_column": merged_params.get("pl_column"),
-        "side": merged_params.get("side"),
-        "odds_col": merged_params.get("odds_col"),
-    }
-
-    lines: List[str] = []
-    lines.append("### 🔜 Next job (autopilot) — what & why")
-    lines.append(f"- Next task: **`{next_task}`**")
-    lines.append(f"- Why: {why}")
-    lines.append(f"- Context: `{picked}`")
-
-    if next_task == "bracket_sweep":
-        cols = merged_params.get("sweep_cols") or merged_params.get("focus_numeric_cols") or []
-        lines.append(f"- It will search value ranges (bins) for: `{cols}` and score each range on train/val/test with gates.")
-        lines.append("- Success looks like: a range that stays positive on **val and test** without big drawdown / losing streak.")
-    elif next_task == "subgroup_scan":
-        cols = merged_params.get("group_cols") or merged_params.get("group_by_cols") or []
-        lines.append(f"- It will scan grouped segments for: `{cols}` and find buckets with stable ROI in val/test.")
-        lines.append("- Success looks like: a segment that holds up out-of-sample (not just one league/month).")
-    elif next_task == "hyperopt_pl_lab":
-        trials = merged_params.get("hyperopt_trials") or merged_params.get("trials")
-        lines.append(f"- It will tune model/distillation knobs on **validation only** (trials={trials}) to find a more generalisable rule.")
-        lines.append("- Success looks like: distilled rules that pass the gates, then re-validated on test.")
-    else:
-        lines.append("- It will run the selected diagnostic to locate robust pockets of signal and convert them into explicit filter rules.")
-
-    return "\n".join(lines)
 
 
 def _choose_diagnostic_task(payload: dict, ctx: dict, recent_actions: list) -> tuple[str, dict]:
@@ -1396,9 +1284,6 @@ def _autopilot_tick():
 
     _append("assistant", _render_distilled_top(result_obj, top_n=3))
 
-    if st.session_state.get("verbose_result_analysis", True):
-        _append("assistant", _render_result_analysis(payload))
-
     # Interpretation (still short, but diagnostic even on failure)
     payload = (result_obj or {}).get("result") or {}
     distilled = (payload.get("distilled") or {})
@@ -1509,44 +1394,20 @@ def _autopilot_tick():
         next_task = decision.get("next_task_type")
         next_params = decision.get("next_params") or {}
 
-        # Safety net: if the agent didn't select a tool, and we still have no passing rules,
-        # pick a diagnostic task deterministically (do not stop).
-        if (not next_task) and (not rules):
-            recent_actions = []
-            try:
-                ra_raw = (ctx_local.get("research_state") or {}).get("recent_actions")
-                if ra_raw:
-                    recent_actions = json.loads(ra_raw) if isinstance(ra_raw, str) else list(ra_raw)
-            except Exception:
-                recent_actions = []
-            task_type, auto_params, why = _choose_diagnostic_task(payload, ctx_local, recent_actions)
-            _append_chat("assistant", f"🟡 No passing rules yet and no next task selected; running diagnostic: {task_type}. {why}")
-            next_task = task_type
-            next_params = {**auto_params, **(next_params or {})}
-
-        if not next_task:
-            _append_chat("assistant", "🛑 Agent did not select a next task. Stopping agent session.")
-            st.session_state["agent_session_active"] = False
-            st.session_state.active_job_id = ""
-            return
-
         # Enforce Bible columns + gates on every job (and keep carry-over filters)
         base_params = {
             "pl_column": (st.session_state.get("agent_session_pl_column") or (job.get("params") or {}).get("pl_column") or "BO 2.5 PL"),
             "storage_path": (job.get("params") or {}).get("storage_path", "football_ai_NNIA.csv"),
             "storage_bucket": (job.get("params") or {}).get("storage_bucket", "football-data"),
-            "ignored_columns": (ctx_local.get("derived") or {}).get("ignored_columns") or (job.get("params") or {}).get("ignored_columns") or [],
-            "outcome_columns": (ctx_local.get("derived") or {}).get("outcome_columns") or (job.get("params") or {}).get("outcome_columns") or [],
-            "ignored_feature_columns": (ctx_local.get("derived") or {}).get("ignored_feature_columns") or (job.get("params") or {}).get("ignored_feature_columns") or [],
-            "enforcement": (job.get("params") or {}).get("enforcement") or (ctx_local.get("enforcement") if isinstance(ctx, dict) else {}) or {},
+            "ignored_columns": (ctx.get("derived") or {}).get("ignored_columns") or (job.get("params") or {}).get("ignored_columns") or [],
+            "outcome_columns": (ctx.get("derived") or {}).get("outcome_columns") or (job.get("params") or {}).get("outcome_columns") or [],
+            "ignored_feature_columns": (ctx.get("derived") or {}).get("ignored_feature_columns") or (job.get("params") or {}).get("ignored_feature_columns") or [],
+            "enforcement": (job.get("params") or {}).get("enforcement") or (ctx.get("enforcement") if isinstance(ctx, dict) else {}) or {},
             "duration_minutes": int(st.session_state.get("agent_session_minutes_per_job", 10)),
             "filters": st.session_state.get("agent_session_filters") or {},
-            "row_filters": (job.get("params") or {}).get("row_filters") or _coerce_row_filters(st.session_state.get("agent_session_filters") or {}),
             "top_n": int((job.get("params") or {}).get("top_n", 12)),
         }
         merged = {**base_params, **next_params}
-        _append("assistant", _render_next_job_commentary(next_task, locals().get("why") or "Diagnostic continuation after gates failed.", merged))
-
         submitted = _run_tool("submit_job", {"task_type": next_task, "params": merged})
         new_job_id = (submitted or {}).get("job_id") if isinstance(submitted, dict) else None
         if new_job_id:
@@ -1684,7 +1545,6 @@ with st.sidebar:
 
     st.radio("Agent mode", ["chat", "autopilot"], key="agent_mode")
     st.checkbox("Narrate autopilot runs", key="autopilot_narrate", value=True)
-    st.checkbox("Verbose result analysis", key="verbose_result_analysis", value=True)
 
     st.divider()
     if st.button("➕ New chat"):
