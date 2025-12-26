@@ -670,3 +670,38 @@ def delete_chat(session_id: str) -> Dict[str, Any]:
     except Exception:
         pass
     return {"ok": True, "deleted": True, "session_id": session_id}
+
+# -------------------------
+# Alias tool entrypoints
+# -------------------------
+def subgroup_scan(pl_column, top_n=12, duration_minutes=10, enforcement=None, row_filters=None):
+    """Alias for start_subgroup_scan (some prompts will call subgroup_scan)."""
+    return start_subgroup_scan(
+        pl_column=pl_column,
+        top_n=top_n,
+        duration_minutes=duration_minutes,
+        enforcement=enforcement,
+        row_filters=row_filters,
+    )
+
+def bracket_sweep(pl_column, sweep_feature, top_n=12, duration_minutes=15, enforcement=None, row_filters=None):
+    """Alias for start_bracket_sweep (some prompts will call bracket_sweep)."""
+    return start_bracket_sweep(
+        pl_column=pl_column,
+        sweep_feature=sweep_feature,
+        top_n=top_n,
+        duration_minutes=duration_minutes,
+        enforcement=enforcement,
+        row_filters=row_filters,
+    )
+
+def hyperopt_pl_lab(pl_column, top_n=12, duration_minutes=20, enforcement=None, row_filters=None, hyperopt_iter=25):
+    """Alias for start_hyperopt_pl_lab (some prompts will call hyperopt_pl_lab)."""
+    return start_hyperopt_pl_lab(
+        pl_column=pl_column,
+        top_n=top_n,
+        duration_minutes=duration_minutes,
+        enforcement=enforcement,
+        row_filters=row_filters,
+        hyperopt_iter=hyperopt_iter,
+    )
