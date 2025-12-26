@@ -11,15 +11,6 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import streamlit as st
 
-
-import sys
-from pathlib import Path
-
-# Ensure repository root is on sys.path so 'jarvissc' package imports work on Streamlit Cloud
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-
 # Optional dependency for non-blocking auto refresh
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -28,11 +19,23 @@ except Exception:
 
 from openai import OpenAI, BadRequestError
 
-# --- tool imports (robust across local/Cloud) ---
-try:
-    from jarvissc.modules import football_tools as functions
-except Exception:
-    from modules import football_tools as functions
+# ------------------------------------------------------------
+# Import football_tools by file path (works on Streamlit Cloud + local)
+# ------------------------------------------------------------
+import importlib.util
+from pathlib import Path
+
+_tools_path = Path(__file__).resolve().parents[1] / "modules" / "football_tools.py"
+if not _tools_path.exists():
+    raise ImportError(f"Cannot locate football_tools.py at {_tools_path}")
+
+_spec = importlib.util.spec_from_file_location("football_tools", str(_tools_path))
+if _spec is None or _spec.loader is None:
+    raise ImportError("Could not create import spec for football_tools.py")
+
+functions = importlib.util.module_from_spec(_spec)  # type: ignore
+_spec.loader.exec_module(functions)  # type: ignore
+
 
 # ============================================================
 # OpenAI client + model
