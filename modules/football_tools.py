@@ -503,7 +503,13 @@ def download_result(result_path: str, bucket: str = "") -> Dict[str, Any]:
     except Exception:
         return {"ok": True, "bucket": b, "result_path": result_path, "raw_text": raw.decode("latin-1", errors="replace")}
 
-def wait_for_job(job_id: str, timeout_s: int = 300, poll_s: int = 5, auto_download: bool = True) -> Dict[str, Any]:
+def wait_for_job(job_id: str, timeout_s: int = 300, poll_s: int = 5, auto_download: bool = True, **kwargs) -> Dict[
+    # Backwards-compatible argument aliases (LLM/tool-schema drift protection)
+    if 'timeout_seconds' in kwargs and kwargs['timeout_seconds'] is not None:
+        timeout_s = int(kwargs['timeout_seconds'])
+    if 'poll_seconds' in kwargs and kwargs['poll_seconds'] is not None:
+        poll_s = int(kwargs['poll_seconds'])
+str, Any]:
     deadline = time.time() + int(timeout_s or 300)
     poll = max(1, int(poll_s or 5))
     last_job: Dict[str, Any] = {}
