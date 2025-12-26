@@ -63,7 +63,6 @@ def start_subgroup_scan(
         "ignored_feature_columns": ignored_feature_columns,
         "row_filters": row_filters or [],
         "enforcement": enforcement or {},
-        "row_filters": row_filters or [],
     }
     return submit_job("subgroup_scan", params)
 
@@ -103,7 +102,6 @@ def start_bracket_sweep(
         "ignored_feature_columns": ignored_feature_columns,
         "row_filters": row_filters or [],
         "enforcement": enforcement or {},
-        "row_filters": row_filters or [],
     }
     return submit_job("bracket_sweep", params)
 
@@ -141,7 +139,6 @@ def start_hyperopt_pl_lab(
         "ignored_feature_columns": ignored_feature_columns,
         "row_filters": row_filters or [],
         "enforcement": enforcement or {},
-        "row_filters": row_filters or [],
     }
     return submit_job("hyperopt_pl_lab", params)
 
@@ -533,7 +530,6 @@ def start_pl_lab(
     do_hyperopt: bool = False,
     hyperopt_iter: int = 12,
     enforcement: Optional[Dict[str, Any]] = None,
-    row_filters: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     ctx = get_research_context(limit_notes=10)
     derived = (ctx.get("derived") or {})
@@ -555,12 +551,12 @@ def start_pl_lab(
         "top_fracs": [0.05, 0.1, 0.2],
         "do_hyperopt": bool(do_hyperopt),
         "hyperopt_iter": int(hyperopt_iter),
+        "hyperopt_iter": int(hyperopt_iter),
         "top_n": 12,
         "ignored_columns": ignored_columns,
         "outcome_columns": outcome_columns,
         "ignored_feature_columns": ignored_feature_columns,
         "enforcement": enforcement or {},
-        "row_filters": row_filters or [],
     }
     return submit_job("pl_lab", params)
 
@@ -678,6 +674,25 @@ def delete_chat(session_id: str) -> Dict[str, Any]:
 # -------------------------
 # Alias tool entrypoints
 # -------------------------
+def _coerce_row_filters(filters_any):
+    """Accept either row_filters (list[dict]) or filters (dict) and normalize to row_filters."""
+    if not filters_any:
+        return []
+    if isinstance(filters_any, list):
+        return [f for f in filters_any if isinstance(f, dict)]
+    if isinstance(filters_any, dict):
+        out = []
+        for k, v in filters_any.items():
+            if k is None:
+                continue
+            col = str(k)
+            if isinstance(v, (list, tuple, set)):
+                out.append({"col": col, "op": "in", "value": list(v)})
+            else:
+                out.append({"col": col, "op": "==", "value": v})
+        return out
+    return []
+
 
 def subgroup_scan(
     pl_column: str,
@@ -687,93 +702,110 @@ def subgroup_scan(
     max_groups: int = 50,
     enforcement: Optional[Dict[str, Any]] = None,
     row_filters: Optional[List[Dict[str, Any]]] = None,
+    filters: Optional[Dict[str, Any]] = None,
     **kwargs,
 ) -> Dict[str, Any]:
-    """Alias for start_subgroup_scan (some prompts will call subgroup_scan).
+    """Alias for start_subgroup_scan (LLM sometimes calls subgroup_scan).
 
-    Accepts legacy names like group_by_cols.
+    Supports legacy argument names:
+      - group_by_cols -> group_cols
+      - filters (dict) -> row_filters
     """
     if group_cols is None and group_by_cols is not None:
         group_cols = group_by_cols
+    if row_filters is None and filters is not None:
+        row_filters = _coerce_row_filters(filters)
     return start_subgroup_scan(
         pl_column=pl_column,
         duration_minutes=duration_minutes,
         group_cols=group_cols,
-        max_groups=int(max_groups),
+        max_groups=max_groups,
         enforcement=enforcement,
         row_filters=row_filters,
     )
 
+
 def bracket_sweep(
     pl_column: str,
-    sweep_cols: Optional[List[str]] = None,
-    sweep_col: Optional[str] = None,
-    sweep_feature: Optional[str] = None,
     duration_minutes: int = 30,
+    sweep_cols: Optional[List[str]] = None,
+    focus_numeric_cols: Optional[List[str]] = None,
+    sweep_feature: Optional[str] = None,
+    sweep_col: Optional[str] = None,
     n_bins: int = 12,
     bins: Optional[int] = None,
     max_results: int = 50,
     max_rules: Optional[int] = None,
     enforcement: Optional[Dict[str, Any]] = None,
     row_filters: Optional[List[Dict[str, Any]]] = None,
-    focus_numeric_cols: Optional[List[str]] = None,
+    filters: Optional[Dict[str, Any]] = None,
     **kwargs,
 ) -> Dict[str, Any]:
-    """Alias for start_bracket_sweep (some prompts will call bracket_sweep).
+    """Alias for start_bracket_sweep (LLM sometimes calls bracket_sweep).
 
-    Supports multiple historical parameter names:
-      - sweep_feature / sweep_col (single column)
-      - focus_numeric_cols (list)
-      - bins / n_bins
-      - max_rules / max_results
+    Supports legacy argument names:
+      - focus_numeric_cols -> sweep_cols
+      - sweep_feature/sweep_col -> single column sweep
+      - bins -> n_bins
+      - max_rules -> max_results
+      - filters (dict) -> row_filters
     """
-    if sweep_cols is None:
-        if focus_numeric_cols:
-            sweep_cols = focus_numeric_cols
-        elif sweep_col:
-            sweep_cols = [sweep_col]
-        elif sweep_feature:
-            sweep_cols = [sweep_feature]
+    if row_filters is None and filters is not None:
+        row_filters = _coerce_row_filters(filters)
     if bins is not None:
         n_bins = int(bins)
     if max_rules is not None:
         max_results = int(max_rules)
 
+    if sweep_cols is None:
+        if focus_numeric_cols:
+            sweep_cols = focus_numeric_cols
+        elif sweep_feature:
+            sweep_cols = [sweep_feature]
+        elif sweep_col:
+            sweep_cols = [sweep_col]
+
     return start_bracket_sweep(
         pl_column=pl_column,
         duration_minutes=duration_minutes,
         sweep_cols=sweep_cols,
-        n_bins=int(n_bins),
-        max_results=int(max_results),
+        n_bins=n_bins,
+        max_results=max_results,
         enforcement=enforcement,
         row_filters=row_filters,
     )
+
 
 def hyperopt_pl_lab(
     pl_column: str,
     duration_minutes: int = 120,
     hyperopt_trials: int = 30,
     trials: Optional[int] = None,
+    hyperopt_iter: Optional[int] = None,
     top_fracs: Optional[List[float]] = None,
     enforcement: Optional[Dict[str, Any]] = None,
     row_filters: Optional[List[Dict[str, Any]]] = None,
-    hyperopt_iter: Optional[int] = None,
+    filters: Optional[Dict[str, Any]] = None,
     **kwargs,
 ) -> Dict[str, Any]:
-    """Alias for start_hyperopt_pl_lab (some prompts will call hyperopt_pl_lab).
+    """Alias for start_hyperopt_pl_lab (LLM sometimes calls hyperopt_pl_lab).
 
-    Accepts legacy names like trials/hyperopt_iter (treated as trials count).
+    Supports legacy argument names:
+      - trials / hyperopt_iter -> hyperopt_trials
+      - filters (dict) -> row_filters
     """
     if trials is not None:
         hyperopt_trials = int(trials)
-    if hyperopt_iter is not None and trials is None:
-        # Some older prompts used hyperopt_iter to mean number of trials.
+    elif hyperopt_iter is not None:
         hyperopt_trials = int(hyperopt_iter)
+
+    if row_filters is None and filters is not None:
+        row_filters = _coerce_row_filters(filters)
 
     return start_hyperopt_pl_lab(
         pl_column=pl_column,
         duration_minutes=duration_minutes,
-        hyperopt_trials=int(hyperopt_trials),
+        hyperopt_trials=hyperopt_trials,
         top_fracs=top_fracs,
         enforcement=enforcement,
         row_filters=row_filters,
