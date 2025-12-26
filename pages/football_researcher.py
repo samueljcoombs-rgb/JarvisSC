@@ -100,24 +100,61 @@ def _record_action_in_state(ctx: dict, action: dict, result_summary: dict) -> No
 # Tool runner (signature-safe, never hard-crashes on kwargs drift)
 # ============================================================
 
+
+
+
+
+
+
 def _run_tool(name: str, args: Optional[Dict[str, Any]] = None) -> Any:
-    fn = getattr(functions, name, None)
-    if not fn:
-        raise RuntimeError(f"Unknown tool: {name}")
+    """Execute a tool function.
 
-    if args is None or not isinstance(args, dict):
-        args = {}
+    We do NOT crash the app on unknown tool names.
 
-    # First try as-is
+    In real runs, the model may occasionally reference a tool name that isn't
+    present (e.g. shorthand like "bracket_sweep" instead of
+    "start_bracket_sweep").
+
+    Returning a structured error keeps the chat usable and makes the issue
+    visible to you in the UI.
+    """
+    args = args or {}
+
+    aliases = {
+        # Allow shorthand tool names (LLM sometimes uses these)
+        "bracket_sweep": "start_bracket_sweep",
+        "subgroup_scan": "start_subgroup_scan",
+        "hyperopt_pl_lab": "start_hyperopt_pl_lab",
+    }
+
+    resolved_name = aliases.get(name, name)
+    fn = getattr(functions, resolved_name, None)
+
+    if not callable(fn):
+        available = sorted(
+            [
+                n
+                for n in dir(functions)
+                if not n.startswith("_") and callable(getattr(functions, n, None))
+            ]
+        )
+        return {
+            "ok": False,
+            "error": f"Unknown tool: {name}",
+            "resolved_name": resolved_name,
+            "available_tools": available,
+        }
+
     try:
         return fn(**args)
-    except TypeError:
-        # Filter args to function signature (prevents "unexpected keyword" crashes)
-        sig = inspect.signature(fn)
-        if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
-            return fn(**args)
-        filtered = {k: v for k, v in args.items() if k in sig.parameters}
-        return fn(**filtered)
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": f"Tool {resolved_name} failed: {type(e).__name__}: {e}",
+        }
+
+# =================================
+# Tools schema
 
 # ============================================================
 # Tools schema
@@ -1101,6 +1138,12 @@ def _autopilot_tick():
 
     job_id = st.session_state.get("active_job_id") or ""
 
+    # Prevent duplicate processing of the same completed job across Streamlit reruns.
+    # Without this, when a job finishes and st_autorefresh keeps firing, the UI can
+    # repeatedly download/interpret the same result and spam the chat.
+    if "_handled_job_ids" not in st.session_state:
+        st.session_state["_handled_job_ids"] = set()
+
     # Stream worker events (narrated progress)
     try:
         last_ts = st.session_state.get("active_job_last_event_ts") or None
@@ -1122,6 +1165,12 @@ def _autopilot_tick():
     job = _run_tool("get_job", {"job_id": job_id})
     status = (job.get("status") or "").lower().strip()
 
+    # If the job is terminal (done/error) and we've already processed it once,
+    # don't process it again on subsequent Streamlit reruns.
+    if status in ("done", "error") and job_id in st.session_state.get("_handled_job_ids", set()):
+        st.session_state.active_job_id = ""
+        return
+
     now = time.time()
     last_status = st.session_state.get("active_job_last_status") or ""
     last_update = float(st.session_state.get("active_job_last_update_ts") or 0.0)
@@ -1134,6 +1183,7 @@ def _autopilot_tick():
 
     if status == "error":
         _append("assistant", f"❌ Job failed.\n```json\n{json.dumps(job, indent=2)}\n```")
+        st.session_state.get("_handled_job_ids", set()).add(job_id)
         st.session_state.active_job_id = ""
         return
 
@@ -1157,6 +1207,9 @@ def _autopilot_tick():
         _append("assistant", f"⚠️ Could not load result payload.\n```json\n{json.dumps(res, indent=2)[:12000]}\n```")
         st.session_state.active_job_id = ""
         return
+
+    # Mark as handled so we don't process it repeatedly on reruns.
+    st.session_state.get("_handled_job_ids", set()).add(job_id)
 
     _append("assistant", _render_distilled_top(result_obj, top_n=3))
 
