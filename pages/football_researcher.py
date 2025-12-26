@@ -867,76 +867,110 @@ DEFAULT_ENFORCEMENT = {
 }
 
 
-def _choose_diagnostic_task(payload: dict, ctx: dict, recent_actions: list) -> tuple[str, dict]:
-    """Fallback when the agent tries to stop without producing passing rules.
+def _choose_diagnostic_task(payload: dict, ctx: dict, recent_actions: list) -> tuple[str, dict, str]:
+    """Pick a diagnostic task + params when we have no passing distilled rules.
 
-    Preference order:
+    This is a deterministic safety net (Bible-aligned) so the agent never "stops"
+    just because distillation didn't find a stable rule on the first run.
+
+    Preference order (with simple anti-repeat):
       1) bracket_sweep on top numeric features
-      2) subgroup_scan on top categorical features
-      3) hyperopt_pl_lab (short)
+      2) subgroup_scan on strong categorical columns
+      3) hyperopt_pl_lab (val-only tuning, short)
+
+    Returns: (task_type, params, why)
     """
-    dataset = (ctx.get("dataset") or {})
-    storage_bucket = dataset.get("storage_bucket")
-    storage_path = dataset.get("storage_path")
+    payload = payload or {}
+    ctx = ctx or {}
+
+    # Dataset location from context (best-effort)
+    dataset = (ctx.get("dataset") or {}) if isinstance(ctx, dict) else {}
+    storage_bucket = dataset.get("storage_bucket") or "football-data"
+    storage_path = dataset.get("storage_path") or "football_ai_NNIA.csv"
 
     picked = payload.get("picked") or {}
-    pl_col = picked.get("pl_column")
-    side = picked.get("side") or "back"
-    odds_col = picked.get("odds_col")
-    row_filters = picked.get("row_filters") or {}
+    pl_col = picked.get("pl_column") or payload.get("pl_column") or "BO 2.5 PL"
+    side = picked.get("side") or payload.get("side") or ("lay" if str(pl_col).startswith("L") else "back")
+    odds_col = picked.get("odds_col") or payload.get("odds_col")
 
-    ftypes = payload.get("feature_types") or {}
-    numeric = set(ftypes.get("numeric") or [])
-    categorical = set(ftypes.get("categorical") or [])
+    # Pull out feature hints
+    num_cols = picked.get("numeric_cols") or payload.get("numeric_cols") or []
+    cat_cols = picked.get("categorical_cols") or payload.get("categorical_cols") or []
 
-    imp = payload.get("feature_importance") or []
-    ranked = [d.get("feature") for d in imp if isinstance(d, dict) and d.get("feature")]
+    feat_imp = payload.get("feature_importance") or []
+    # Feature importance is a list of dicts: {"feature": ..., "importance": ...}
+    imp_order = []
+    try:
+        for row in feat_imp:
+            f = (row or {}).get("feature")
+            if f:
+                imp_order.append(str(f))
+    except Exception:
+        imp_order = []
 
-    top_num = [c for c in ranked if c in numeric][:4] or list(numeric)[:4]
-    top_cat = [c for c in ranked if c in categorical][:3] or list(categorical)[:3]
+    # Prefer the important numeric columns first (keep it small for speed)
+    top_num = [c for c in imp_order if c in set(num_cols)] or list(num_cols)
+    top_num = [c for c in top_num if isinstance(c, str) and c.strip()][:5]
 
-    # avoid repeating the exact same task_type consecutively
-    last_task = None
-    if recent_actions:
-        last_task = recent_actions[-1].get("task_type")
+    # Prefer important categorical columns
+    top_cat = [c for c in imp_order if c in set(cat_cols)] or list(cat_cols)
+    top_cat = [c for c in top_cat if isinstance(c, str) and c.strip()][:6]
 
-    if last_task != "bracket_sweep" and top_num:
-        return "bracket_sweep", {
+    # What have we already tried in this agent session?
+    tried = set()
+    try:
+        for a in (recent_actions or []):
+            if isinstance(a, dict) and a.get("task_type"):
+                tried.add(str(a["task_type"]))
+    except Exception:
+        tried = set()
+
+    # --- 1) Bracket sweep ---
+    if "bracket_sweep" not in tried and top_num:
+        cols = top_num[:3]
+        params = {
             "storage_bucket": storage_bucket,
             "storage_path": storage_path,
             "pl_column": pl_col,
             "side": side,
             "odds_col": odds_col,
-            "row_filters": row_filters,
-            "focus_numeric_cols": top_num,
-            "bins": 8,
-            "max_rules": 40,
+            "sweep_cols": cols,
+            "n_bins": 10,
+            "max_results": 60,
         }
+        why = f"Bracket sweep on top numeric features: {', '.join(cols)}."
+        return "bracket_sweep", params, why
 
-    if last_task != "subgroup_scan" and (top_cat or top_num):
-        return "subgroup_scan", {
+    # --- 2) Subgroup scan ---
+    if "subgroup_scan" not in tried and (top_cat or top_num):
+        # Use up to 4 categorical cols; worker will skip missing/non-categorical.
+        cols = top_cat[:4] if top_cat else ["MODE", "MARKET", "LEAGUE", "BRACKET"]
+        params = {
             "storage_bucket": storage_bucket,
             "storage_path": storage_path,
             "pl_column": pl_col,
             "side": side,
             "odds_col": odds_col,
-            "row_filters": row_filters,
-            "group_by_cols": top_cat,
-            "focus_numeric_cols": top_num[:3],
-            "min_rows": int((ctx.get("enforcement_gates") or {}).get("min_val_rows", 60)),
-            "top_k": 30,
+            "group_cols": cols,
+            "max_groups": 80,
         }
+        why = f"Subgroup scan to find stable buckets using: {', '.join(cols)}."
+        return "subgroup_scan", params, why
 
-    return "hyperopt_pl_lab", {
+    # --- 3) Hyperopt (short) ---
+    params = {
         "storage_bucket": storage_bucket,
         "storage_path": storage_path,
         "pl_column": pl_col,
         "side": side,
         "odds_col": odds_col,
-        "row_filters": row_filters,
-        "trials": 15,
-        "time_budget_sec": 600,
+        "hyperopt_trials": 15,
+        "top_fracs": payload.get("top_fracs") or [0.05, 0.1, 0.2],
     }
+    why = "Hyperopt (val-only) to tune model/distillation knobs when simple scans didn't produce a stable rule."
+    return "hyperopt_pl_lab", params, why
+
+
 
 ENFORCEMENT_EXPLANATION = {
     "min_train_rows": "Minimum number of scan-rows needed in TRAIN for a rule to be considered (avoid tiny-sample mirages).",
@@ -1188,6 +1222,34 @@ Context JSON:
         return {"narration": f"Agent could not parse JSON. Raw: {txt[:400]}", "stop": True}
 
 
+
+def _coerce_row_filters(filters_any: Any) -> List[Dict[str, Any]]:
+    """Normalize user/agent filters into worker-friendly row_filters.
+
+    Accepts:
+      - list[dict] already in row_filter form
+      - dict[str, Any] meaning equality filters
+      - None/empty
+    """
+    if not filters_any:
+        return []
+    if isinstance(filters_any, list):
+        return [f for f in filters_any if isinstance(f, dict)]
+    if isinstance(filters_any, dict):
+        out: List[Dict[str, Any]] = []
+        for k, v in filters_any.items():
+            if k is None:
+                continue
+            col = str(k)
+            if isinstance(v, (list, tuple, set)):
+                out.append({"col": col, "op": "in", "value": list(v)})
+            else:
+                out.append({"col": col, "op": "==", "value": v})
+        return out
+    # unknown type → ignore
+    return []
+
+
 def _autopilot_tick():
     # Cached Bible context (loaded when strategy run starts).
     ctx_local = st.session_state.get('cached_research_context')
@@ -1351,47 +1413,81 @@ def _autopilot_tick():
         st.session_state["agent_session_last_decision"] = json.dumps(decision, ensure_ascii=False)[:2000]
         _append_chat("assistant", "🧠 Agent decision: " + (decision.get("narration") or ""))
 
-        if decision.get("stop"):
-            if not rules:
-                # Do not stop on a failure-to-distill / failure-to-pass-gates. Run a diagnostic tool next.
-                recent_actions = []
-                try:
-                    ra_raw = (ctx_local.get("research_state") or {}).get("recent_actions")
-                    if ra_raw:
-                        recent_actions = json.loads(ra_raw) if isinstance(ra_raw, str) else list(ra_raw)
-                except Exception:
-                    recent_actions = []
-                task_type, auto_params, why = _choose_diagnostic_task(payload, ctx_local, recent_actions)
-                _append_chat(
-                    "assistant",
-                    f"🟡 No passing rules yet, so I won't stop. Next I will run **{task_type}**. {why}",
-                )
-                decision = {
-                    "stop": False,
-                    "next_task_type": task_type,
-                    "next_params": auto_params,
-                    "narration": f"Auto-diagnostic because no rules passed. {why}",
-                }
-            else:
-                _append_chat("assistant", "🛑 Agent stopped (no further actions).")
-                st.session_state["agent_session_active"] = False
-                st.session_state.active_job_id = ""
-                return
-
+        # Decide whether to continue, and with which diagnostic tool.
         next_task = decision.get("next_task_type")
         next_params = decision.get("next_params") or {}
 
-        # Enforce Bible columns + gates on every job (and keep carry-over filters)
+        # If the agent wants to stop AND we already have passing rules, stop cleanly.
+        if decision.get("stop") and rules:
+            _append_chat("assistant", "🛑 Agent session stopped (rules found and decision=stop).")
+            st.session_state["agent_session_active"] = False
+            st.session_state.active_job_id = ""
+            return
+
+        # If no passing rules, never stop. Also, if the agent didn't propose a next tool, pick one deterministically.
+        if (not rules) and (decision.get("stop") or not next_task):
+            recent_actions = []
+            try:
+                ra_raw = (ctx_local.get("research_state") or {}).get("recent_actions")
+                if ra_raw:
+                    recent_actions = json.loads(ra_raw) if isinstance(ra_raw, str) else list(ra_raw)
+            except Exception:
+                recent_actions = []
+            auto_task, auto_params, why = _choose_diagnostic_task(payload, ctx_local, recent_actions)
+            next_task = auto_task
+            # Allow decision params to override auto params (but keep required dataset/pl defaults from auto if present)
+            next_params = {**auto_params, **next_params}
+            _append_chat("assistant", f"🟡 No rules passed; running diagnostic next: {next_task}. {why}")
+
+        if not next_task:
+            _append_chat("assistant", "🛑 Agent did not select a next task. Stopping agent session.")
+            st.session_state["agent_session_active"] = False
+            st.session_state.active_job_id = ""
+            return
+
         base_params = {
-            "pl_column": (st.session_state.get("agent_session_pl_column") or (job.get("params") or {}).get("pl_column") or "BO 2.5 PL"),
+            "pl_column": (
+                st.session_state.get("agent_session_pl_column")
+                or (job.get("params") or {}).get("pl_column")
+                or "BO 2.5 PL"
+            ),
             "storage_path": (job.get("params") or {}).get("storage_path", "football_ai_NNIA.csv"),
             "storage_bucket": (job.get("params") or {}).get("storage_bucket", "football-data"),
-            "ignored_columns": (ctx.get("derived") or {}).get("ignored_columns") or (job.get("params") or {}).get("ignored_columns") or [],
-            "outcome_columns": (ctx.get("derived") or {}).get("outcome_columns") or (job.get("params") or {}).get("outcome_columns") or [],
-            "ignored_feature_columns": (ctx.get("derived") or {}).get("ignored_feature_columns") or (job.get("params") or {}).get("ignored_feature_columns") or [],
-            "enforcement": (job.get("params") or {}).get("enforcement") or (ctx.get("enforcement") if isinstance(ctx, dict) else {}) or {},
+            "_results_bucket": (
+                (job.get("params") or {}).get("_results_bucket")
+                or st.session_state.get("active_job_bucket")
+                or DEFAULT_RESULTS_BUCKET
+            ),
+            # Bible governance (always carry forward)
+            "ignored_columns": (
+                (ctx_local.get("derived") or {}).get("ignored_columns")
+                or (job.get("params") or {}).get("ignored_columns")
+                or []
+            ),
+            "outcome_columns": (
+                (ctx_local.get("derived") or {}).get("outcome_columns")
+                or (job.get("params") or {}).get("outcome_columns")
+                or []
+            ),
+            "ignored_feature_columns": (
+                (ctx_local.get("derived") or {}).get("ignored_feature_columns")
+                or (job.get("params") or {}).get("ignored_feature_columns")
+                or []
+            ),
+            "enforcement": (
+                (job.get("params") or {}).get("enforcement")
+                or (ctx_local.get("enforcement") if isinstance(ctx_local, dict) else {})
+                or {}
+            ),
+            # Carry through market metadata
+            "side": (job.get("params") or {}).get("side"),
+            "odds_col": (job.get("params") or {}).get("odds_col"),
+            "top_fracs": (job.get("params") or {}).get("top_fracs"),
+            # Runtime controls
             "duration_minutes": int(st.session_state.get("agent_session_minutes_per_job", 10)),
+            # Filters (keep both representations for backwards compatibility)
             "filters": st.session_state.get("agent_session_filters") or {},
+            "row_filters": _coerce_row_filters(st.session_state.get("agent_session_filters") or {}),
             "top_n": int((job.get("params") or {}).get("top_n", 12)),
         }
         merged = {**base_params, **next_params}
