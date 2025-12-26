@@ -893,6 +893,95 @@ DEFAULT_ENFORCEMENT = {
 }
 
 
+
+def _render_result_analysis(payload: dict) -> str:
+    """User-facing analysis of a job result (compact, Bible-aligned)."""
+    picked = payload.get("picked") or {}
+    baseline = payload.get("baseline") or {}
+    splits = payload.get("splits") or {}
+    features = payload.get("features") or {}
+    monthly_stats = (baseline.get("test_monthly_stats") or {})
+    regime_warn = (baseline.get("test_regime_warning") or {})
+
+    def _fmt(x, nd=3):
+        try:
+            if x is None:
+                return "n/a"
+            return f"{float(x):.{nd}f}"
+        except Exception:
+            return str(x)
+
+    b_train = baseline.get("train") or {}
+    b_val = baseline.get("val") or {}
+    b_test = baseline.get("test") or {}
+
+    lines: List[str] = []
+    lines.append("### 📊 Quick analysis (what we learned)")
+    lines.append(f"- Market picked: `{picked}`")
+    lines.append(
+        f"- Splits (rows): train **{splits.get('train_rows','?')}**, val **{splits.get('val_rows','?')}**, test **{splits.get('test_rows','?')}**"
+    )
+    lines.append(
+        f"- Features used: total **{features.get('n_features_total','?')}** (numeric **{features.get('n_numeric','?')}**, categorical **{features.get('n_categorical','?')}**)"
+    )
+    lines.append("")
+    lines.append("**Baseline performance (strict time-split):**")
+    lines.append(
+        f"- Train ROI: **{_fmt(b_train.get('roi'))}** | Val ROI: **{_fmt(b_val.get('roi'))}** | Test ROI: **{_fmt(b_test.get('roi'))}**"
+    )
+    if b_test.get("max_drawdown") is not None:
+        lines.append(f"- Test max drawdown: **{_fmt(b_test.get('max_drawdown'))}**")
+    if b_test.get("losing_streak_bets") is not None:
+        lines.append(f"- Test losing streak (bets): **{b_test.get('losing_streak_bets')}**")
+    if b_test.get("n_bets") is not None:
+        lines.append(f"- Test bets: **{b_test.get('n_bets')}**")
+
+    lines.append("")
+    lines.append("**Regime / monthly stability check (test):**")
+    if monthly_stats:
+        lines.append(
+            f"- Monthly ROI mean: **{_fmt(monthly_stats.get('roi_mean'))}**, std: **{_fmt(monthly_stats.get('roi_std'))}**, best: **{_fmt(monthly_stats.get('roi_max'))}**, worst: **{_fmt(monthly_stats.get('roi_min'))}**"
+        )
+    if regime_warn:
+        lines.append(
+            f"- Regime warning: **{bool(regime_warn.get('flag'))}** (ROI std {_fmt(regime_warn.get('roi_std'))} vs threshold {_fmt(regime_warn.get('roi_std_warn_threshold'))})"
+        )
+
+    return "\n".join(lines)
+
+
+def _render_next_job_commentary(next_task: str, why: str, merged_params: dict) -> str:
+    """Explain to the user what the next job will do and why we're doing it."""
+    picked = {
+        "pl_column": merged_params.get("pl_column"),
+        "side": merged_params.get("side"),
+        "odds_col": merged_params.get("odds_col"),
+    }
+
+    lines: List[str] = []
+    lines.append("### 🔜 Next job (autopilot) — what & why")
+    lines.append(f"- Next task: **`{next_task}`**")
+    lines.append(f"- Why: {why}")
+    lines.append(f"- Context: `{picked}`")
+
+    if next_task == "bracket_sweep":
+        cols = merged_params.get("sweep_cols") or merged_params.get("focus_numeric_cols") or []
+        lines.append(f"- It will search value ranges (bins) for: `{cols}` and score each range on train/val/test with gates.")
+        lines.append("- Success looks like: a range that stays positive on **val and test** without big drawdown / losing streak.")
+    elif next_task == "subgroup_scan":
+        cols = merged_params.get("group_cols") or merged_params.get("group_by_cols") or []
+        lines.append(f"- It will scan grouped segments for: `{cols}` and find buckets with stable ROI in val/test.")
+        lines.append("- Success looks like: a segment that holds up out-of-sample (not just one league/month).")
+    elif next_task == "hyperopt_pl_lab":
+        trials = merged_params.get("hyperopt_trials") or merged_params.get("trials")
+        lines.append(f"- It will tune model/distillation knobs on **validation only** (trials={trials}) to find a more generalisable rule.")
+        lines.append("- Success looks like: distilled rules that pass the gates, then re-validated on test.")
+    else:
+        lines.append("- It will run the selected diagnostic to locate robust pockets of signal and convert them into explicit filter rules.")
+
+    return "\n".join(lines)
+
+
 def _choose_diagnostic_task(payload: dict, ctx: dict, recent_actions: list) -> tuple[str, dict]:
     """Fallback when the agent tries to stop without producing passing rules.
 
@@ -1297,6 +1386,9 @@ def _autopilot_tick():
 
     _append("assistant", _render_distilled_top(result_obj, top_n=3))
 
+    if st.session_state.get("verbose_result_analysis", True):
+        _append("assistant", _render_result_analysis(payload))
+
     # Interpretation (still short, but diagnostic even on failure)
     payload = (result_obj or {}).get("result") or {}
     distilled = (payload.get("distilled") or {})
@@ -1443,6 +1535,8 @@ def _autopilot_tick():
             "top_n": int((job.get("params") or {}).get("top_n", 12)),
         }
         merged = {**base_params, **next_params}
+        _append("assistant", _render_next_job_commentary(next_task, locals().get("why") or "Diagnostic continuation after gates failed.", merged))
+
         submitted = _run_tool("submit_job", {"task_type": next_task, "params": merged})
         new_job_id = (submitted or {}).get("job_id") if isinstance(submitted, dict) else None
         if new_job_id:
@@ -1580,6 +1674,7 @@ with st.sidebar:
 
     st.radio("Agent mode", ["chat", "autopilot"], key="agent_mode")
     st.checkbox("Narrate autopilot runs", key="autopilot_narrate", value=True)
+    st.checkbox("Verbose result analysis", key="verbose_result_analysis", value=True)
 
     st.divider()
     if st.button("➕ New chat"):
