@@ -20,6 +20,7 @@ except Exception:
 from openai import OpenAI, BadRequestError
 
 import sys
+import difflib
 from pathlib import Path as _Path
 
 # Ensure `jarvissc/` is on sys.path so `from modules ...` resolves to `jarvissc/modules/...`
@@ -45,6 +46,7 @@ client = _init_client()
 
 PREFERRED = (os.getenv("PREFERRED_OPENAI_MODEL") or st.secrets.get("PREFERRED_OPENAI_MODEL") or "").strip()
 MODEL = PREFERRED or "gpt-5.1"
+BUILD_TAG = "football_researcher_chainfix_v6_2025-12-27"
 
 DEFAULT_STORAGE_BUCKET = os.getenv("DATA_STORAGE_BUCKET") or st.secrets.get("DATA_STORAGE_BUCKET", "football-data")
 DEFAULT_STORAGE_PATH = os.getenv("DATA_STORAGE_PATH") or st.secrets.get("DATA_STORAGE_PATH", "football_ai_NNIA.csv")
@@ -803,6 +805,22 @@ def _resolve_pl_column(user_text: str, ctx: Dict[str, Any]) -> str:
         if nn(col) in t_compact:
             return col
 
+    # fuzzy fallback (handles typos like 'LFHGU0.5' vs 'LFGHU0.5')
+    if outcomes_sorted:
+        scored = []
+        for col in outcomes_sorted:
+            col_nn = nn(col)
+            if not col_nn:
+                continue
+            # compare prompt text to the outcome column token
+            ratio = difflib.SequenceMatcher(None, t_compact, col_nn).ratio()
+            scored.append((ratio, col))
+        scored.sort(reverse=True, key=lambda x: x[0])
+        best_ratio, best_col = scored[0]
+        # Require a reasonable similarity and avoid mapping everything to generic 'PL'
+        if best_ratio >= 0.78 and (best_col or "").strip().lower() != "pl":
+            return best_col
+
     # default
     return "BO 2.5 PL"
 
@@ -1031,119 +1049,105 @@ def _choose_diagnostic_task(payload: dict, ctx: dict, recent_actions: list) -> t
     Returns:
         (task_type, params, why)
 
-    IMPORTANT:
-    - task_type must be a worker-recognised task type (e.g. subgroup_scan, bracket_sweep, hyperopt_pl_lab)
-    - params must use the worker's expected param keys (e.g. sweep_cols, group_cols, hyperopt_trials)
-    - keep it robust: if payload is missing fields, fall back to sensible defaults.
+    This must be worker-compatible:
+      - subgroup_scan expects: group_cols, max_groups
+      - bracket_sweep expects: sweep_cols, n_bins, max_results
+      - hyperopt_pl_lab expects: hyperopt_trials
+
+    We keep it simple + robust: if payload is missing fields, fall back to sensible defaults.
     """
+    dataset = (ctx.get("dataset") or {})
+    storage_bucket = dataset.get("storage_bucket", "football-data")
+    storage_path = dataset.get("storage_path", "football_ai_NNIA.csv")
 
-    # Prefer the session PL column, then the last run's picked pl_column, then Bible default
-    pl_column = (
-        st.session_state.get("agent_session_pl_column")
-        or ((payload or {}).get("picked") or {}).get("pl_column")
-        or ((payload or {}).get("picked") or {}).get("target")
-        or "BO 2.5 PL"
-    )
+    picked = payload.get("picked") or {}
+    pl_col = picked.get("pl_column") or payload.get("pl_column") or "BO 2.5 PL"
+    side = picked.get("side") or payload.get("side") or "back"
+    odds_col = picked.get("odds_col") or payload.get("odds_col")
+    row_filters = picked.get("row_filters") or payload.get("row_filters") or {}
 
-    # Extract top numeric features from feature importance if present
-    top_numeric: list[str] = []
+    ftypes = payload.get("feature_types") or {}
+    num_cols = list(ftypes.get("numeric") or [])
+    cat_cols = list(ftypes.get("categorical") or [])
+
+    # If we have feature_importance, prefer its ordering
+    fi = payload.get("feature_importance") or []
+    if isinstance(fi, list) and fi:
+        ordered = [r.get("feature") for r in fi if isinstance(r, dict) and r.get("feature")]
+        # keep only those in our type lists
+        ordered_num = [c for c in ordered if c in set(num_cols)]
+        ordered_cat = [c for c in ordered if c in set(cat_cols)]
+        if ordered_num:
+            num_cols = ordered_num + [c for c in num_cols if c not in set(ordered_num)]
+        if ordered_cat:
+            cat_cols = ordered_cat + [c for c in cat_cols if c not in set(ordered_cat)]
+
+    # Avoid repeating the same diagnostic back-to-back
+    last_task = None
     try:
-        fi = (payload or {}).get("feature_importance") or (payload or {}).get("feature_importances") or []
-        # common shapes: [{"feature": "...", "importance": 0.12, "kind": "numeric"}, ...]
-        for row in fi:
-            if not isinstance(row, dict):
-                continue
-            feat = row.get("feature") or row.get("name")
-            kind = (row.get("kind") or row.get("type") or "").lower()
-            if feat and ("num" in kind or kind in ("numeric", "float", "int")):
-                top_numeric.append(str(feat))
-        if not top_numeric:
-            # fallback: take any features marked numeric
-            for row in fi:
-                if not isinstance(row, dict):
-                    continue
-                feat = row.get("feature") or row.get("name")
-                if feat and (row.get("is_numeric") is True):
-                    top_numeric.append(str(feat))
+        if recent_actions:
+            last_task = str(recent_actions[-1].get("task_type") or "")
     except Exception:
-        top_numeric = []
+        last_task = None
 
-    # Another common payload shape: payload["feature_summary"] = {"numeric": [...], "categorical":[...]}
-    try:
-        if not top_numeric:
-            fs = (payload or {}).get("feature_summary") or {}
-            nums = fs.get("numeric") or fs.get("numeric_features") or []
-            if isinstance(nums, list):
-                top_numeric = [str(x) for x in nums if isinstance(x, (str, int, float))]
-    except Exception:
-        pass
-
-    # Last-resort defaults that exist in the Bible / data
-    if not top_numeric:
-        top_numeric = [
-            "DIFF",
-            "% DRIFT",
-            "ACTUAL ODDS",
-            "IMPLIED ODDS",
-            "H XG VS A XG S",
-            "H XG VS A XG 6",
-            "Points Diff",
-        ]
-
-    # Categorical columns to consider (safe + commonly useful)
+    # Default subgroup columns (matches worker defaults)
     default_group_cols = ["MODE", "MARKET", "LEAGUE", "BRACKET", "DRIFT IN / OUT"]
 
-    # Avoid repeating the same diagnostic endlessly
-    recent_types = []
-    try:
-        for a in (recent_actions or [])[-12:]:
-            if isinstance(a, dict) and a.get("task_type"):
-                recent_types.append(str(a["task_type"]))
-    except Exception:
-        recent_types = []
-
-    def _recently_ran(t: str) -> bool:
-        t = str(t)
-        return t in recent_types[-3:]  # only block immediate repeats
-
-    # Time budget: if user asked for longer jobs, we can justify heavier diagnostics
-    minutes_per_job = int(st.session_state.get("agent_session_minutes_per_job", 10))
-    requested_minutes = minutes_per_job
-
-    # 1) Subgroup scan is usually the fastest way to find profitable segments in this dataset
-    if not _recently_ran("subgroup_scan"):
-        why = "Subgroup scan to find *where* BO2.5 edge may exist (MODE/MARKET/LEAGUE/BRACKET/DRIFT buckets) before tuning numeric thresholds."
+    # 1) Subgroup scan: great for finding 'where' signal lives
+    if last_task != "subgroup_scan":
+        group_cols = [c for c in default_group_cols if c in set(cat_cols)] or ["MODE", "MARKET", "LEAGUE", "BRACKET"]
         params = {
-            "pl_column": pl_column,
-            "duration_minutes": max(15, min(60, requested_minutes)),
-            "group_cols": default_group_cols,
+            "storage_bucket": storage_bucket,
+            "storage_path": storage_path,
+            "pl_column": pl_col,
+            "side": side,
+            "odds_col": odds_col,
+            "row_filters": row_filters,
+            "group_cols": group_cols,
             "max_groups": 80,
-            # row_filters is already enforced upstream in base_params; do not override here
         }
+        why = f"No passing rules; running subgroup_scan over {group_cols} to find stable segments for {pl_col}."
         return "subgroup_scan", params, why
 
-    # 2) Bracket sweep over the strongest numeric features
-    if not _recently_ran("bracket_sweep"):
-        why = "Bracket sweep to search simple numeric ranges (quantiles) on the strongest numeric features to distill into robust rules."
+    # 2) Bracket sweep: quantile bin search on the strongest numeric cols
+    if num_cols and last_task != "bracket_sweep":
+        sweep_cols = num_cols[:6]
         params = {
-            "pl_column": pl_column,
-            "duration_minutes": max(15, min(60, requested_minutes)),
-            "sweep_cols": top_numeric[:3],
+            "storage_bucket": storage_bucket,
+            "storage_path": storage_path,
+            "pl_column": pl_col,
+            "side": side,
+            "odds_col": odds_col,
+            "row_filters": row_filters,
+            "sweep_cols": sweep_cols,
             "n_bins": 12,
-            "max_results": 60,
+            "max_results": 150,
         }
+        why = f"No passing rules; running bracket_sweep on top numeric cols {sweep_cols} for {pl_col}."
         return "bracket_sweep", params, why
 
-    # 3) Hyperopt PL lab (heavier): use when we've already tried segmentation + bracket tuning
-    why = "Hyperopt PL lab (VAL-only tuning) to try a wider search of rule thresholds/models, then report on the untouched test period."
+    # 3) Hyperopt: last resort tuning on validation only
     params = {
-        "pl_column": pl_column,
-        "duration_minutes": max(30, min(180, requested_minutes)),
-        "hyperopt_trials": 30 if requested_minutes < 60 else 60,
-        "top_fracs": [0.05, 0.1, 0.2],
+        "storage_bucket": storage_bucket,
+        "storage_path": storage_path,
+        "pl_column": pl_col,
+        "side": side,
+        "odds_col": odds_col,
+        "row_filters": row_filters,
+        "hyperopt_trials": 30,
     }
+    why = f"No passing rules; running hyperopt_pl_lab (VAL-only tuning) for {pl_col} to search for stronger distillation thresholds/models."
     return "hyperopt_pl_lab", params, why
 
+
+ENFORCEMENT_EXPLANATION = {
+    "min_train_rows": "Minimum number of scan-rows needed in TRAIN for a rule to be considered (avoid tiny-sample mirages).",
+    "min_val_rows": "Minimum number of scan-rows needed in VALIDATION (we tune on val, so it must be meaningful).",
+    "min_test_rows": "Minimum number of scan-rows needed in TEST (final proof; if too small, it's not trusted).",
+    "max_train_val_gap_roi": "Max allowed drop from train ROI to val ROI (penalises overfitting). Example 0.10 means train ROI can be at most 0.10 higher than validation ROI.",
+    "max_test_drawdown": "Worst allowed peak-to-trough drawdown on TEST, measured in points (negative). Example -25 means we reject strategies that at any point fall more than 25 points from peak.",
+    "max_test_losing_streak_bets": "Maximum allowed consecutive losing bets (by unique match ID) on TEST.",
+}
 
 def _enforcement_from_state(ctx: Dict[str, Any]) -> Dict[str, Any]:
     stt = (ctx.get("research_state") or {}) if isinstance(ctx, dict) else {}
@@ -1758,6 +1762,7 @@ def _chat_with_tools(user_text: str, max_rounds: int = 6):
 
 with st.sidebar:
     st.caption(f"Model: `{MODEL}`")
+    st.caption(f"Build: `{BUILD_TAG}`")
     st.caption(f"Data: `{DEFAULT_STORAGE_BUCKET}/{DEFAULT_STORAGE_PATH}`")
     st.caption(f"Results: `{DEFAULT_RESULTS_BUCKET}`")
 
