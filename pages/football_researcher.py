@@ -620,8 +620,8 @@ for k, default in [
     ("agent_session_active", False),
     ("agent_session_steps_done", 0),
     ("agent_session_max_steps", 8),
-    ("agent_session_budget_minutes", 2000),
-    ("agent_session_minutes_per_job", 60),
+    ("agent_session_budget_minutes", 30),
+    ("agent_session_minutes_per_job", 10),
     ("agent_session_pl_column", ""),
     ("agent_session_filters", {}),
     ("agent_session_last_decision", ""),
@@ -1472,6 +1472,45 @@ def _autopilot_tick():
             )
         interp.append("- Next: run a **diagnostic** job (bracket_sweep/subgroup_scan/hyperopt_pl_lab) using the strongest features and near-miss patterns.")
     _append("assistant", "\n".join(interp))
+    # ------------------------------------------------------------
+    # Autopilot follow-up (no permission needed)
+    # If PL lab produced no distilled strategies, immediately enqueue
+    # a diagnostic subgroup scan so we keep iterating autonomously.
+    # ------------------------------------------------------------
+    try:
+        payload = (result_wrap or {}).get("result") or {}
+        distilled = (payload.get("distilled") or {})
+        rules = distilled.get("top_distilled_rules") or []
+        if not rules:
+            spawned_for = st.session_state.get("_spawned_diag_for") or set()
+            if not isinstance(spawned_for, set):
+                # tolerate older serialization formats
+                spawned_for = set(spawned_for) if isinstance(spawned_for, (list, tuple)) else set()
+            if job_id not in spawned_for:
+                spawned_for.add(job_id)
+                st.session_state["_spawned_diag_for"] = spawned_for
+
+                pl_col = (params.get("pl_column") or st.session_state.get("active_job_pl_col") or "").strip()
+                enforcement = (params.get("enforcement") or {}) if isinstance(params.get("enforcement"), dict) else {}
+
+                _append("assistant", "🧪 No rules passed → starting an automatic diagnostic **subgroup scan** to find profitable buckets (MODE/MARKET/LEAGUE/BRACKET, etc.) without peeking at test for discovery.")
+                diag = functions.start_subgroup_scan(
+                    pl_column=pl_col,
+                    duration_minutes=int(params.get("duration_minutes") or 30),
+                    enforcement=enforcement,
+                )
+                diag_id = (diag or {}).get("job_id") if isinstance(diag, dict) else None
+                if diag_id:
+                    _append("assistant", f"🚀 Started subgroup_scan. Job ID: {diag_id}")
+                    st.session_state.active_job_id = diag_id
+                    st.session_state.active_job_pl_col = pl_col
+                    st.session_state.active_job_bucket = DEFAULT_RESULTS_BUCKET
+                    st.session_state["active_job_last_event_ts"] = ""
+                else:
+                    _append("assistant", f"⚠️ Tried to start subgroup_scan but didn't get a job_id.\n```json\n{json.dumps(diag, indent=2)}\n```")
+    except Exception as e:
+        _append("assistant", f"⚠️ Autopilot follow-up failed (subgroup_scan not started): {type(e).__name__}: {e}")
+
 
     # Log to sheet
     _log_lab_to_sheet(job_id, result_wrap, tags="pl_lab,bo2.5,narrated_autopilot")
