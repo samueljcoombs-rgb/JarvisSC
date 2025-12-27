@@ -768,43 +768,85 @@ def _context_snapshot_text(ctx: Dict[str, Any]) -> str:
     )
 
 def _resolve_pl_column(user_text: str, ctx: Dict[str, Any]) -> str:
+    """
+    Resolve which PL/outcome column to optimise from a free-text user request.
+
+    Key points:
+    - outcome_columns often includes the generic "PL" which must be LAST resort.
+    - Users often type abbreviations like "O2.5", "BO2.5", or small typos (e.g. LFHGU0.5 vs LFGHU0.5).
+    """
+    import difflib
+
     t = _normalize(user_text)
     outcomes: List[str] = ((ctx.get("derived") or {}).get("outcome_columns") or [])
 
+    # Common aliases / abbreviations
     aliases = {
         "btts": "BTTS PL",
         "both teams to score": "BTTS PL",
         "over 2.5": "BO 2.5 PL",
         "o2.5": "BO 2.5 PL",
+        "o 2.5": "BO 2.5 PL",
         "bo 2.5": "BO 2.5 PL",
         "bo2.5": "BO 2.5 PL",
-        "fh over 1.5": "BO1.5 FHG PL",
         "shg": "SHG PL",
+        "shg2+": "SHG 2+ PL",
+        "shg 2+": "SHG 2+ PL",
+        "lu1.5": "LU1.5 PL",
+        "u1.5": "LU1.5 PL",
+        "fh over 1.5": "BO1.5 FHG PL",
+        "fho1.5": "BO1.5 FHG PL",
+        # First-half under 0.5 frequently mistyped
+        "lfghu0.5": "LFGHU0.5 PL",
+        "lfhgu0.5": "LFGHU0.5 PL",
+        "lfghu 0.5": "LFGHU0.5 PL",
+        "lfhgu 0.5": "LFGHU0.5 PL",
+        "fh under 0.5": "LFGHU0.5 PL",
+        "fh u0.5": "LFGHU0.5 PL",
+        "fhgu0.5": "LFGHU0.5 PL",
     }
     for k, v in aliases.items():
         if k in t:
             return v
 
-    # match against outcome columns text if present
-    def nn(x: str) -> str:
-        return _normalize(x).replace(" ", "")
-
     t_compact = t.replace(" ", "")
 
-    # IMPORTANT: outcome_columns often contains the generic "PL" first.
-    # When the user asks for e.g. "LFGHU0.5 PL", we must prefer the more specific column.
-    # Sort by: (is_generic_PL, -len(col)) so longer/specific columns match first and "PL" matches last.
+    # Prefer specific columns over generic PL.
     outcomes_sorted = sorted(
         outcomes,
         key=lambda c: ((c or "").strip().lower() == "pl", -len((c or "").strip())),
     )
 
+    # Exact/substring match first
     for col in outcomes_sorted:
-        if nn(col) in t_compact:
+        c = nn(col)
+        if c and c in t_compact:
             return col
 
-    # default
-    return "BO 2.5 PL"
+    # Fuzzy match (handles small typos) – only for non-generic outcomes
+    candidates = [c for c in outcomes_sorted if (c or "").strip().lower() != "pl"]
+    cand_compact = {c: nn(c) for c in candidates}
+
+    # Compare against compacted user text; take best match above threshold
+    best = None
+    best_score = 0.0
+    for c, cc in cand_compact.items():
+        if not cc:
+            continue
+        score = difflib.SequenceMatcher(None, t_compact, cc).ratio()
+        if score > best_score:
+            best_score = score
+            best = c
+
+    if best and best_score >= 0.72:
+        return best
+
+    # Last resort: if user wrote "pl" but nothing else matched, use generic PL
+    if " pl" in t or t.endswith("pl") or t == "pl":
+        return "PL" if "PL" in outcomes else (outcomes[0] if outcomes else "PL")
+
+    # Absolute fallback
+    return "PL" if "PL" in outcomes else (outcomes[0] if outcomes else "PL")
 
 def _render_rule_spec(spec: Dict[str, Any]) -> str:
     parts: List[str] = []
@@ -1026,57 +1068,41 @@ def _render_next_job_commentary(next_task: str, why: str, merged_params: dict) -
 
 
 def _choose_diagnostic_task(payload: dict, ctx: dict, recent_actions: list) -> tuple[str, dict, str]:
-    """Fallback when the agent tries to stop without producing passing rules.
-
-    Returns: (task_type, params, why)
+    """Pick a deterministic diagnostic next-step when no rules pass.
 
     Preference order:
-      1) bracket_sweep on top numeric features (fast global signal hunt)
-      2) subgroup_scan on categorical segments (find stable pockets)
-      3) hyperopt_pl_lab (more expensive threshold/model tuning on VAL only)
+      1) bracket_sweep on top numeric features
+      2) subgroup_scan on top categorical features
+      3) hyperopt_pl_lab (short VAL-only tune)
     """
     dataset = (ctx.get("dataset") or {})
     storage_bucket = dataset.get("storage_bucket")
     storage_path = dataset.get("storage_path")
 
     picked = payload.get("picked") or {}
-    pl_col = picked.get("pl_column") or payload.get("pl_column") or "PL"
-    side = picked.get("side") or payload.get("side") or "back"
-    odds_col = picked.get("odds_col") or payload.get("odds_col") or "ACTUAL ODDS"
+    pl_col = picked.get("pl_column")
+    side = picked.get("side") or "back"
+    odds_col = picked.get("odds_col")
+    row_filters = picked.get("row_filters") or {}
 
-    # Identify top features from payload importance, if present
-    top_num: list[str] = []
-    top_cat: list[str] = []
-    try:
-        imp = payload.get("feature_importance") or payload.get("feature_importances") or {}
-        if isinstance(imp, dict):
-            items = sorted(
-                [(k, float(v)) for k, v in imp.items() if v is not None],
-                key=lambda x: x[1],
-                reverse=True,
-            )
-            cat_markers = {"MODE", "MARKET", "BRACKET", "LEAGUE", "TEAM", "DRIFT IN / OUT", "Home Form Rag", "Away Form Rag"}
-            for k, _v in items:
-                if k in cat_markers:
-                    if k not in top_cat:
-                        top_cat.append(k)
-                else:
-                    if k not in top_num:
-                        top_num.append(k)
-    except Exception:
-        pass
+    ftypes = payload.get("feature_types") or {}
+    numeric = set(ftypes.get("numeric") or [])
+    categorical = set(ftypes.get("categorical") or [])
 
-    # Hard fallback columns
-    if not top_cat:
-        top_cat = ["MODE", "MARKET", "BRACKET", "DRIFT IN / OUT"]
-    if not top_num:
-        top_num = ["DIFF", "% DRIFT", "IMPLIED ODDS", "ACTUAL ODDS"]
+    imp = payload.get("feature_importance") or []
+    ranked = [d.get("feature") for d in imp if isinstance(d, dict) and d.get("feature")]
 
-    # Avoid repeating the same diagnostic back-to-back
-    last_task = recent_actions[-1].get("task_type") if recent_actions else ""
-    row_filters = payload.get("row_filters") or {}
+    top_num = [c for c in ranked if c in numeric][:4] or list(numeric)[:4]
+    top_cat = [c for c in ranked if c in categorical][:3] or list(categorical)[:3]
 
-    if last_task != "bracket_sweep":
+    last_task = None
+    if recent_actions:
+        try:
+            last_task = recent_actions[-1].get("task_type")
+        except Exception:
+            last_task = None
+
+    if last_task != "bracket_sweep" and top_num:
         params = {
             "storage_bucket": storage_bucket,
             "storage_path": storage_path,
@@ -1084,15 +1110,14 @@ def _choose_diagnostic_task(payload: dict, ctx: dict, recent_actions: list) -> t
             "side": side,
             "odds_col": odds_col,
             "row_filters": row_filters,
-            "numeric_cols": top_num[:6],
-            "top_k": 40,
+            "focus_numeric_cols": top_num,
+            "bins": 8,
             "max_rules": 40,
         }
-        why = "Bracket sweep searches numeric ranges on the strongest features to find pockets where ROI becomes positive."
+        why = f"Bracketing top numeric drivers to find stable ranges: {top_num}"
         return "bracket_sweep", params, why
 
-    if last_task != "subgroup_scan":
-        min_rows = int((ctx.get("enforcement_gates") or {}).get("min_val_rows", 60))
+    if last_task != "subgroup_scan" and top_cat:
         params = {
             "storage_bucket": storage_bucket,
             "storage_path": storage_path,
@@ -1100,12 +1125,11 @@ def _choose_diagnostic_task(payload: dict, ctx: dict, recent_actions: list) -> t
             "side": side,
             "odds_col": odds_col,
             "row_filters": row_filters,
-            "group_by_cols": top_cat[:4],
-            "focus_numeric_cols": top_num[:3],
-            "min_rows": min_rows,
-            "top_k": 30,
+            "group_cols": top_cat,
+            "min_group_size": 120,
+            "max_groups": 250,
         }
-        why = "Subgroup scan looks for stable segments (MODE/MARKET/BRACKET/LEAGUE/TEAM) where the edge is concentrated."
+        why = f"Scanning categorical segments to find robust pockets: {top_cat}"
         return "subgroup_scan", params, why
 
     params = {
@@ -1115,10 +1139,10 @@ def _choose_diagnostic_task(payload: dict, ctx: dict, recent_actions: list) -> t
         "side": side,
         "odds_col": odds_col,
         "row_filters": row_filters,
-        "trials": 20,
-        "time_budget_sec": 900,
+        "trials": 15,
+        "time_budget_sec": 600,
     }
-    why = "Hyperopt runs a VAL-only parameter/threshold search to try to distill a rule that generalises to TEST."
+    why = "VAL-only hyperopt to adjust distillation/model knobs after other diagnostics."
     return "hyperopt_pl_lab", params, why
 
 ENFORCEMENT_EXPLANATION = {
@@ -1361,12 +1385,7 @@ Context JSON:
         {"role": "system", "content": system},
         {"role": "user", "content": prompt},
     ])
-    # Extract assistant text from the OpenAI response object
-    try:
-        txt = (resp.choices[0].message.content or "").strip()  # type: ignore[attr-defined]
-    except Exception:
-        txt = str(resp).strip()
-
+    txt = (resp or "").strip()
     # Extract JSON
     try:
         j = json.loads(txt)
