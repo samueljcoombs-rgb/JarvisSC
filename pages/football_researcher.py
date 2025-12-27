@@ -19,17 +19,8 @@ except Exception:
 
 from openai import OpenAI, BadRequestError
 
-import sys
-import difflib
-from pathlib import Path as _Path
-
-# Ensure `jarvissc/` is on sys.path so `from modules ...` resolves to `jarvissc/modules/...`
-_THIS_FILE = _Path(__file__).resolve()
-_JARVISSC_DIR = _THIS_FILE.parents[1]  # .../jarvissc
-if str(_JARVISSC_DIR) not in sys.path:
-    sys.path.insert(0, str(_JARVISSC_DIR))
-
 from modules import football_tools as functions
+import difflib
 
 # ============================================================
 # OpenAI client + model
@@ -46,7 +37,6 @@ client = _init_client()
 
 PREFERRED = (os.getenv("PREFERRED_OPENAI_MODEL") or st.secrets.get("PREFERRED_OPENAI_MODEL") or "").strip()
 MODEL = PREFERRED or "gpt-5.1"
-BUILD_TAG = "football_researcher_chainfix_v6_2025-12-27"
 
 DEFAULT_STORAGE_BUCKET = os.getenv("DATA_STORAGE_BUCKET") or st.secrets.get("DATA_STORAGE_BUCKET", "football-data")
 DEFAULT_STORAGE_PATH = os.getenv("DATA_STORAGE_PATH") or st.secrets.get("DATA_STORAGE_PATH", "football_ai_NNIA.csv")
@@ -118,29 +108,29 @@ def _record_action_in_state(ctx: dict, action: dict, result_summary: dict) -> No
 
 
 def _run_tool(name: str, args: Optional[Dict[str, Any]] = None) -> Any:
-    """Execute a tool function safely.
+    """Execute a tool function.
 
-    Goals:
-    - Never crash the UI on unknown tool names.
-    - Allow shorthand tool names (aliases).
-    - Be robust to argument-name drift between:
-        * tool schema (what the LLM calls)
-        * python function signatures (what we implement)
+    We do NOT crash the app on unknown tool names.
 
-    This is critical for autonomy: the agent must keep going even if a
-    tool-call includes an unexpected kwarg.
+    In real runs, the model may occasionally reference a tool name that isn't
+    present (e.g. shorthand like "bracket_sweep" instead of
+    "start_bracket_sweep").
+
+    Returning a structured error keeps the chat usable and makes the issue
+    visible to you in the UI.
     """
     args = args or {}
 
-    # Tool name aliases (LLM sometimes uses shorthand)
-    name_aliases = {
+    aliases = {
+        # Allow shorthand tool names (LLM sometimes uses these)
         "bracket_sweep": "start_bracket_sweep",
         "subgroup_scan": "start_subgroup_scan",
         "hyperopt_pl_lab": "start_hyperopt_pl_lab",
     }
-    resolved_name = name_aliases.get(name, name)
 
+    resolved_name = aliases.get(name, name)
     fn = getattr(functions, resolved_name, None)
+
     if not callable(fn):
         available = sorted(
             [
@@ -156,63 +146,14 @@ def _run_tool(name: str, args: Optional[Dict[str, Any]] = None) -> Any:
             "available_tools": available,
         }
 
-    # Argument aliases (schema ↔ implementation drift)
-    arg_aliases_by_tool = {
-        # Older schema used timeout_seconds; our implementation uses timeout_s
-        "wait_for_job": {"timeout_seconds": "timeout_s"},
-        # Older schema used path; our implementation uses result_path
-        "download_result": {"path": "result_path"},
-    }
-
-    fixed_args = dict(args)
-    alias_map = arg_aliases_by_tool.get(resolved_name) or arg_aliases_by_tool.get(name) or {}
-    for old_k, new_k in alias_map.items():
-        if old_k in fixed_args and new_k not in fixed_args:
-            fixed_args[new_k] = fixed_args.pop(old_k)
-
-    # Filter args to the function signature unless it accepts **kwargs
     try:
-        sig = inspect.signature(fn)
-        accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
-        if not accepts_kwargs:
-            fixed_args = {k: v for k, v in fixed_args.items() if k in sig.parameters}
-    except Exception:
-        # If signature inspection fails, best-effort call with provided args
-        pass
-
-    try:
-        return fn(**fixed_args)
+        return fn(**args)
     except Exception as e:
         return {
             "ok": False,
             "error": f"Tool {resolved_name} failed: {type(e).__name__}: {e}",
         }
 
-
-def _coerce_row_filters(filters_any: Any) -> List[Dict[str, Any]]:
-    """Normalize various filter shapes into worker-friendly row_filters (list of dicts).
-
-    Accepts:
-      - None / empty -> []
-      - list[dict] already in {col,op,value} form (passes through)
-      - dict[str, Any] -> equality/membership filters
-    """
-    if not filters_any:
-        return []
-    if isinstance(filters_any, list):
-        return [f for f in filters_any if isinstance(f, dict)]
-    if isinstance(filters_any, dict):
-        out: List[Dict[str, Any]] = []
-        for k, v in filters_any.items():
-            if k is None:
-                continue
-            col = str(k)
-            if isinstance(v, (list, tuple, set)):
-                out.append({"col": col, "op": "in", "value": list(v)})
-            else:
-                out.append({"col": col, "op": "==", "value": v})
-        return out
-    return []
 # =================================
 # Tools schema
 
@@ -433,14 +374,12 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "wait_for_job",
-            "description": "Poll Supabase until a job is done/failed, then return the final job row (and optionally download the result).",
+            "description": "Poll Supabase until a job is done/failed, then return the final job row.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "job_id": {"type": "string"},
-                    "timeout_s": {"type": "integer", "default": 600},
-                    "poll_s": {"type": "integer", "default": 5},
-                    "auto_download": {"type": "boolean", "default": True}
+                    "timeout_seconds": {"type": "integer", "default": 600}
                 },
                 "required": ["job_id"]
             }
@@ -450,14 +389,14 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "download_result",
-            "description": "Download a raw result file (JSON) from Supabase Storage given a bucket and result_path.",
+            "description": "Download a raw result file (JSON) from Supabase Storage given a bucket and path.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "bucket": {"type": "string"},
-                    "result_path": {"type": "string"}
+                    "path": {"type": "string"}
                 },
-                "required": ["bucket", "result_path"]
+                "required": ["bucket", "path"]
             }
         }
     },
@@ -792,34 +731,9 @@ def _resolve_pl_column(user_text: str, ctx: Dict[str, Any]) -> str:
         return _normalize(x).replace(" ", "")
 
     t_compact = t.replace(" ", "")
-
-    # IMPORTANT: outcome_columns often contains the generic "PL" first.
-    # When the user asks for e.g. "LFGHU0.5 PL", we must prefer the more specific column.
-    # Sort by: (is_generic_PL, -len(col)) so longer/specific columns match first and "PL" matches last.
-    outcomes_sorted = sorted(
-        outcomes,
-        key=lambda c: ((c or "").strip().lower() == "pl", -len((c or "").strip())),
-    )
-
-    for col in outcomes_sorted:
+    for col in outcomes:
         if nn(col) in t_compact:
             return col
-
-    # fuzzy fallback (handles typos like 'LFHGU0.5' vs 'LFGHU0.5')
-    if outcomes_sorted:
-        scored = []
-        for col in outcomes_sorted:
-            col_nn = nn(col)
-            if not col_nn:
-                continue
-            # compare prompt text to the outcome column token
-            ratio = difflib.SequenceMatcher(None, t_compact, col_nn).ratio()
-            scored.append((ratio, col))
-        scored.sort(reverse=True, key=lambda x: x[0])
-        best_ratio, best_col = scored[0]
-        # Require a reasonable similarity and avoid mapping everything to generic 'PL'
-        if best_ratio >= 0.78 and (best_col or "").strip().lower() != "pl":
-            return best_col
 
     # default
     return "BO 2.5 PL"
@@ -954,190 +868,109 @@ DEFAULT_ENFORCEMENT = {
 }
 
 
-
-def _render_result_analysis(payload: dict) -> str:
-    """User-facing analysis of a job result (compact, Bible-aligned)."""
-    picked = payload.get("picked") or {}
-    baseline = payload.get("baseline") or {}
-    splits = payload.get("splits") or {}
-    features = payload.get("features") or {}
-    monthly_stats = (baseline.get("test_monthly_stats") or {})
-    regime_warn = (baseline.get("test_regime_warning") or {})
-
-    def _fmt(x, nd=3):
-        try:
-            if x is None:
-                return "n/a"
-            return f"{float(x):.{nd}f}"
-        except Exception:
-            return str(x)
-
-    b_train = baseline.get("train") or {}
-    b_val = baseline.get("val") or {}
-    b_test = baseline.get("test") or {}
-
-    lines: List[str] = []
-    lines.append("### 📊 Quick analysis (what we learned)")
-    lines.append(f"- Market picked: `{picked}`")
-    lines.append(
-        f"- Splits (rows): train **{splits.get('train_rows','?')}**, val **{splits.get('val_rows','?')}**, test **{splits.get('test_rows','?')}**"
-    )
-    lines.append(
-        f"- Features used: total **{features.get('n_features_total','?')}** (numeric **{features.get('n_numeric','?')}**, categorical **{features.get('n_categorical','?')}**)"
-    )
-    lines.append("")
-    lines.append("**Baseline performance (strict time-split):**")
-    lines.append(
-        f"- Train ROI: **{_fmt(b_train.get('roi'))}** | Val ROI: **{_fmt(b_val.get('roi'))}** | Test ROI: **{_fmt(b_test.get('roi'))}**"
-    )
-    if b_test.get("max_drawdown") is not None:
-        lines.append(f"- Test max drawdown: **{_fmt(b_test.get('max_drawdown'))}**")
-    if b_test.get("losing_streak_bets") is not None:
-        lines.append(f"- Test losing streak (bets): **{b_test.get('losing_streak_bets')}**")
-    if b_test.get("n_bets") is not None:
-        lines.append(f"- Test bets: **{b_test.get('n_bets')}**")
-
-    lines.append("")
-    lines.append("**Regime / monthly stability check (test):**")
-    if monthly_stats:
-        lines.append(
-            f"- Monthly ROI mean: **{_fmt(monthly_stats.get('roi_mean'))}**, std: **{_fmt(monthly_stats.get('roi_std'))}**, best: **{_fmt(monthly_stats.get('roi_max'))}**, worst: **{_fmt(monthly_stats.get('roi_min'))}**"
-        )
-    if regime_warn:
-        lines.append(
-            f"- Regime warning: **{bool(regime_warn.get('flag'))}** (ROI std {_fmt(regime_warn.get('roi_std'))} vs threshold {_fmt(regime_warn.get('roi_std_warn_threshold'))})"
-        )
-
-    return "\n".join(lines)
-
-
-def _render_next_job_commentary(next_task: str, why: str, merged_params: dict) -> str:
-    """Explain to the user what the next job will do and why we're doing it."""
-    picked = {
-        "pl_column": merged_params.get("pl_column"),
-        "side": merged_params.get("side"),
-        "odds_col": merged_params.get("odds_col"),
-    }
-
-    lines: List[str] = []
-    lines.append("### 🔜 Next job (autopilot) — what & why")
-    lines.append(f"- Next task: **`{next_task}`**")
-    lines.append(f"- Why: {why}")
-    lines.append(f"- Context: `{picked}`")
-
-    if next_task == "bracket_sweep":
-        cols = merged_params.get("sweep_cols") or merged_params.get("focus_numeric_cols") or []
-        lines.append(f"- It will search value ranges (bins) for: `{cols}` and score each range on train/val/test with gates.")
-        lines.append("- Success looks like: a range that stays positive on **val and test** without big drawdown / losing streak.")
-    elif next_task == "subgroup_scan":
-        cols = merged_params.get("group_cols") or merged_params.get("group_by_cols") or []
-        lines.append(f"- It will scan grouped segments for: `{cols}` and find buckets with stable ROI in val/test.")
-        lines.append("- Success looks like: a segment that holds up out-of-sample (not just one league/month).")
-    elif next_task == "hyperopt_pl_lab":
-        trials = merged_params.get("hyperopt_trials") or merged_params.get("trials")
-        lines.append(f"- It will tune model/distillation knobs on **validation only** (trials={trials}) to find a more generalisable rule.")
-        lines.append("- Success looks like: distilled rules that pass the gates, then re-validated on test.")
-    else:
-        lines.append("- It will run the selected diagnostic to locate robust pockets of signal and convert them into explicit filter rules.")
-
-    return "\n".join(lines)
-
-
 def _choose_diagnostic_task(payload: dict, ctx: dict, recent_actions: list) -> tuple[str, dict, str]:
-    """Pick the next diagnostic job (and its params) when no rules passed.
+    """Pick a diagnostic task + params when we have no passing distilled rules.
 
-    Returns:
-        (task_type, params, why)
+    This is a deterministic safety net (Bible-aligned) so the agent never "stops"
+    just because distillation didn't find a stable rule on the first run.
 
-    This must be worker-compatible:
-      - subgroup_scan expects: group_cols, max_groups
-      - bracket_sweep expects: sweep_cols, n_bins, max_results
-      - hyperopt_pl_lab expects: hyperopt_trials
+    Preference order (with simple anti-repeat):
+      1) bracket_sweep on top numeric features
+      2) subgroup_scan on strong categorical columns
+      3) hyperopt_pl_lab (val-only tuning, short)
 
-    We keep it simple + robust: if payload is missing fields, fall back to sensible defaults.
+    Returns: (task_type, params, why)
     """
-    dataset = (ctx.get("dataset") or {})
-    storage_bucket = dataset.get("storage_bucket", "football-data")
-    storage_path = dataset.get("storage_path", "football_ai_NNIA.csv")
+    payload = payload or {}
+    ctx = ctx or {}
+
+    # Dataset location from context (best-effort)
+    dataset = (ctx.get("dataset") or {}) if isinstance(ctx, dict) else {}
+    storage_bucket = dataset.get("storage_bucket") or "football-data"
+    storage_path = dataset.get("storage_path") or "football_ai_NNIA.csv"
 
     picked = payload.get("picked") or {}
     pl_col = picked.get("pl_column") or payload.get("pl_column") or "BO 2.5 PL"
-    side = picked.get("side") or payload.get("side") or "back"
+    side = picked.get("side") or payload.get("side") or ("lay" if str(pl_col).startswith("L") else "back")
     odds_col = picked.get("odds_col") or payload.get("odds_col")
-    row_filters = picked.get("row_filters") or payload.get("row_filters") or {}
 
-    ftypes = payload.get("feature_types") or {}
-    num_cols = list(ftypes.get("numeric") or [])
-    cat_cols = list(ftypes.get("categorical") or [])
+    # Pull out feature hints
+    num_cols = picked.get("numeric_cols") or payload.get("numeric_cols") or []
+    cat_cols = picked.get("categorical_cols") or payload.get("categorical_cols") or []
 
-    # If we have feature_importance, prefer its ordering
-    fi = payload.get("feature_importance") or []
-    if isinstance(fi, list) and fi:
-        ordered = [r.get("feature") for r in fi if isinstance(r, dict) and r.get("feature")]
-        # keep only those in our type lists
-        ordered_num = [c for c in ordered if c in set(num_cols)]
-        ordered_cat = [c for c in ordered if c in set(cat_cols)]
-        if ordered_num:
-            num_cols = ordered_num + [c for c in num_cols if c not in set(ordered_num)]
-        if ordered_cat:
-            cat_cols = ordered_cat + [c for c in cat_cols if c not in set(ordered_cat)]
-
-    # Avoid repeating the same diagnostic back-to-back
-    last_task = None
+    feat_imp = payload.get("feature_importance") or []
+    # Feature importance is a list of dicts: {"feature": ..., "importance": ...}
+    imp_order = []
     try:
-        if recent_actions:
-            last_task = str(recent_actions[-1].get("task_type") or "")
+        for row in feat_imp:
+            f = (row or {}).get("feature")
+            if f:
+                imp_order.append(str(f))
     except Exception:
-        last_task = None
+        imp_order = []
 
-    # Default subgroup columns (matches worker defaults)
-    default_group_cols = ["MODE", "MARKET", "LEAGUE", "BRACKET", "DRIFT IN / OUT"]
+    # Prefer the important numeric columns first (keep it small for speed)
+    top_num = [c for c in imp_order if c in set(num_cols)] or list(num_cols)
+    top_num = [c for c in top_num if isinstance(c, str) and c.strip()][:5]
 
-    # 1) Subgroup scan: great for finding 'where' signal lives
-    if last_task != "subgroup_scan":
-        group_cols = [c for c in default_group_cols if c in set(cat_cols)] or ["MODE", "MARKET", "LEAGUE", "BRACKET"]
+    # Prefer important categorical columns
+    top_cat = [c for c in imp_order if c in set(cat_cols)] or list(cat_cols)
+    top_cat = [c for c in top_cat if isinstance(c, str) and c.strip()][:6]
+
+    # What have we already tried in this agent session?
+    tried = set()
+    try:
+        for a in (recent_actions or []):
+            if isinstance(a, dict) and a.get("task_type"):
+                tried.add(str(a["task_type"]))
+    except Exception:
+        tried = set()
+
+    # --- 1) Bracket sweep ---
+    if "bracket_sweep" not in tried and top_num:
+        cols = top_num[:3]
         params = {
             "storage_bucket": storage_bucket,
             "storage_path": storage_path,
             "pl_column": pl_col,
             "side": side,
             "odds_col": odds_col,
-            "row_filters": row_filters,
-            "group_cols": group_cols,
-            "max_groups": 80,
+            "sweep_cols": cols,
+            "n_bins": 10,
+            "max_results": 60,
         }
-        why = f"No passing rules; running subgroup_scan over {group_cols} to find stable segments for {pl_col}."
-        return "subgroup_scan", params, why
-
-    # 2) Bracket sweep: quantile bin search on the strongest numeric cols
-    if num_cols and last_task != "bracket_sweep":
-        sweep_cols = num_cols[:6]
-        params = {
-            "storage_bucket": storage_bucket,
-            "storage_path": storage_path,
-            "pl_column": pl_col,
-            "side": side,
-            "odds_col": odds_col,
-            "row_filters": row_filters,
-            "sweep_cols": sweep_cols,
-            "n_bins": 12,
-            "max_results": 150,
-        }
-        why = f"No passing rules; running bracket_sweep on top numeric cols {sweep_cols} for {pl_col}."
+        why = f"Bracket sweep on top numeric features: {', '.join(cols)}."
         return "bracket_sweep", params, why
 
-    # 3) Hyperopt: last resort tuning on validation only
+    # --- 2) Subgroup scan ---
+    if "subgroup_scan" not in tried and (top_cat or top_num):
+        # Use up to 4 categorical cols; worker will skip missing/non-categorical.
+        cols = top_cat[:4] if top_cat else ["MODE", "MARKET", "LEAGUE", "BRACKET"]
+        params = {
+            "storage_bucket": storage_bucket,
+            "storage_path": storage_path,
+            "pl_column": pl_col,
+            "side": side,
+            "odds_col": odds_col,
+            "group_cols": cols,
+            "max_groups": 80,
+        }
+        why = f"Subgroup scan to find stable buckets using: {', '.join(cols)}."
+        return "subgroup_scan", params, why
+
+    # --- 3) Hyperopt (short) ---
     params = {
         "storage_bucket": storage_bucket,
         "storage_path": storage_path,
         "pl_column": pl_col,
         "side": side,
         "odds_col": odds_col,
-        "row_filters": row_filters,
-        "hyperopt_trials": 30,
+        "hyperopt_trials": 15,
+        "top_fracs": payload.get("top_fracs") or [0.05, 0.1, 0.2],
     }
-    why = f"No passing rules; running hyperopt_pl_lab (VAL-only tuning) for {pl_col} to search for stronger distillation thresholds/models."
+    why = "Hyperopt (val-only) to tune model/distillation knobs when simple scans didn't produce a stable rule."
     return "hyperopt_pl_lab", params, why
+
 
 
 ENFORCEMENT_EXPLANATION = {
@@ -1390,6 +1223,34 @@ Context JSON:
         return {"narration": f"Agent could not parse JSON. Raw: {txt[:400]}", "stop": True}
 
 
+
+def _coerce_row_filters(filters_any: Any) -> List[Dict[str, Any]]:
+    """Normalize user/agent filters into worker-friendly row_filters.
+
+    Accepts:
+      - list[dict] already in row_filter form
+      - dict[str, Any] meaning equality filters
+      - None/empty
+    """
+    if not filters_any:
+        return []
+    if isinstance(filters_any, list):
+        return [f for f in filters_any if isinstance(f, dict)]
+    if isinstance(filters_any, dict):
+        out: List[Dict[str, Any]] = []
+        for k, v in filters_any.items():
+            if k is None:
+                continue
+            col = str(k)
+            if isinstance(v, (list, tuple, set)):
+                out.append({"col": col, "op": "in", "value": list(v)})
+            else:
+                out.append({"col": col, "op": "==", "value": v})
+        return out
+    # unknown type → ignore
+    return []
+
+
 def _autopilot_tick():
     # Cached Bible context (loaded when strategy run starts).
     ctx_local = st.session_state.get('cached_research_context')
@@ -1461,13 +1322,9 @@ def _autopilot_tick():
 
     _append("assistant", f"📥 Job done. Downloading results `{rp}` from `{bucket}`...")
     res = _run_tool("download_result", {"bucket": bucket, "result_path": rp})
+    result_obj = (res or {}).get("result") if isinstance(res, dict) else None
 
-    # `download_result` returns a wrapper: {"ok": True, "result": <payload>...}
-    # Keep the wrapper for helpers that expect it, and also pull out the payload dict.
-    result_wrap = res if isinstance(res, dict) else {}
-    payload = (result_wrap.get("result") or {}) if isinstance(result_wrap, dict) else {}
-
-    if not payload:
+    if not result_obj:
         _append("assistant", f"⚠️ Could not load result payload.\n```json\n{json.dumps(res, indent=2)[:12000]}\n```")
         st.session_state.active_job_id = ""
         return
@@ -1475,13 +1332,10 @@ def _autopilot_tick():
     # Mark as handled so we don't process it repeatedly on reruns.
     st.session_state.get("_handled_job_ids", set()).add(job_id)
 
-    # Render distilled rules + analysis
-    _append("assistant", _render_distilled_top(result_wrap, top_n=3))
-
-    if st.session_state.get("verbose_result_analysis", True):
-        _append("assistant", _render_result_analysis(payload))
+    _append("assistant", _render_distilled_top(result_obj, top_n=3))
 
     # Interpretation (still short, but diagnostic even on failure)
+    payload = (result_obj or {}).get("result") or {}
     distilled = (payload.get("distilled") or {})
     rules = distilled.get("top_distilled_rules") or []
     near_misses = distilled.get("near_misses") or []
@@ -1518,7 +1372,7 @@ def _autopilot_tick():
     _append("assistant", "\n".join(interp))
 
     # Log to sheet
-    _log_lab_to_sheet(job_id, result_wrap, tags="pl_lab,bo2.5,narrated_autopilot")
+    _log_lab_to_sheet(job_id, result_obj, tags="pl_lab,bo2.5,narrated_autopilot")
 
     # Persist a compact action/result memory to research_state to avoid repetition
     try:
@@ -1555,44 +1409,36 @@ def _autopilot_tick():
         decision = _agent_choose_next_action(
             ctx=ctx_local,
             last_task_type=str(job.get("task_type") or ""),
-            last_result=payload if isinstance(payload, dict) else {}
+            last_result=(result_obj.get("result") or {}) if isinstance(result_obj, dict) else {}
         )
+
+        # If no rules passed, force a diagnostic job next (regardless of what the LLM decided).
+        if st.session_state.get("agent_session_autodiag_on_no_rules", True) and not rules:
+            auto_task, auto_params, why = _choose_diagnostic_task(payload, ctx_local)
+            decision = {
+                "stop": False,
+                "narration": f"No rules passed gates → running diagnostics: {auto_task}",
+                "next_task_type": auto_task,
+                "next_params": auto_params,
+                "why": why,
+                "recent_actions": [],
+            }
         st.session_state["agent_session_last_decision"] = json.dumps(decision, ensure_ascii=False)[:2000]
         _append_chat("assistant", "🧠 Agent decision: " + (decision.get("narration") or ""))
 
-        if decision.get("stop"):
-            if not rules:
-                # Do not stop on a failure-to-distill / failure-to-pass-gates. Run a diagnostic tool next.
-                recent_actions = []
-                try:
-                    ra_raw = (ctx_local.get("research_state") or {}).get("recent_actions")
-                    if ra_raw:
-                        recent_actions = json.loads(ra_raw) if isinstance(ra_raw, str) else list(ra_raw)
-                except Exception:
-                    recent_actions = []
-                task_type, auto_params, why = _choose_diagnostic_task(payload, ctx_local, recent_actions)
-                _append_chat(
-                    "assistant",
-                    f"🟡 No passing rules yet, so I won't stop. Next I will run **{task_type}**. {why}",
-                )
-                decision = {
-                    "stop": False,
-                    "next_task_type": task_type,
-                    "next_params": auto_params,
-                    "narration": f"Auto-diagnostic because no rules passed. {why}",
-                }
-            else:
-                _append_chat("assistant", "🛑 Agent stopped (no further actions).")
-                st.session_state["agent_session_active"] = False
-                st.session_state.active_job_id = ""
-                return
-
+        # Decide whether to continue, and with which diagnostic tool.
         next_task = decision.get("next_task_type")
         next_params = decision.get("next_params") or {}
 
-        # Safety net: if the agent didn't select a tool, and we still have no passing rules,
-        # pick a diagnostic task deterministically (do not stop).
-        if (not next_task) and (not rules):
+        # If the agent wants to stop AND we already have passing rules, stop cleanly.
+        if decision.get("stop") and rules:
+            _append_chat("assistant", "🛑 Agent session stopped (rules found and decision=stop).")
+            st.session_state["agent_session_active"] = False
+            st.session_state.active_job_id = ""
+            return
+
+        # If no passing rules, never stop. Also, if the agent didn't propose a next tool, pick one deterministically.
+        if (not rules) and (decision.get("stop") or not next_task):
             recent_actions = []
             try:
                 ra_raw = (ctx_local.get("research_state") or {}).get("recent_actions")
@@ -1600,10 +1446,11 @@ def _autopilot_tick():
                     recent_actions = json.loads(ra_raw) if isinstance(ra_raw, str) else list(ra_raw)
             except Exception:
                 recent_actions = []
-            task_type, auto_params, why = _choose_diagnostic_task(payload, ctx_local, recent_actions)
-            _append_chat("assistant", f"🟡 No passing rules yet and no next task selected; running diagnostic: {task_type}. {why}")
-            next_task = task_type
-            next_params = {**auto_params, **(next_params or {})}
+            auto_task, auto_params, why = _choose_diagnostic_task(payload, ctx_local, recent_actions)
+            next_task = auto_task
+            # Allow decision params to override auto params (but keep required dataset/pl defaults from auto if present)
+            next_params = {**auto_params, **next_params}
+            _append_chat("assistant", f"🟡 No rules passed; running diagnostic next: {next_task}. {why}")
 
         if not next_task:
             _append_chat("assistant", "🛑 Agent did not select a next task. Stopping agent session.")
@@ -1611,23 +1458,52 @@ def _autopilot_tick():
             st.session_state.active_job_id = ""
             return
 
-        # Enforce Bible columns + gates on every job (and keep carry-over filters)
         base_params = {
-            "pl_column": (st.session_state.get("agent_session_pl_column") or (job.get("params") or {}).get("pl_column") or "BO 2.5 PL"),
+            "pl_column": (
+                st.session_state.get("agent_session_pl_column")
+                or (job.get("params") or {}).get("pl_column")
+                or "BO 2.5 PL"
+            ),
             "storage_path": (job.get("params") or {}).get("storage_path", "football_ai_NNIA.csv"),
             "storage_bucket": (job.get("params") or {}).get("storage_bucket", "football-data"),
-            "ignored_columns": (ctx_local.get("derived") or {}).get("ignored_columns") or (job.get("params") or {}).get("ignored_columns") or [],
-            "outcome_columns": (ctx_local.get("derived") or {}).get("outcome_columns") or (job.get("params") or {}).get("outcome_columns") or [],
-            "ignored_feature_columns": (ctx_local.get("derived") or {}).get("ignored_feature_columns") or (job.get("params") or {}).get("ignored_feature_columns") or [],
-            "enforcement": (job.get("params") or {}).get("enforcement") or (ctx_local.get("enforcement") if isinstance(ctx, dict) else {}) or {},
+            "_results_bucket": (
+                (job.get("params") or {}).get("_results_bucket")
+                or st.session_state.get("active_job_bucket")
+                or DEFAULT_RESULTS_BUCKET
+            ),
+            # Bible governance (always carry forward)
+            "ignored_columns": (
+                (ctx_local.get("derived") or {}).get("ignored_columns")
+                or (job.get("params") or {}).get("ignored_columns")
+                or []
+            ),
+            "outcome_columns": (
+                (ctx_local.get("derived") or {}).get("outcome_columns")
+                or (job.get("params") or {}).get("outcome_columns")
+                or []
+            ),
+            "ignored_feature_columns": (
+                (ctx_local.get("derived") or {}).get("ignored_feature_columns")
+                or (job.get("params") or {}).get("ignored_feature_columns")
+                or []
+            ),
+            "enforcement": (
+                (job.get("params") or {}).get("enforcement")
+                or (ctx_local.get("enforcement") if isinstance(ctx_local, dict) else {})
+                or {}
+            ),
+            # Carry through market metadata
+            "side": (job.get("params") or {}).get("side"),
+            "odds_col": (job.get("params") or {}).get("odds_col"),
+            "top_fracs": (job.get("params") or {}).get("top_fracs"),
+            # Runtime controls
             "duration_minutes": int(st.session_state.get("agent_session_minutes_per_job", 10)),
+            # Filters (keep both representations for backwards compatibility)
             "filters": st.session_state.get("agent_session_filters") or {},
-            "row_filters": (job.get("params") or {}).get("row_filters") or _coerce_row_filters(st.session_state.get("agent_session_filters") or {}),
+            "row_filters": _coerce_row_filters(st.session_state.get("agent_session_filters") or {}),
             "top_n": int((job.get("params") or {}).get("top_n", 12)),
         }
         merged = {**base_params, **next_params}
-        _append("assistant", _render_next_job_commentary(next_task, locals().get("why") or "Diagnostic continuation after gates failed.", merged))
-
         submitted = _run_tool("submit_job", {"task_type": next_task, "params": merged})
         new_job_id = (submitted or {}).get("job_id") if isinstance(submitted, dict) else None
         if new_job_id:
@@ -1680,13 +1556,11 @@ def _maybe_handle_job_queries(user_text: str) -> bool:
             return True
 
         res = _run_tool("download_result", {"bucket": bucket, "result_path": rp})
-        wrap = res if isinstance(res, dict) else {}
-        payload = (wrap.get("result") or {}) if isinstance(wrap, dict) else {}
-
-        if payload:
-            _append("assistant", _render_distilled_top(wrap, top_n=3), persist=False)
-            _append("assistant", f"```json\n{json.dumps(payload, indent=2)[:12000]}\n```", persist=False)
-            _log_lab_to_sheet(job_id, wrap, tags="pl_lab,manual")
+        result_obj = (res or {}).get("result") if isinstance(res, dict) else None
+        if result_obj:
+            _append("assistant", _render_distilled_top(result_obj, top_n=3), persist=False)
+            _append("assistant", f"```json\n{json.dumps(result_obj, indent=2)[:12000]}\n```", persist=False)
+            _log_lab_to_sheet(job_id, result_obj, tags="pl_lab,manual")
         else:
             _append("assistant", f"⚠️ Could not download/parse results.\n```json\n{json.dumps(res, indent=2)[:12000]}\n```", persist=False)
 
@@ -1762,13 +1636,11 @@ def _chat_with_tools(user_text: str, max_rounds: int = 6):
 
 with st.sidebar:
     st.caption(f"Model: `{MODEL}`")
-    st.caption(f"Build: `{BUILD_TAG}`")
     st.caption(f"Data: `{DEFAULT_STORAGE_BUCKET}/{DEFAULT_STORAGE_PATH}`")
     st.caption(f"Results: `{DEFAULT_RESULTS_BUCKET}`")
 
     st.radio("Agent mode", ["chat", "autopilot"], key="agent_mode")
     st.checkbox("Narrate autopilot runs", key="autopilot_narrate", value=True)
-    st.checkbox("Verbose result analysis", key="verbose_result_analysis", value=True)
 
     st.divider()
     if st.button("➕ New chat"):
