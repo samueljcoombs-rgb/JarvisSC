@@ -768,85 +768,43 @@ def _context_snapshot_text(ctx: Dict[str, Any]) -> str:
     )
 
 def _resolve_pl_column(user_text: str, ctx: Dict[str, Any]) -> str:
-    """
-    Resolve which PL/outcome column to optimise from a free-text user request.
-
-    Key points:
-    - outcome_columns often includes the generic "PL" which must be LAST resort.
-    - Users often type abbreviations like "O2.5", "BO2.5", or small typos (e.g. LFHGU0.5 vs LFGHU0.5).
-    """
-    import difflib
-
     t = _normalize(user_text)
     outcomes: List[str] = ((ctx.get("derived") or {}).get("outcome_columns") or [])
 
-    # Common aliases / abbreviations
     aliases = {
         "btts": "BTTS PL",
         "both teams to score": "BTTS PL",
         "over 2.5": "BO 2.5 PL",
         "o2.5": "BO 2.5 PL",
-        "o 2.5": "BO 2.5 PL",
         "bo 2.5": "BO 2.5 PL",
         "bo2.5": "BO 2.5 PL",
-        "shg": "SHG PL",
-        "shg2+": "SHG 2+ PL",
-        "shg 2+": "SHG 2+ PL",
-        "lu1.5": "LU1.5 PL",
-        "u1.5": "LU1.5 PL",
         "fh over 1.5": "BO1.5 FHG PL",
-        "fho1.5": "BO1.5 FHG PL",
-        # First-half under 0.5 frequently mistyped
-        "lfghu0.5": "LFGHU0.5 PL",
-        "lfhgu0.5": "LFGHU0.5 PL",
-        "lfghu 0.5": "LFGHU0.5 PL",
-        "lfhgu 0.5": "LFGHU0.5 PL",
-        "fh under 0.5": "LFGHU0.5 PL",
-        "fh u0.5": "LFGHU0.5 PL",
-        "fhgu0.5": "LFGHU0.5 PL",
+        "shg": "SHG PL",
     }
     for k, v in aliases.items():
         if k in t:
             return v
 
+    # match against outcome columns text if present
+    def nn(x: str) -> str:
+        return _normalize(x).replace(" ", "")
+
     t_compact = t.replace(" ", "")
 
-    # Prefer specific columns over generic PL.
+    # IMPORTANT: outcome_columns often contains the generic "PL" first.
+    # When the user asks for e.g. "LFGHU0.5 PL", we must prefer the more specific column.
+    # Sort by: (is_generic_PL, -len(col)) so longer/specific columns match first and "PL" matches last.
     outcomes_sorted = sorted(
         outcomes,
         key=lambda c: ((c or "").strip().lower() == "pl", -len((c or "").strip())),
     )
 
-    # Exact/substring match first
     for col in outcomes_sorted:
-        c = nn(col)
-        if c and c in t_compact:
+        if nn(col) in t_compact:
             return col
 
-    # Fuzzy match (handles small typos) – only for non-generic outcomes
-    candidates = [c for c in outcomes_sorted if (c or "").strip().lower() != "pl"]
-    cand_compact = {c: nn(c) for c in candidates}
-
-    # Compare against compacted user text; take best match above threshold
-    best = None
-    best_score = 0.0
-    for c, cc in cand_compact.items():
-        if not cc:
-            continue
-        score = difflib.SequenceMatcher(None, t_compact, cc).ratio()
-        if score > best_score:
-            best_score = score
-            best = c
-
-    if best and best_score >= 0.72:
-        return best
-
-    # Last resort: if user wrote "pl" but nothing else matched, use generic PL
-    if " pl" in t or t.endswith("pl") or t == "pl":
-        return "PL" if "PL" in outcomes else (outcomes[0] if outcomes else "PL")
-
-    # Absolute fallback
-    return "PL" if "PL" in outcomes else (outcomes[0] if outcomes else "PL")
+    # default
+    return "BO 2.5 PL"
 
 def _render_rule_spec(spec: Dict[str, Any]) -> str:
     parts: List[str] = []
@@ -1068,91 +1026,124 @@ def _render_next_job_commentary(next_task: str, why: str, merged_params: dict) -
 
 
 def _choose_diagnostic_task(payload: dict, ctx: dict, recent_actions: list) -> tuple[str, dict, str]:
-    """Pick a deterministic diagnostic next-step when no rules pass.
+    """Pick the next diagnostic job (and its params) when no rules passed.
 
-    Preference order:
-      1) bracket_sweep on top numeric features
-      2) subgroup_scan on top categorical features
-      3) hyperopt_pl_lab (short VAL-only tune)
+    Returns:
+        (task_type, params, why)
+
+    IMPORTANT:
+    - task_type must be a worker-recognised task type (e.g. subgroup_scan, bracket_sweep, hyperopt_pl_lab)
+    - params must use the worker's expected param keys (e.g. sweep_cols, group_cols, hyperopt_trials)
+    - keep it robust: if payload is missing fields, fall back to sensible defaults.
     """
-    dataset = (ctx.get("dataset") or {})
-    storage_bucket = dataset.get("storage_bucket")
-    storage_path = dataset.get("storage_path")
 
-    picked = payload.get("picked") or {}
-    pl_col = picked.get("pl_column")
-    side = picked.get("side") or "back"
-    odds_col = picked.get("odds_col")
-    row_filters = picked.get("row_filters") or {}
+    # Prefer the session PL column, then the last run's picked pl_column, then Bible default
+    pl_column = (
+        st.session_state.get("agent_session_pl_column")
+        or ((payload or {}).get("picked") or {}).get("pl_column")
+        or ((payload or {}).get("picked") or {}).get("target")
+        or "BO 2.5 PL"
+    )
 
-    ftypes = payload.get("feature_types") or {}
-    numeric = set(ftypes.get("numeric") or [])
-    categorical = set(ftypes.get("categorical") or [])
+    # Extract top numeric features from feature importance if present
+    top_numeric: list[str] = []
+    try:
+        fi = (payload or {}).get("feature_importance") or (payload or {}).get("feature_importances") or []
+        # common shapes: [{"feature": "...", "importance": 0.12, "kind": "numeric"}, ...]
+        for row in fi:
+            if not isinstance(row, dict):
+                continue
+            feat = row.get("feature") or row.get("name")
+            kind = (row.get("kind") or row.get("type") or "").lower()
+            if feat and ("num" in kind or kind in ("numeric", "float", "int")):
+                top_numeric.append(str(feat))
+        if not top_numeric:
+            # fallback: take any features marked numeric
+            for row in fi:
+                if not isinstance(row, dict):
+                    continue
+                feat = row.get("feature") or row.get("name")
+                if feat and (row.get("is_numeric") is True):
+                    top_numeric.append(str(feat))
+    except Exception:
+        top_numeric = []
 
-    imp = payload.get("feature_importance") or []
-    ranked = [d.get("feature") for d in imp if isinstance(d, dict) and d.get("feature")]
+    # Another common payload shape: payload["feature_summary"] = {"numeric": [...], "categorical":[...]}
+    try:
+        if not top_numeric:
+            fs = (payload or {}).get("feature_summary") or {}
+            nums = fs.get("numeric") or fs.get("numeric_features") or []
+            if isinstance(nums, list):
+                top_numeric = [str(x) for x in nums if isinstance(x, (str, int, float))]
+    except Exception:
+        pass
 
-    top_num = [c for c in ranked if c in numeric][:4] or list(numeric)[:4]
-    top_cat = [c for c in ranked if c in categorical][:3] or list(categorical)[:3]
+    # Last-resort defaults that exist in the Bible / data
+    if not top_numeric:
+        top_numeric = [
+            "DIFF",
+            "% DRIFT",
+            "ACTUAL ODDS",
+            "IMPLIED ODDS",
+            "H XG VS A XG S",
+            "H XG VS A XG 6",
+            "Points Diff",
+        ]
 
-    last_task = None
-    if recent_actions:
-        try:
-            last_task = recent_actions[-1].get("task_type")
-        except Exception:
-            last_task = None
+    # Categorical columns to consider (safe + commonly useful)
+    default_group_cols = ["MODE", "MARKET", "LEAGUE", "BRACKET", "DRIFT IN / OUT"]
 
-    if last_task != "bracket_sweep" and top_num:
+    # Avoid repeating the same diagnostic endlessly
+    recent_types = []
+    try:
+        for a in (recent_actions or [])[-12:]:
+            if isinstance(a, dict) and a.get("task_type"):
+                recent_types.append(str(a["task_type"]))
+    except Exception:
+        recent_types = []
+
+    def _recently_ran(t: str) -> bool:
+        t = str(t)
+        return t in recent_types[-3:]  # only block immediate repeats
+
+    # Time budget: if user asked for longer jobs, we can justify heavier diagnostics
+    minutes_per_job = int(st.session_state.get("agent_session_minutes_per_job", 10))
+    requested_minutes = minutes_per_job
+
+    # 1) Subgroup scan is usually the fastest way to find profitable segments in this dataset
+    if not _recently_ran("subgroup_scan"):
+        why = "Subgroup scan to find *where* BO2.5 edge may exist (MODE/MARKET/LEAGUE/BRACKET/DRIFT buckets) before tuning numeric thresholds."
         params = {
-            "storage_bucket": storage_bucket,
-            "storage_path": storage_path,
-            "pl_column": pl_col,
-            "side": side,
-            "odds_col": odds_col,
-            "row_filters": row_filters,
-            "focus_numeric_cols": top_num,
-            "bins": 8,
-            "max_rules": 40,
+            "pl_column": pl_column,
+            "duration_minutes": max(15, min(60, requested_minutes)),
+            "group_cols": default_group_cols,
+            "max_groups": 80,
+            # row_filters is already enforced upstream in base_params; do not override here
         }
-        why = f"Bracketing top numeric drivers to find stable ranges: {top_num}"
-        return "bracket_sweep", params, why
-
-    if last_task != "subgroup_scan" and top_cat:
-        params = {
-            "storage_bucket": storage_bucket,
-            "storage_path": storage_path,
-            "pl_column": pl_col,
-            "side": side,
-            "odds_col": odds_col,
-            "row_filters": row_filters,
-            "group_cols": top_cat,
-            "min_group_size": 120,
-            "max_groups": 250,
-        }
-        why = f"Scanning categorical segments to find robust pockets: {top_cat}"
         return "subgroup_scan", params, why
 
+    # 2) Bracket sweep over the strongest numeric features
+    if not _recently_ran("bracket_sweep"):
+        why = "Bracket sweep to search simple numeric ranges (quantiles) on the strongest numeric features to distill into robust rules."
+        params = {
+            "pl_column": pl_column,
+            "duration_minutes": max(15, min(60, requested_minutes)),
+            "sweep_cols": top_numeric[:3],
+            "n_bins": 12,
+            "max_results": 60,
+        }
+        return "bracket_sweep", params, why
+
+    # 3) Hyperopt PL lab (heavier): use when we've already tried segmentation + bracket tuning
+    why = "Hyperopt PL lab (VAL-only tuning) to try a wider search of rule thresholds/models, then report on the untouched test period."
     params = {
-        "storage_bucket": storage_bucket,
-        "storage_path": storage_path,
-        "pl_column": pl_col,
-        "side": side,
-        "odds_col": odds_col,
-        "row_filters": row_filters,
-        "trials": 15,
-        "time_budget_sec": 600,
+        "pl_column": pl_column,
+        "duration_minutes": max(30, min(180, requested_minutes)),
+        "hyperopt_trials": 30 if requested_minutes < 60 else 60,
+        "top_fracs": [0.05, 0.1, 0.2],
     }
-    why = "VAL-only hyperopt to adjust distillation/model knobs after other diagnostics."
     return "hyperopt_pl_lab", params, why
 
-ENFORCEMENT_EXPLANATION = {
-    "min_train_rows": "Minimum number of scan-rows needed in TRAIN for a rule to be considered (avoid tiny-sample mirages).",
-    "min_val_rows": "Minimum number of scan-rows needed in VALIDATION (we tune on val, so it must be meaningful).",
-    "min_test_rows": "Minimum number of scan-rows needed in TEST (final proof; if too small, it's not trusted).",
-    "max_train_val_gap_roi": "Max allowed drop from train ROI to val ROI (penalises overfitting). Example 0.10 means train ROI can be at most 0.10 higher than validation ROI.",
-    "max_test_drawdown": "Worst allowed peak-to-trough drawdown on TEST, measured in points (negative). Example -25 means we reject strategies that at any point fall more than 25 points from peak.",
-    "max_test_losing_streak_bets": "Maximum allowed consecutive losing bets (by unique match ID) on TEST.",
-}
 
 def _enforcement_from_state(ctx: Dict[str, Any]) -> Dict[str, Any]:
     stt = (ctx.get("research_state") or {}) if isinstance(ctx, dict) else {}
@@ -1187,7 +1178,7 @@ def _maybe_start_narrated_pl_research(user_text: str) -> bool:
     st.session_state["cached_research_context"] = ctx
     st.session_state.last_context = ctx
 
-    minutes = _minutes_from_text(user_text, default_minutes=30)
+    minutes = _minutes_from_text(user_text, default_minutes=10)
     do_hyperopt = any(k in t for k in ["hyperopt", "grid", "cv", "bayes", "optuna"])
     pl_col = _resolve_pl_column(user_text, ctx)
     enforcement = _enforcement_from_state(ctx)
