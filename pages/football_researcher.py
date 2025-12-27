@@ -790,16 +790,7 @@ def _resolve_pl_column(user_text: str, ctx: Dict[str, Any]) -> str:
         return _normalize(x).replace(" ", "")
 
     t_compact = t.replace(" ", "")
-
-    # IMPORTANT: outcome_columns often contains the generic "PL" first.
-    # When the user asks for e.g. "LFGHU0.5 PL", we must prefer the more specific column.
-    # Sort by: (is_generic_PL, -len(col)) so longer/specific columns match first and "PL" matches last.
-    outcomes_sorted = sorted(
-        outcomes,
-        key=lambda c: ((c or "").strip().lower() == "pl", -len((c or "").strip())),
-    )
-
-    for col in outcomes_sorted:
+    for col in outcomes:
         if nn(col) in t_compact:
             return col
 
@@ -1417,13 +1408,9 @@ def _autopilot_tick():
 
     _append("assistant", f"📥 Job done. Downloading results `{rp}` from `{bucket}`...")
     res = _run_tool("download_result", {"bucket": bucket, "result_path": rp})
+    result_obj = (res or {}).get("result") if isinstance(res, dict) else None
 
-    # `download_result` returns a wrapper: {"ok": True, "result": <payload>...}
-    # Keep the wrapper for helpers that expect it, and also pull out the payload dict.
-    result_wrap = res if isinstance(res, dict) else {}
-    payload = (result_wrap.get("result") or {}) if isinstance(result_wrap, dict) else {}
-
-    if not payload:
+    if not result_obj:
         _append("assistant", f"⚠️ Could not load result payload.\n```json\n{json.dumps(res, indent=2)[:12000]}\n```")
         st.session_state.active_job_id = ""
         return
@@ -1431,8 +1418,9 @@ def _autopilot_tick():
     # Mark as handled so we don't process it repeatedly on reruns.
     st.session_state.get("_handled_job_ids", set()).add(job_id)
 
-    # Render distilled rules + analysis
-    _append("assistant", _render_distilled_top(result_wrap, top_n=3))
+    payload = (result_obj or {}).get("result") or {}
+
+    _append("assistant", _render_distilled_top(result_obj, top_n=3))
 
     if st.session_state.get("verbose_result_analysis", True):
         _append("assistant", _render_result_analysis(payload))
@@ -1472,48 +1460,9 @@ def _autopilot_tick():
             )
         interp.append("- Next: run a **diagnostic** job (bracket_sweep/subgroup_scan/hyperopt_pl_lab) using the strongest features and near-miss patterns.")
     _append("assistant", "\n".join(interp))
-    # ------------------------------------------------------------
-    # Autopilot follow-up (no permission needed)
-    # If PL lab produced no distilled strategies, immediately enqueue
-    # a diagnostic subgroup scan so we keep iterating autonomously.
-    # ------------------------------------------------------------
-    try:
-        payload = (result_wrap or {}).get("result") or {}
-        distilled = (payload.get("distilled") or {})
-        rules = distilled.get("top_distilled_rules") or []
-        if not rules:
-            spawned_for = st.session_state.get("_spawned_diag_for") or set()
-            if not isinstance(spawned_for, set):
-                # tolerate older serialization formats
-                spawned_for = set(spawned_for) if isinstance(spawned_for, (list, tuple)) else set()
-            if job_id not in spawned_for:
-                spawned_for.add(job_id)
-                st.session_state["_spawned_diag_for"] = spawned_for
-
-                pl_col = (params.get("pl_column") or st.session_state.get("active_job_pl_col") or "").strip()
-                enforcement = (params.get("enforcement") or {}) if isinstance(params.get("enforcement"), dict) else {}
-
-                _append("assistant", "🧪 No rules passed → starting an automatic diagnostic **subgroup scan** to find profitable buckets (MODE/MARKET/LEAGUE/BRACKET, etc.) without peeking at test for discovery.")
-                diag = functions.start_subgroup_scan(
-                    pl_column=pl_col,
-                    duration_minutes=int(params.get("duration_minutes") or 30),
-                    enforcement=enforcement,
-                )
-                diag_id = (diag or {}).get("job_id") if isinstance(diag, dict) else None
-                if diag_id:
-                    _append("assistant", f"🚀 Started subgroup_scan. Job ID: {diag_id}")
-                    st.session_state.active_job_id = diag_id
-                    st.session_state.active_job_pl_col = pl_col
-                    st.session_state.active_job_bucket = DEFAULT_RESULTS_BUCKET
-                    st.session_state["active_job_last_event_ts"] = ""
-                else:
-                    _append("assistant", f"⚠️ Tried to start subgroup_scan but didn't get a job_id.\n```json\n{json.dumps(diag, indent=2)}\n```")
-    except Exception as e:
-        _append("assistant", f"⚠️ Autopilot follow-up failed (subgroup_scan not started): {type(e).__name__}: {e}")
-
 
     # Log to sheet
-    _log_lab_to_sheet(job_id, result_wrap, tags="pl_lab,bo2.5,narrated_autopilot")
+    _log_lab_to_sheet(job_id, result_obj, tags="pl_lab,bo2.5,narrated_autopilot")
 
     # Persist a compact action/result memory to research_state to avoid repetition
     try:
@@ -1550,7 +1499,7 @@ def _autopilot_tick():
         decision = _agent_choose_next_action(
             ctx=ctx_local,
             last_task_type=str(job.get("task_type") or ""),
-            last_result=payload if isinstance(payload, dict) else {}
+            last_result=(result_obj.get("result") or {}) if isinstance(result_obj, dict) else {}
         )
         st.session_state["agent_session_last_decision"] = json.dumps(decision, ensure_ascii=False)[:2000]
         _append_chat("assistant", "🧠 Agent decision: " + (decision.get("narration") or ""))
@@ -1675,13 +1624,11 @@ def _maybe_handle_job_queries(user_text: str) -> bool:
             return True
 
         res = _run_tool("download_result", {"bucket": bucket, "result_path": rp})
-        wrap = res if isinstance(res, dict) else {}
-        payload = (wrap.get("result") or {}) if isinstance(wrap, dict) else {}
-
-        if payload:
-            _append("assistant", _render_distilled_top(wrap, top_n=3), persist=False)
-            _append("assistant", f"```json\n{json.dumps(payload, indent=2)[:12000]}\n```", persist=False)
-            _log_lab_to_sheet(job_id, wrap, tags="pl_lab,manual")
+        result_obj = (res or {}).get("result") if isinstance(res, dict) else None
+        if result_obj:
+            _append("assistant", _render_distilled_top(result_obj, top_n=3), persist=False)
+            _append("assistant", f"```json\n{json.dumps(result_obj, indent=2)[:12000]}\n```", persist=False)
+            _log_lab_to_sheet(job_id, result_obj, tags="pl_lab,manual")
         else:
             _append("assistant", f"⚠️ Could not download/parse results.\n```json\n{json.dumps(res, indent=2)[:12000]}\n```", persist=False)
 
