@@ -1215,8 +1215,8 @@ def _maybe_start_narrated_pl_research(user_text: str) -> bool:
 
     # Optional pre-filter: if the dataset has a MARKET column, restrict to the market implied by the PL column.
     row_filters = None
-    if pl_column and str(pl_column).strip().lower() != "pl":
-        market_name = str(pl_column).replace(" PL", "").strip()
+    if pl_col and str(pl_col).strip().lower() != "pl":
+        market_name = str(pl_col).replace(" PL", "").strip()
         if market_name:
             row_filters = {"MARKET": market_name}
     st.session_state["agent_session_row_filters"] = row_filters or {}
@@ -1246,7 +1246,7 @@ def _maybe_start_narrated_pl_research(user_text: str) -> bool:
     st.session_state["agent_session_steps_done"] = 0
     # Autopilot plan: if the user asked for diagnostics, we *must* chain jobs automatically.
     # This is deterministic (no LLM needed) so it can't silently "decide" to stop.
-    _user_prompt_l = (user_prompt or "").lower()
+    _user_prompt_l = (user_text or "").lower()
     auto_diag = ("diagnostic" in _user_prompt_l) or ("diagnostics" in _user_prompt_l) or ("if no rules" in _user_prompt_l) or ("no rules pass" in _user_prompt_l)
     st.session_state["agent_session_auto_diagnostics"] = bool(auto_diag)
 
@@ -1513,6 +1513,7 @@ def _autopilot_tick():
     # Interpretation (still short, but diagnostic even on failure)
     distilled = (payload.get("distilled") or {})
     rules = distilled.get("top_distilled_rules") or []
+    passing_rules = bool(rules)
     near_misses = distilled.get("near_misses") or []
     nm = _summarize_near_misses(near_misses)
 
@@ -1637,13 +1638,16 @@ def _autopilot_tick():
 
             # Base params (carry forward PL column, enforcement, ignore cols, and learned filters)
             base_params = {
-                "pl_column": st.session_state.get("agent_session_last_pl_column"),
-                "storage_path": st.session_state.get("storage_path", "football_ai_NNIA.csv"),
-                "ignored_columns": ((st.session_state.get("ctx") or {}).get("derived") or {}).get("ignored_columns") or ["Result", "HOME FORM"],
-                "outcome_columns": ((st.session_state.get("ctx") or {}).get("derived") or {}).get("outcome_columns") or [],
-                "enforcement": st.session_state.get("agent_session_enforcement") or {},
-                "duration_minutes": int(st.session_state.get("agent_session_minutes_per_job") or 5),
-            }
+            "pl_column": st.session_state.get("agent_session_pl_column") or st.session_state.get("active_job_pl_col"),
+            "storage_path": st.session_state.get("storage_path", "football_ai_NNIA.csv"),
+            "storage_bucket": st.session_state.get("storage_bucket", DEFAULT_DATA_BUCKET),
+            "_results_bucket": DEFAULT_RESULTS_BUCKET,
+            "ignored_columns": ((ctx_local.get("derived") or {}).get("ignored_columns") or ["Result", "HOME FORM"]),
+            "outcome_columns": ((ctx_local.get("derived") or {}).get("outcome_columns") or []),
+            "ignored_feature_columns": ((ctx_local.get("derived") or {}).get("ignored_feature_columns") or []),
+            "enforcement": st.session_state.get("agent_session_enforcement") or {},
+            "duration_minutes": int(st.session_state.get("agent_session_minutes_per_job") or 5),
+        }
 
             rf = st.session_state.get("agent_session_row_filters")
             if rf:
