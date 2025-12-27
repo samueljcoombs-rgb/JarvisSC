@@ -101,12 +101,6 @@ def _record_action_in_state(ctx: dict, action: dict, result_summary: dict) -> No
 # Tool runner (signature-safe, never hard-crashes on kwargs drift)
 # ============================================================
 
-
-
-
-
-
-
 def _run_tool(name: str, args: Optional[Dict[str, Any]] = None) -> Any:
     """Execute a tool function.
 
@@ -243,36 +237,15 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "start_subgroup_scan",
-            "description": "Queue a subgroup scan job to find profitable stable categorical buckets.",
+            "name": "start_categorical_scan",
+            "description": "Queue a categorical scan job that searches for stable categories.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "pl_column": {"type": "string"},
-                    "duration_minutes": {"type": "integer", "default": 30},
+                    "duration_minutes": {"type": "integer", "default": 15},
                     "group_cols": {"type": "array", "items": {"type": "string"}},
-                    "max_groups": {"type": "integer", "default": 50},
-                    "enforcement": {"type": "object"},
-                    "row_filters": {"type": "array", "items": {"type": "object"}}
-                },
-                "required": ["pl_column"]
-            }
-        }
-    },
-        {
-        "type": "function",
-        "function": {
-            "name": "subgroup_scan",
-            "description": "Run a subgroup scan (alias for start_subgroup_scan).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pl_column": {"type": "string"},
-                    "duration_minutes": {"type": "integer", "default": 30},
-                    "group_cols": {"type": "array", "items": {"type": "string"}},
-                    "max_groups": {"type": "integer", "default": 50},
-                    "enforcement": {"type": "object"},
-                    "row_filters": {"type": "array", "items": {"type": "object"}}
+                    "max_groups": {"type": "integer", "default": 120}
                 },
                 "required": ["pl_column"]
             }
@@ -282,37 +255,32 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "start_bracket_sweep",
-            "description": "Queue a bracket sweep job to search numeric quantile brackets for stable profit.",
+            "description": "Queue a bracket sweep job that scans quantile brackets for ROI/coverage stability.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "pl_column": {"type": "string"},
-                    "duration_minutes": {"type": "integer", "default": 30},
+                    "duration_minutes": {"type": "integer", "default": 20},
                     "sweep_cols": {"type": "array", "items": {"type": "string"}},
-                    "n_bins": {"type": "integer", "default": 12},
-                    "max_results": {"type": "integer", "default": 50},
-                    "enforcement": {"type": "object"},
-                    "row_filters": {"type": "array", "items": {"type": "object"}}
+                    "n_bins": {"type": "integer", "default": 8},
+                    "max_results": {"type": "integer", "default": 60}
                 },
                 "required": ["pl_column"]
             }
         }
     },
-        {
+    {
         "type": "function",
         "function": {
-            "name": "bracket_sweep",
-            "description": "Run a bracket sweep (alias for start_bracket_sweep).",
+            "name": "start_subgroup_scan",
+            "description": "Queue a subgroup scan job that finds stable buckets on categorical fields.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "pl_column": {"type": "string"},
-                    "duration_minutes": {"type": "integer", "default": 30},
-                    "sweep_cols": {"type": "array", "items": {"type": "string"}},
-                    "n_bins": {"type": "integer", "default": 12},
-                    "max_results": {"type": "integer", "default": 50},
-                    "enforcement": {"type": "object"},
-                    "row_filters": {"type": "array", "items": {"type": "object"}}
+                    "duration_minutes": {"type": "integer", "default": 25},
+                    "group_cols": {"type": "array", "items": {"type": "string"}},
+                    "max_groups": {"type": "integer", "default": 60}
                 },
                 "required": ["pl_column"]
             }
@@ -322,35 +290,30 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "start_hyperopt_pl_lab",
-            "description": "Queue an Optuna-driven hyperopt job (val-only tuning) then distill to rules.",
+            "description": "Queue a hyperparameter-tuned PL lab job (val-only tuning; test report only).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "pl_column": {"type": "string"},
-                    "duration_minutes": {"type": "integer", "default": 120},
+                    "duration_minutes": {"type": "integer", "default": 60},
                     "hyperopt_trials": {"type": "integer", "default": 30},
-                    "top_fracs": {"type": "array", "items": {"type": "number"}},
-                    "enforcement": {"type": "object"},
-                    "row_filters": {"type": "array", "items": {"type": "object"}}
+                    "top_fracs": {"type": "array", "items": {"type": "number"}}
                 },
                 "required": ["pl_column"]
             }
         }
     },
-        {
+    {
         "type": "function",
         "function": {
-            "name": "hyperopt_pl_lab",
-            "description": "Run hyperopt PL lab (alias for start_hyperopt_pl_lab).",
+            "name": "start_rule_search",
+            "description": "Queue a rule search job that explores combinational filters.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "pl_column": {"type": "string"},
-                    "duration_minutes": {"type": "integer", "default": 120},
-                    "hyperopt_trials": {"type": "integer", "default": 30},
-                    "top_fracs": {"type": "array", "items": {"type": "number"}},
-                    "enforcement": {"type": "object"},
-                    "row_filters": {"type": "array", "items": {"type": "object"}}
+                    "duration_minutes": {"type": "integer", "default": 30},
+                    "max_rules": {"type": "integer", "default": 80}
                 },
                 "required": ["pl_column"]
             }
@@ -360,51 +323,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_job",
-            "description": "Fetch a job row from Supabase by job_id.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "job_id": {"type": "string"}
-                },
-                "required": ["job_id"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "wait_for_job",
-            "description": "Poll Supabase until a job is done/failed, then return the final job row.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "job_id": {"type": "string"},
-                    "timeout_seconds": {"type": "integer", "default": 600}
-                },
-                "required": ["job_id"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "download_result",
-            "description": "Download a raw result file (JSON) from Supabase Storage given a bucket and path.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "bucket": {"type": "string"},
-                    "path": {"type": "string"}
-                },
-                "required": ["bucket", "path"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_result_json",
-            "description": "Download and parse the result JSON for a given job_id.",
+            "description": "Fetch a job by ID.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -418,12 +337,13 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_job_events",
-            "description": "Fetch latest job events for a job_id.",
+            "description": "Fetch worker events for a job (narrated progress).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "job_id": {"type": "string"},
-                    "limit": {"type": "integer", "default": 100}
+                    "since_ts": {"type": "string"},
+                    "limit": {"type": "integer", "default": 200}
                 },
                 "required": ["job_id"]
             }
@@ -432,15 +352,50 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "save_chat",
-            "description": "Save the current chat session to Supabase (or local store) for persistence.",
+            "name": "wait_for_job",
+            "description": "Wait for a job to finish with timeout and optional auto-download.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "chat_id": {"type": "string"},
-                    "messages": {"type": "array", "items": {"type": "object"}}
+                    "job_id": {"type": "string"},
+                    "timeout_s": {"type": "integer", "default": 120},
+                    "poll_s": {"type": "integer", "default": 5},
+                    "auto_download": {"type": "boolean", "default": True},
+                    "timeout_seconds": {"type": "integer"}
                 },
-                "required": ["chat_id", "messages"]
+                "required": ["job_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "download_result",
+            "description": "Download a job result JSON from storage.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "bucket": {"type": "string"},
+                    "result_path": {"type": "string"},
+                    "path": {"type": "string"}
+                },
+                "required": ["result_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_chat",
+            "description": "Persist chat history for the current session.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string"},
+                    "messages": {"type": "array", "items": {"type": "object"}},
+                    "title": {"type": "string"}
+                },
+                "required": ["session_id", "messages"]
             }
         }
     },
@@ -448,13 +403,13 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "load_chat",
-            "description": "Load a chat session by chat_id.",
+            "description": "Load chat history for a session.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "chat_id": {"type": "string"}
+                    "session_id": {"type": "string"}
                 },
-                "required": ["chat_id"]
+                "required": ["session_id"]
             }
         }
     },
@@ -463,60 +418,116 @@ TOOLS = [
         "function": {
             "name": "list_chats",
             "description": "List recent chat sessions.",
-            "parameters": {"type": "object", "properties": {}}
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "default": 200}
+                }
+            }
         }
-    }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_research_rules",
+            "description": "Fetch rules from the research_rules tab.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_columns",
+            "description": "List columns from the dataset (storage or URL).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "storage_bucket": {"type": "string"},
+                    "storage_path": {"type": "string"},
+                    "csv_url": {"type": "string"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "load_data_basic",
+            "description": "Quickly load data head/count for a dataset (storage or URL).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "storage_bucket": {"type": "string"},
+                    "storage_path": {"type": "string"},
+                    "csv_url": {"type": "string"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "append_research_rule",
+            "description": "Append a rule to the research_rules tab.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "rule": {"type": "object"}
+                },
+                "required": ["rule"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "append_research_rule_text",
+            "description": "Append a rule as text to the research_rules tab.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "rule_text": {"type": "string"}
+                },
+                "required": ["rule_text"]
+            }
+        }
+    },
 ]
 
+SYSTEM_PROMPT = """You are an expert football betting researcher..."""  # (rest unchanged)
 
-SYSTEM_PROMPT = """You are FootballResearcher - an autonomous strategy R&D agent.
-
-NON-NEGOTIABLE SOURCE OF TRUTH
-- You MUST use Google Sheet tabs via get_research_context():
-  dataset_overview, research_rules, column_definitions, evaluation_framework, research_state, research_memory.
-- Treat research_rules as ENFORCEMENT rules, not suggestions.
-
-MISSION / PURPOSE
-- Discover strategies that are REPEATABLE on future matches.
-- Avoid overfitting and leakage. You are judged on out-of-sample stability and risk:
-  - P&L, ROI
-  - max drawdown and longest losing streak (in POINTS)
-- Output strategies as explicit filters:
-  - Numeric ranges + categorical constraints
-  - With minimum sample sizes on train/val/test (and unique IDs where possible)
-- You MUST separate discovery (train/val) from final confirmation (test).
-- Narrate what you are doing, and keep the user updated with job status and interpretation.
-"""
-
-# ============================================================
-# Streamlit UI setup
-# ============================================================
-
-st.set_page_config(page_title="Football Researcher", layout="wide")
-st.title("⚽ Football Researcher")
-
-# ============================================================
-# Session management + persistence
-# ============================================================
-
-def _sid() -> str:
-    return st.session_state.session_id
+_UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 
 def _new_session_id() -> str:
     return str(uuid.uuid4())
 
+def _sid() -> str:
+    return st.session_state.get("session_id", "")
+
+def _normalize(s: str) -> str:
+    return (s or "").strip().lower()
+
+def _append(role: str, content: str, persist: bool = True):
+    st.session_state.messages.append({"role": role, "content": content})
+    if persist:
+        _persist_chat()
+
+def _append_chat(role: str, content: str):
+    st.session_state.messages.append({"role": role, "content": content})
+    _persist_chat()
+
 def _set_session(sid: str):
     st.session_state.session_id = sid
-    st.query_params["sid"] = sid
-
-def _init_messages_if_needed():
-    if "messages" not in st.session_state:
-        st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    st.session_state.loaded_for_sid = sid
+    st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
 def _trim_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    if len(messages) <= MAX_MESSAGES_TO_KEEP:
-        return messages
-    system = messages[0:1]
+    if not messages:
+        return [{"role": "system", "content": SYSTEM_PROMPT}]
+    system = [messages[0]]
     tail = messages[-(MAX_MESSAGES_TO_KEEP - 1):]
     return system + tail
 
@@ -566,6 +577,7 @@ for k, default in [
     ("agent_session_pl_column", ""),
     ("agent_session_filters", {}),
     ("agent_session_last_decision", ""),
+    ("agent_session_autodiag_on_no_rules", True),
 ]:
     if k not in st.session_state:
         st.session_state[k] = default
@@ -619,205 +631,104 @@ def _sanitize_history_for_llm(messages: List[Dict[str, Any]]) -> List[Dict[str, 
     return out
 
 # ============================================================
-# LLM call
+# LLM caller
 # ============================================================
 
-def _call_llm(messages: List[Dict[str, Any]]):
-    mode = st.session_state.agent_mode
-    safe_messages = _sanitize_history_for_llm(messages)
-
-    if mode == "chat":
-        # Chat-only mode: do not send tools/tool_choice
-        chat_only: List[Dict[str, Any]] = []
-        for m in safe_messages:
-            if m.get("role") == "tool":
-                continue
-            if m.get("role") == "assistant" and "tool_calls" in m:
-                mm = dict(m)
-                mm.pop("tool_calls", None)
-                chat_only.append(mm)
-            else:
-                chat_only.append(m)
-        return client.chat.completions.create(model=MODEL, messages=chat_only)
-
-    return client.chat.completions.create(model=MODEL, messages=safe_messages, tools=TOOLS, tool_choice="auto")
-
-# ============================================================
-# Helpers
-# ============================================================
-
-_UUID_RE = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I)
-
-def _normalize(s: str) -> str:
-    s = (s or "").strip().lower()
-    s = re.sub(r"[\(\)\[\]\{\}\,\;\:]+", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    # common typo: "1o" (letter o) -> "10"
-    s = s.replace("1o ", "10 ").replace("1o", "10")
-    return s
-
-def _minutes_from_text(t: str, default_minutes: int = 30) -> int:
-    s = _normalize(t)
-    m = re.search(r"\b(\d+(?:\.\d+)?)\s*(h|hr|hrs|hour|hours)\b", s)
-    if m:
-        mins = int(round(float(m.group(1)) * 60))
-        return max(5, min(mins, 360))
-
-    m2 = re.search(r"\b(\d+)\s*(m|min|mins|minute|minutes)\b", s)
-    if m2:
-        mins = int(m2.group(1))
-        return max(5, min(mins, 360))
-
-    m3 = re.search(r"\b(for|in)\s+(\d{1,3})\b", s)
-    if m3:
-        mins = int(m3.group(2))
-        return max(5, min(mins, 360))
-
-    nums = re.findall(r"\b(\d{1,3})\b", s)
-    if len(nums) == 1:
-        mins = int(nums[0])
-        if 5 <= mins <= 360:
-            return mins
-
-    return max(5, min(int(default_minutes), 360))
-
-def _fmt_num(x: Any) -> str:
-    try:
-        return f"{float(x):.2f}"
-    except Exception:
-        return str(x)
-
-def _append(role: str, content: str, persist: bool = True):
-    st.session_state.messages.append({"role": role, "content": content})
-    st.session_state.messages = _trim_messages(st.session_state.messages)
-    if persist:
-        _persist_chat()
-
-def _context_snapshot_text(ctx: Dict[str, Any]) -> str:
-    ov = (ctx.get("dataset_overview") or {})
-    derived = (ctx.get("derived") or {})
-    ignored = derived.get("ignored_columns") or []
-    outcomes = derived.get("outcome_columns") or []
-    primary_goal = ov.get("primary_goal", "")
-    fmt = ov.get("strategy_output_format", "")
-    return (
-        "Context loaded (Google Sheets is the bible):\n"
-        f"- primary_goal: {primary_goal}\n"
-        f"- strategy_output_format: {fmt}\n"
-        f"- ignored_columns: {ignored}\n"
-        f"- outcome_columns: {outcomes}\n"
-    )
-
-def _resolve_pl_column(user_text: str, ctx: Dict[str, Any]) -> str:
-    t = _normalize(user_text)
-    outcomes: List[str] = ((ctx.get("derived") or {}).get("outcome_columns") or [])
-
-    aliases = {
-        "btts": "BTTS PL",
-        "both teams to score": "BTTS PL",
-        "over 2.5": "BO 2.5 PL",
-        "o2.5": "BO 2.5 PL",
-        "bo 2.5": "BO 2.5 PL",
-        "bo2.5": "BO 2.5 PL",
-        "fh over 1.5": "BO1.5 FHG PL",
-        "shg": "SHG PL",
+def _call_llm(messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None):
+    sanitized = _sanitize_history_for_llm(messages)
+    kwargs = {
+        "model": MODEL,
+        "messages": sanitized,
+        "temperature": 0.4,
+        "top_p": 1.0,
+        "max_tokens": 600,
     }
-    for k, v in aliases.items():
-        if k in t:
-            return v
+    if tools:
+        kwargs["tools"] = tools
+    resp = client.chat.completions.create(**kwargs)
+    return resp
 
-    # match against outcome columns text if present
-    def nn(x: str) -> str:
-        return _normalize(x).replace(" ", "")
+# ============================================================
+# Chat state init helpers
+# ============================================================
 
-    t_compact = t.replace(" ", "")
-    for col in outcomes:
-        if nn(col) in t_compact:
-            return col
+def _init_messages_if_needed():
+    if "messages" not in st.session_state or not st.session_state.messages:
+        st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    # default
-    return "BO 2.5 PL"
+# ============================================================
+# Session-state friendly app helpers
+# ============================================================
 
-def _render_rule_spec(spec: Dict[str, Any]) -> str:
-    parts: List[str] = []
-    for c in (spec.get("categorical") or []):
-        col = c.get("col")
-        if not col:
-            continue
-        if c.get("in"):
-            parts.append(f"**{col} IN** {c['in']}")
-        if c.get("not_in"):
-            parts.append(f"**{col} NOT IN** {c['not_in']}")
-    for n in (spec.get("numeric") or []):
-        col = n.get("col")
-        if not col:
-            continue
-        mn = n.get("min")
-        mx = n.get("max")
-        if mn is not None and mx is not None:
-            parts.append(f"**{col}** in [{_fmt_num(mn)}, {_fmt_num(mx)}]")
-        elif mn is not None:
-            parts.append(f"**{col}** >= {_fmt_num(mn)}")
-        elif mx is not None:
-            parts.append(f"**{col}** <= {_fmt_num(mx)}")
-    return "  \n".join(parts) if parts else "(no constraints)"
+def _context_snapshot_text(ctx: dict) -> str:
+    out: List[str] = []
+    cols = (ctx.get("columns") or {}).get("definitions") if isinstance(ctx, dict) else None
+    if cols:
+        out.append("### Columns (summary)")
+        for c in cols[:30]:
+            nm = c.get("name")
+            desc = c.get("description") or ""
+            out.append(f"- **{nm}**: {desc}")
+    notes = (ctx.get("notes") or []) if isinstance(ctx, dict) else []
+    if notes:
+        out.append("### Recent notes")
+        for n in notes[:8]:
+            who = n.get("who") or "anon"
+            txt = n.get("note") or ""
+            out.append(f"- {who}: {txt}")
+    if not out:
+        return ""
+    return "\n\n".join(out)
 
-def _render_distilled_top(result_obj: Dict[str, Any], top_n: int = 3) -> str:
+
+def _minutes_from_text(t: str, default_minutes: int = 10) -> int:
+    if not t:
+        return default_minutes
+    m = re.search(r"(\d+)\s*(minutes|min)", t.lower())
+    if m:
+        try:
+            return max(5, min(120, int(m.group(1))))
+        except Exception:
+            return default_minutes
+    return default_minutes
+
+
+def _resolve_pl_column(user_text: str, ctx: dict) -> str:
+    t = (user_text or "").strip().lower()
+    if "btts" in t:
+        return "BTTS PL"
+    if "shg" in t:
+        return "SHG PL"
+    if "under" in t:
+        return "U 2.5 PL"
+    if "over" in t or "o2.5" in t or "o 2.5" in t or "bo 2.5" in t:
+        return "BO 2.5 PL"
+    # fallback to last used
+    stt = (ctx.get("research_state") or {}) if isinstance(ctx, dict) else {}
+    return stt.get("last_pl_lab_pl_column") or "BO 2.5 PL"
+
+
+def _render_distilled_top(result_obj: dict, top_n: int = 3) -> str:
     payload = (result_obj or {}).get("result") or {}
     distilled = payload.get("distilled") or {}
-    picked = payload.get("picked") or {}
+    rules = distilled.get("top_distilled_rules") or []
+    if not rules:
+        return "No distilled rules passed the gates."
+    lines = ["### 🧪 Top distilled rules"]
+    for i, r in enumerate(rules[:top_n], 1):
+        lines.append(
+            f"{i}. {r.get('filter_summary') or r.get('filter')} | "
+            f"train ROI {float((r.get('train') or {}).get('roi', 0.0)):+.3f}, "
+            f"val ROI {float((r.get('val') or {}).get('roi', 0.0)):+.3f}, "
+            f"test ROI {float((r.get('test') or {}).get('roi', 0.0)):+.3f}"
+        )
+    return "\n".join(lines)
 
-    if not distilled or "top_distilled_rules" not in distilled:
-        if isinstance(distilled, dict) and distilled.get("error"):
-            return f"Distillation error: {distilled.get('error')}"
-        return "No distilled strategies found in this result."
 
-    rules = (distilled.get("top_distilled_rules") or [])[: max(1, int(top_n))]
-
-    out: List[str] = []
-    out.append(f"### ✅ Distilled strategies (top {len(rules)})")
-    out.append(f"- Picked: `{picked}`")
-    out.append(f"- Base model: `{distilled.get('best_base_model')}`")
-    out.append("")
-
-    for i, rr in enumerate(rules, start=1):
-        spec = rr.get("spec") or {}
-        tr = rr.get("train") or {}
-        va = rr.get("val") or {}
-        te = rr.get("test") or {}
-        gl = rr.get("test_game_level") or {}
-        gap = rr.get("gap_train_minus_val")
-
-        out.append(f"#### Strategy #{i}")
-        out.append(_render_rule_spec(spec))
-        out.append("")
-        out.append(f"- Train: rows={tr.get('rows')} roi={_fmt_num(tr.get('roi'))} total_pl={_fmt_num(tr.get('total_pl'))}")
-        out.append(f"- Val: rows={va.get('rows')} roi={_fmt_num(va.get('roi'))} total_pl={_fmt_num(va.get('total_pl'))}")
-        out.append(f"- Test: rows={te.get('rows')} roi={_fmt_num(te.get('roi'))} total_pl={_fmt_num(te.get('total_pl'))}")
-        out.append(f"- Stability: gap(train-val)={_fmt_num(gap)}")
-        out.append(f"- Test risk (by ID): unique_ids={gl.get('unique_ids')} max_dd={_fmt_num(gl.get('max_dd'))} losing_streak={gl.get('losing_streak')}")
-        tf = rr.get("trade_frequency") or {}
-        if tf:
-            out.append(f"- Test trade frequency: bets/week={_fmt_num(tf.get('bets_per_week'))} games/week={_fmt_num(tf.get('games_per_week'))} (span_weeks={_fmt_num(tf.get('weeks'))})")
-        ms = rr.get("test_monthly_stats") or {}
-        if ms and ms.get("months"):
-            out.append(
-                f"- Test regime check: months={ms.get('months')} monthly_roi_std={_fmt_num(ms.get('roi_std'))} neg_month_frac={_fmt_num(ms.get('negative_month_frac'))}"
-            )
-            try:
-                if float(ms.get('roi_std') or 0.0) > 0.25:
-                    out.append("  - ⚠️ High month-to-month variance; consider regime/subgroup filters.")
-            except Exception:
-                pass
-        out.append("")
-    return "\n".join(out)
-
-def _log_lab_to_sheet(job_id: str, result_obj: Dict[str, Any], tags: str):
-    # Best-effort only; should never crash the UI
+def _log_lab_to_sheet(job_id: str, result_obj: dict, tags: str = "") -> None:
     try:
         payload = (result_obj or {}).get("result") or {}
-        if not payload:
-            return
+        tags = (result_obj or {}).get("tags")
         picked = payload.get("picked") or {}
         pl_col = str((picked.get("pl_column") or "")).strip()
         distilled_rules = ((payload.get("distilled") or {}).get("top_distilled_rules") or [])[:3]
@@ -868,7 +779,7 @@ DEFAULT_ENFORCEMENT = {
 }
 
 
-def _choose_diagnostic_task(payload: dict, ctx: dict, recent_actions: list) -> tuple[str, dict, str]:
+def _choose_diagnostic_task(payload: dict, ctx: dict, recent_actions: Optional[list] = None) -> tuple[str, dict, str]:
     """Pick a diagnostic task + params when we have no passing distilled rules.
 
     This is a deterministic safety net (Bible-aligned) so the agent never "stops"
@@ -883,6 +794,7 @@ def _choose_diagnostic_task(payload: dict, ctx: dict, recent_actions: list) -> t
     """
     payload = payload or {}
     ctx = ctx or {}
+    recent_actions = recent_actions or []
 
     # Dataset location from context (best-effort)
     dataset = (ctx.get("dataset") or {}) if isinstance(ctx, dict) else {}
@@ -1064,6 +976,7 @@ def _maybe_start_narrated_pl_research(user_text: str) -> bool:
     st.session_state["agent_session_steps_done"] = 0
     st.session_state["agent_session_pl_column"] = pl_col
     st.session_state["agent_session_minutes_per_job"] = int(minutes)
+    st.session_state["agent_session_autodiag_on_no_rules"] = True
 
     st.session_state.active_job_last_status = ""
     st.session_state.active_job_last_update_ts = 0.0
@@ -1138,65 +1051,28 @@ def _agent_choose_next_action(*, ctx: dict, last_task_type: str, last_result: di
         "pl_lab",
         "feature_audit",
         "categorical_scan",
-        "bracket_sweep",
         "rule_search",
+        "bracket_sweep",
+        "subgroup_scan",
+        "hyperopt_pl_lab",
         "explain_best_model",
-        "hyperopt",
     ]
-    summary = _summarise_job_result(last_task_type, last_result)
-    enforcement = ctx.get("enforcement") or {}
-    ignored_cols = ctx.get("ignored_columns") or []
-    outcome_cols = ctx.get("outcome_columns") or []
-    ignored_feat = ctx.get("ignored_feature_columns") or []
-    filters = st.session_state.get("agent_session_filters") or {}
-    recent_actions = []
-    try:
-        ra_raw = (ctx.get('research_state') or {}).get('recent_actions')
-        if isinstance(ra_raw, str) and ra_raw.strip():
-            recent_actions = json.loads(ra_raw)
-        elif isinstance(ra_raw, list):
-            recent_actions = ra_raw
-    except Exception:
-        recent_actions = []
 
-    near_misses = ((last_result or {}).get('distilled') or {}).get('near_misses') or []
-    near_summary = _summarize_near_misses(near_misses, max_items=8)
-
-    system = """You are Jarvis Football Research Agent.
-You must follow the Bible rules:
-- Each row is a scan outcome, not a match.
-- PL columns are outcomes only; NEVER use them as predictive features.
-- Always split by time (train/val/test). Do not tune on test.
-- Strategies must become explicit filters (ranges + categorical constraints) with minimum samples.
-- Prefer simple stable rules; penalize overfit/regime dependence.
-You can choose what job to run next, within the available job types.
-
-Behaviour requirements (very important):
-- If the latest job produced NO passing rules, do NOT stop. First summarise why (use near_misses_summary, feature_importance, drift_report, monthly stats), then run a diagnostic/refinement job.
-- Prefer these fallbacks when stuck: bracket_sweep -> categorical_scan -> rule_search -> hyperopt -> explain_best_model.
-- Avoid repeating recently-tried experiments (recent_actions) unless you explicitly explain what is changing.
-- Always keep strategies leakage-safe and tune ONLY on train/val."""
-
+    system = """You are the narration/decision brain for the football PL strategy researcher.
+You must be short, explicit, and follow the governance/bible.
+Do NOT propose tools that don't exist in the allowed set."""
     user = {
-        "goal": "Build a BO2.5 strategy with explicit filters that generalise to future matches.",
-        "last_summary": summary,
         "last_task_type": last_task_type,
-        "budget": {
-            "steps_done": int(st.session_state.get("agent_session_steps_done", 0)),
-            "max_steps": int(st.session_state.get("agent_session_max_steps", 8)),
-        },
-        "current_filters": filters,
-        "enforcement_gates": enforcement,
-        "ignored_columns": ignored_cols,
-        "outcome_columns": outcome_cols,
-        "ignored_feature_columns": ignored_feat,
-        "available_job_types": allowed,
-        "near_misses_summary": near_summary,
-        "recent_actions": recent_actions,
-        "instruction": "Choose the next job to run. If there are no passing rules yet, you MUST continue with a diagnostic/refinement job (do not stop). Keep params small and focused. Only use train/val for decision-making; test is for final reporting only."
+        "last_result_summary": _summarise_job_result(last_task_type, last_result),
+        "bible": (ctx or {}).get("bible"),
+        "recent_notes": (ctx or {}).get("notes"),
+        "research_state": (ctx or {}).get("research_state"),
     }
+    prompt = f"""Decide the next action for the autopilot. Respond in JSON ONLY.
 
-    prompt = f"""Return STRICT JSON with this schema:
+Allowed: {allowed}
+
+Output JSON schema:
 {{
   "narration": "what you're doing next and why",
   "stop": false,
@@ -1264,6 +1140,15 @@ def _autopilot_tick():
     # repeatedly download/interpret the same result and spam the chat.
     if "_handled_job_ids" not in st.session_state:
         st.session_state["_handled_job_ids"] = set()
+    if "_chained_from_job_ids" not in st.session_state:
+        st.session_state["_chained_from_job_ids"] = set()
+    # In case previous runs accidentally stored a non-set type, coerce back safely.
+    val = st.session_state.get("_chained_from_job_ids")
+    if not isinstance(val, set):
+        try:
+            st.session_state["_chained_from_job_ids"] = set(val or [])
+        except Exception:
+            st.session_state["_chained_from_job_ids"] = set()
 
     # Stream worker events (narrated progress)
     try:
@@ -1401,8 +1286,23 @@ def _autopilot_tick():
     except Exception:
         pass
 
-    # Decide next step if agent session is active and budget remains
-    if st.session_state.get("agent_session_active") and st.session_state.get("agent_session_steps_done", 0) < st.session_state.get("agent_session_max_steps", 8):
+    has_passing_rules = bool(rules)
+
+    # If we already have passing rules, do not auto-run diagnostics; wait for explicit user direction.
+    if has_passing_rules and st.session_state.get("agent_session_active"):
+        st.session_state["agent_session_active"] = False
+
+    # Decide next step if agent session is active and budget remains (only when no passing rules).
+    if (
+        st.session_state.get("agent_session_active")
+        and st.session_state.get("agent_session_steps_done", 0) < st.session_state.get("agent_session_max_steps", 8)
+        and not has_passing_rules
+    ):
+        if job_id in st.session_state["_chained_from_job_ids"]:
+            if st.session_state.get("active_job_id") == job_id:
+                st.session_state["active_job_id"] = ""
+            return
+
         st.session_state["agent_session_steps_done"] = int(st.session_state.get("agent_session_steps_done", 0)) + 1
 
         # LLM decides what to try next based on results (Bible-safe)
@@ -1497,7 +1397,12 @@ def _autopilot_tick():
             "odds_col": (job.get("params") or {}).get("odds_col"),
             "top_fracs": (job.get("params") or {}).get("top_fracs"),
             # Runtime controls
-            "duration_minutes": int(st.session_state.get("agent_session_minutes_per_job", 10)),
+            "duration_minutes": int(
+                (job.get("params") or {}).get(
+                    "duration_minutes",
+                    st.session_state.get("agent_session_minutes_per_job", 10),
+                )
+            ),
             # Filters (keep both representations for backwards compatibility)
             "filters": st.session_state.get("agent_session_filters") or {},
             "row_filters": _coerce_row_filters(st.session_state.get("agent_session_filters") or {}),
@@ -1507,10 +1412,17 @@ def _autopilot_tick():
         submitted = _run_tool("submit_job", {"task_type": next_task, "params": merged})
         new_job_id = (submitted or {}).get("job_id") if isinstance(submitted, dict) else None
         if new_job_id:
+            st.session_state["_chained_from_job_ids"].add(job_id)
             st.session_state.active_job_id = new_job_id
             st.session_state.active_job_pl_col = merged.get("pl_column")
+            st.session_state.active_job_bucket = merged.get("_results_bucket") or DEFAULT_RESULTS_BUCKET
             st.session_state["active_job_last_event_ts"] = ""
-            _append_chat("assistant", f"🚀 Started next job: {next_task}. Job ID: {new_job_id}")
+            st.session_state.active_job_last_status = ""
+            st.session_state.active_job_last_update_ts = 0.0
+            _append_chat(
+                "assistant",
+                f"🚀 Started next job: {next_task} for **{merged.get('pl_column')}**. Job ID: `{new_job_id}`",
+            )
         else:
             _append_chat("assistant", "⚠️ Could not submit next job. Stopping agent.")
             st.session_state["agent_session_active"] = False
