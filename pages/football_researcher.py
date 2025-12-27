@@ -1025,76 +1025,101 @@ def _render_next_job_commentary(next_task: str, why: str, merged_params: dict) -
     return "\n".join(lines)
 
 
-def _choose_diagnostic_task(payload: dict, ctx: dict, recent_actions: list) -> tuple[str, dict]:
+def _choose_diagnostic_task(payload: dict, ctx: dict, recent_actions: list) -> tuple[str, dict, str]:
     """Fallback when the agent tries to stop without producing passing rules.
 
+    Returns: (task_type, params, why)
+
     Preference order:
-      1) bracket_sweep on top numeric features
-      2) subgroup_scan on top categorical features
-      3) hyperopt_pl_lab (short)
+      1) bracket_sweep on top numeric features (fast global signal hunt)
+      2) subgroup_scan on categorical segments (find stable pockets)
+      3) hyperopt_pl_lab (more expensive threshold/model tuning on VAL only)
     """
     dataset = (ctx.get("dataset") or {})
     storage_bucket = dataset.get("storage_bucket")
     storage_path = dataset.get("storage_path")
 
     picked = payload.get("picked") or {}
-    pl_col = picked.get("pl_column")
-    side = picked.get("side") or "back"
-    odds_col = picked.get("odds_col")
-    row_filters = picked.get("row_filters") or {}
+    pl_col = picked.get("pl_column") or payload.get("pl_column") or "PL"
+    side = picked.get("side") or payload.get("side") or "back"
+    odds_col = picked.get("odds_col") or payload.get("odds_col") or "ACTUAL ODDS"
 
-    ftypes = payload.get("feature_types") or {}
-    numeric = set(ftypes.get("numeric") or [])
-    categorical = set(ftypes.get("categorical") or [])
+    # Identify top features from payload importance, if present
+    top_num: list[str] = []
+    top_cat: list[str] = []
+    try:
+        imp = payload.get("feature_importance") or payload.get("feature_importances") or {}
+        if isinstance(imp, dict):
+            items = sorted(
+                [(k, float(v)) for k, v in imp.items() if v is not None],
+                key=lambda x: x[1],
+                reverse=True,
+            )
+            cat_markers = {"MODE", "MARKET", "BRACKET", "LEAGUE", "TEAM", "DRIFT IN / OUT", "Home Form Rag", "Away Form Rag"}
+            for k, _v in items:
+                if k in cat_markers:
+                    if k not in top_cat:
+                        top_cat.append(k)
+                else:
+                    if k not in top_num:
+                        top_num.append(k)
+    except Exception:
+        pass
 
-    imp = payload.get("feature_importance") or []
-    ranked = [d.get("feature") for d in imp if isinstance(d, dict) and d.get("feature")]
+    # Hard fallback columns
+    if not top_cat:
+        top_cat = ["MODE", "MARKET", "BRACKET", "DRIFT IN / OUT"]
+    if not top_num:
+        top_num = ["DIFF", "% DRIFT", "IMPLIED ODDS", "ACTUAL ODDS"]
 
-    top_num = [c for c in ranked if c in numeric][:4] or list(numeric)[:4]
-    top_cat = [c for c in ranked if c in categorical][:3] or list(categorical)[:3]
+    # Avoid repeating the same diagnostic back-to-back
+    last_task = recent_actions[-1].get("task_type") if recent_actions else ""
+    row_filters = payload.get("row_filters") or {}
 
-    # avoid repeating the exact same task_type consecutively
-    last_task = None
-    if recent_actions:
-        last_task = recent_actions[-1].get("task_type")
-
-    if last_task != "bracket_sweep" and top_num:
-        return "bracket_sweep", {
+    if last_task != "bracket_sweep":
+        params = {
             "storage_bucket": storage_bucket,
             "storage_path": storage_path,
             "pl_column": pl_col,
             "side": side,
             "odds_col": odds_col,
             "row_filters": row_filters,
-            "focus_numeric_cols": top_num,
-            "bins": 8,
+            "numeric_cols": top_num[:6],
+            "top_k": 40,
             "max_rules": 40,
         }
+        why = "Bracket sweep searches numeric ranges on the strongest features to find pockets where ROI becomes positive."
+        return "bracket_sweep", params, why
 
-    if last_task != "subgroup_scan" and (top_cat or top_num):
-        return "subgroup_scan", {
+    if last_task != "subgroup_scan":
+        min_rows = int((ctx.get("enforcement_gates") or {}).get("min_val_rows", 60))
+        params = {
             "storage_bucket": storage_bucket,
             "storage_path": storage_path,
             "pl_column": pl_col,
             "side": side,
             "odds_col": odds_col,
             "row_filters": row_filters,
-            "group_by_cols": top_cat,
+            "group_by_cols": top_cat[:4],
             "focus_numeric_cols": top_num[:3],
-            "min_rows": int((ctx.get("enforcement_gates") or {}).get("min_val_rows", 60)),
+            "min_rows": min_rows,
             "top_k": 30,
         }
+        why = "Subgroup scan looks for stable segments (MODE/MARKET/BRACKET/LEAGUE/TEAM) where the edge is concentrated."
+        return "subgroup_scan", params, why
 
-    return "hyperopt_pl_lab", {
+    params = {
         "storage_bucket": storage_bucket,
         "storage_path": storage_path,
         "pl_column": pl_col,
         "side": side,
         "odds_col": odds_col,
         "row_filters": row_filters,
-        "trials": 15,
-        "time_budget_sec": 600,
+        "trials": 20,
+        "time_budget_sec": 900,
     }
+    why = "Hyperopt runs a VAL-only parameter/threshold search to try to distill a rule that generalises to TEST."
+    return "hyperopt_pl_lab", params, why
 
 ENFORCEMENT_EXPLANATION = {
     "min_train_rows": "Minimum number of scan-rows needed in TRAIN for a rule to be considered (avoid tiny-sample mirages).",
@@ -1138,7 +1163,7 @@ def _maybe_start_narrated_pl_research(user_text: str) -> bool:
     st.session_state["cached_research_context"] = ctx
     st.session_state.last_context = ctx
 
-    minutes = _minutes_from_text(user_text, default_minutes=10)
+    minutes = _minutes_from_text(user_text, default_minutes=30)
     do_hyperopt = any(k in t for k in ["hyperopt", "grid", "cv", "bayes", "optuna"])
     pl_col = _resolve_pl_column(user_text, ctx)
     enforcement = _enforcement_from_state(ctx)
@@ -1336,7 +1361,12 @@ Context JSON:
         {"role": "system", "content": system},
         {"role": "user", "content": prompt},
     ])
-    txt = (resp or "").strip()
+    # Extract assistant text from the OpenAI response object
+    try:
+        txt = (resp.choices[0].message.content or "").strip()  # type: ignore[attr-defined]
+    except Exception:
+        txt = str(resp).strip()
+
     # Extract JSON
     try:
         j = json.loads(txt)
