@@ -1215,8 +1215,8 @@ def _maybe_start_narrated_pl_research(user_text: str) -> bool:
 
     # Optional pre-filter: if the dataset has a MARKET column, restrict to the market implied by the PL column.
     row_filters = None
-    if pl_col and str(pl_col).strip().lower() != "pl":
-        market_name = str(pl_col).replace(" PL", "").strip()
+    if pl_column and str(pl_column).strip().lower() != "pl":
+        market_name = str(pl_column).replace(" PL", "").strip()
         if market_name:
             row_filters = {"MARKET": market_name}
     st.session_state["agent_session_row_filters"] = row_filters or {}
@@ -1247,7 +1247,11 @@ def _maybe_start_narrated_pl_research(user_text: str) -> bool:
     # Autopilot plan: if the user asked for diagnostics, we *must* chain jobs automatically.
     # This is deterministic (no LLM needed) so it can't silently "decide" to stop.
     _user_prompt_l = (user_text or "").lower()
-    auto_diag = ("diagnostic" in _user_prompt_l) or ("diagnostics" in _user_prompt_l) or ("if no rules" in _user_prompt_l) or ("no rules pass" in _user_prompt_l)
+    auto_diag = any(phrase in _user_prompt_l for phrase in [
+        "diagnostic", "diagnostics", "auto-diagnostic", "auto diagnostics",
+        "run diagnostics", "automatically run diagnostics", "if no rules pass", "no rules pass",
+        "if none pass", "if no rules", "and if no rules"
+    ])
     st.session_state["agent_session_auto_diagnostics"] = bool(auto_diag)
 
     # The plan always starts with the pl_lab we just submitted.
@@ -1259,7 +1263,7 @@ def _maybe_start_narrated_pl_research(user_text: str) -> bool:
     st.session_state["agent_session_total_minutes"] = int(minutes or 5)
     st.session_state["agent_session_started_at_iso"] = datetime.utcnow().isoformat()
     st.session_state["agent_session_pl_column"] = pl_col
-    st.session_state["agent_session_minutes_per_job"] = int(minutes)
+    st.session_state["agent_session_minutes_per_job"] = max(5, int(minutes or 5) // max(1, len(plan)))
 
     st.session_state.active_job_last_status = ""
     st.session_state.active_job_last_update_ts = 0.0
@@ -1472,7 +1476,8 @@ def _autopilot_tick():
 
     if status == "error":
         _append("assistant", f"❌ Job failed.\n```json\n{json.dumps(job, indent=2)}\n```")
-        st.session_state.get("_handled_job_ids", set()).add(job_id)
+        handled = st.session_state.setdefault("_handled_job_ids", set())
+        handled.add(job_id)
         st.session_state.active_job_id = ""
         return
 
@@ -1496,14 +1501,24 @@ def _autopilot_tick():
     result_wrap = res if isinstance(res, dict) else {}
     payload = (result_wrap.get("result") or {}) if isinstance(result_wrap, dict) else {}
 
+    # Determine whether this job produced any rules that *passed* gates.
+    top_rules = payload.get("top_rules") or payload.get("rules") or []
+    passing_rules = False
+    if isinstance(top_rules, list):
+        for _r in top_rules:
+            if isinstance(_r, dict) and (_r.get("passed_gates") or _r.get("passed") or _r.get("pass")):
+                passing_rules = True
+                break
+    st.session_state["agent_session_last_top_rules"] = top_rules[:10] if isinstance(top_rules, list) else []
+
     if not payload:
         _append("assistant", f"⚠️ Could not load result payload.\n```json\n{json.dumps(res, indent=2)[:12000]}\n```")
         st.session_state.active_job_id = ""
         return
 
     # Mark as handled so we don't process it repeatedly on reruns.
-    st.session_state.get("_handled_job_ids", set()).add(job_id)
-
+    handled = st.session_state.setdefault("_handled_job_ids", set())
+    handled.add(job_id)
     # Render distilled rules + analysis
     _append("assistant", _render_distilled_top(result_wrap, top_n=3))
 
@@ -1513,7 +1528,6 @@ def _autopilot_tick():
     # Interpretation (still short, but diagnostic even on failure)
     distilled = (payload.get("distilled") or {})
     rules = distilled.get("top_distilled_rules") or []
-    passing_rules = bool(rules)
     near_misses = distilled.get("near_misses") or []
     nm = _summarize_near_misses(near_misses)
 
@@ -1638,16 +1652,13 @@ def _autopilot_tick():
 
             # Base params (carry forward PL column, enforcement, ignore cols, and learned filters)
             base_params = {
-            "pl_column": st.session_state.get("agent_session_pl_column") or st.session_state.get("active_job_pl_col"),
-            "storage_path": st.session_state.get("storage_path", "football_ai_NNIA.csv"),
-            "storage_bucket": st.session_state.get("storage_bucket", DEFAULT_DATA_BUCKET),
-            "_results_bucket": DEFAULT_RESULTS_BUCKET,
-            "ignored_columns": ((ctx_local.get("derived") or {}).get("ignored_columns") or ["Result", "HOME FORM"]),
-            "outcome_columns": ((ctx_local.get("derived") or {}).get("outcome_columns") or []),
-            "ignored_feature_columns": ((ctx_local.get("derived") or {}).get("ignored_feature_columns") or []),
-            "enforcement": st.session_state.get("agent_session_enforcement") or {},
-            "duration_minutes": int(st.session_state.get("agent_session_minutes_per_job") or 5),
-        }
+                "pl_column": st.session_state.get("agent_session_last_pl_column"),
+                "storage_path": st.session_state.get("storage_path", "football_ai_NNIA.csv"),
+                "ignored_columns": ((st.session_state.get("ctx") or {}).get("derived") or {}).get("ignored_columns") or ["Result", "HOME FORM"],
+                "outcome_columns": ((st.session_state.get("ctx") or {}).get("derived") or {}).get("outcome_columns") or [],
+                "enforcement": st.session_state.get("agent_session_enforcement") or {},
+                "duration_minutes": int(st.session_state.get("agent_session_minutes_per_job") or 5),
+            }
 
             rf = st.session_state.get("agent_session_row_filters")
             if rf:
