@@ -1067,6 +1067,7 @@ def _maybe_start_narrated_pl_research(user_text: str) -> bool:
     st.session_state["agent_session_pl_column"] = pl_col
     st.session_state["agent_session_minutes_per_job"] = int(minutes)
     st.session_state["agent_session_autodiag_on_no_rules"] = True
+    st.session_state["agent_session_autodiag_on_no_rules"] = True
 
     st.session_state.active_job_last_status = ""
     st.session_state.active_job_last_update_ts = 0.0
@@ -1419,7 +1420,120 @@ def _autopilot_tick():
     if has_passing_rules and st.session_state.get("agent_session_active"):
         st.session_state["agent_session_active"] = False
 
-    # Decide next step if agent session is active and budget remains (only when no passing rules).
+    has_passing_rules = bool(rules)
+
+    # If we already have passing rules, stop autopilot chaining (wait for explicit user direction).
+    if has_passing_rules and st.session_state.get("agent_session_active"):
+        st.session_state["agent_session_active"] = False
+
+    # ------------------------------------------------------------
+    # AUTO-DIAGNOSTIC CHAINING (independent of agent_session_active)
+    # If no rules passed and autodiag is enabled, submit a deterministic
+    # diagnostic job immediately (prevents the "talks about next step but
+    # doesn't actually submit it" failure mode on Streamlit reruns).
+    # ------------------------------------------------------------
+    try:
+        chained = st.session_state.get("_chained_from_job_ids")
+        if not isinstance(chained, set):
+            chained = set(chained or [])
+            st.session_state["_chained_from_job_ids"] = chained
+    except Exception:
+        chained = set()
+        st.session_state["_chained_from_job_ids"] = chained
+
+    if (
+        (not has_passing_rules)
+        and st.session_state.get("agent_session_autodiag_on_no_rules", False)
+        and job_id not in st.session_state.get("_chained_from_job_ids", set())
+    ):
+        # Mark as chained BEFORE submitting to avoid duplicates on reruns.
+        st.session_state["_chained_from_job_ids"].add(job_id)
+
+        # Pull recent actions (best-effort) for anti-repeat.
+        recent_actions = []
+        try:
+            ra_raw = (ctx_local.get("research_state") or {}).get("recent_actions")
+            if isinstance(ra_raw, str) and ra_raw.strip():
+                recent_actions = json.loads(ra_raw)
+            elif isinstance(ra_raw, list):
+                recent_actions = ra_raw
+        except Exception:
+            recent_actions = []
+
+        auto_task, auto_params, why = _choose_diagnostic_task(payload, ctx_local, recent_actions)
+
+        # Build base params from the original job + Bible context.
+        base_params = {
+            "pl_column": (
+                st.session_state.get("agent_session_pl_column")
+                or (job.get("params") or {}).get("pl_column")
+                or "BO 2.5 PL"
+            ),
+            "storage_path": (job.get("params") or {}).get("storage_path", "football_ai_NNIA.csv"),
+            "storage_bucket": (job.get("params") or {}).get("storage_bucket", "football-data"),
+            "_results_bucket": (
+                (job.get("params") or {}).get("_results_bucket")
+                or st.session_state.get("active_job_bucket")
+                or DEFAULT_RESULTS_BUCKET
+            ),
+            "ignored_columns": (
+                (ctx_local.get("derived") or {}).get("ignored_columns")
+                or (job.get("params") or {}).get("ignored_columns")
+                or []
+            ),
+            "outcome_columns": (
+                (ctx_local.get("derived") or {}).get("outcome_columns")
+                or (job.get("params") or {}).get("outcome_columns")
+                or []
+            ),
+            "ignored_feature_columns": (
+                (ctx_local.get("derived") or {}).get("ignored_feature_columns")
+                or (job.get("params") or {}).get("ignored_feature_columns")
+                or []
+            ),
+            "enforcement": (
+                (job.get("params") or {}).get("enforcement")
+                or (ctx_local.get("enforcement") if isinstance(ctx_local, dict) else {})
+                or {}
+            ),
+            # Carry through market metadata (if any)
+            "side": (job.get("params") or {}).get("side"),
+            "odds_col": (job.get("params") or {}).get("odds_col"),
+            "top_fracs": (job.get("params") or {}).get("top_fracs"),
+            # Runtime controls
+            "duration_minutes": int(
+                (job.get("params") or {}).get(
+                    "duration_minutes",
+                    st.session_state.get("agent_session_minutes_per_job", 10),
+                )
+            ),
+            # Filters (keep both representations for backwards compatibility)
+            "filters": st.session_state.get("agent_session_filters") or {},
+            "row_filters": _coerce_row_filters(st.session_state.get("agent_session_filters") or {}),
+            "top_n": int((job.get("params") or {}).get("top_n", 12)),
+        }
+
+        merged = {**base_params, **(auto_params or {})}
+
+        _append_chat("assistant", f"🟡 No rules passed gates → running automatic diagnostics: **{auto_task}**\n{why}")
+        submitted = _run_tool("submit_job", {"task_type": auto_task, "params": merged})
+        new_job_id = (submitted or {}).get("job_id") if isinstance(submitted, dict) else None
+
+        if new_job_id:
+            st.session_state.active_job_id = new_job_id
+            st.session_state.active_job_pl_col = merged.get("pl_column")
+            st.session_state.active_job_bucket = merged.get("_results_bucket") or DEFAULT_RESULTS_BUCKET
+            st.session_state["active_job_last_event_ts"] = ""
+            st.session_state.active_job_last_status = ""
+            st.session_state.active_job_last_update_ts = 0.0
+            _append_chat("assistant", f"🚀 Started next job: **{auto_task}** for **{merged.get('pl_column')}**. Job ID: `{new_job_id}`")
+            return
+        else:
+            _append_chat("assistant", f"⚠️ Could not submit diagnostic job. Response: {submitted}")
+
+    # ------------------------------------------------------------
+    # AGENT SESSION CONTINUATION (LLM-driven), only if explicitly active
+    # ------------------------------------------------------------
     if (
         st.session_state.get("agent_session_active")
         and st.session_state.get("agent_session_steps_done", 0) < st.session_state.get("agent_session_max_steps", 8)
