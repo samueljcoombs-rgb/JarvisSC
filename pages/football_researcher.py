@@ -1288,7 +1288,7 @@ def _autopilot_tick():
                 ts = e.get("ts")
                 lvl = (e.get("level") or "info").upper()
                 msg = e.get("message") or ""
-                _append_chat("assistant", f"🧩 {lvl} {msg}")
+                _append("assistant", f"🧩 {lvl} {msg}")
                 if ts:
                     st.session_state["active_job_last_event_ts"] = ts
     except Exception:
@@ -1361,21 +1361,25 @@ def _autopilot_tick():
         interp.append("- Next: refine brackets/odds bands and verify regime stability (monthly/seasonal), then re-validate on the strict time-split.")
     else:
         interp.append("- **No rules passed the gates** in this run. That doesn't mean there's no signal; it means nothing met the current stability/risk requirements.")
-        if nm.get("top_gates"):
-            interp.append("- Most common failure gates: " + ", ".join([f"{k} ({v})" for k, v in nm["top_gates"]]))
-        if nm.get("top_candidates"):
+        by_reason = nm.get("by_reason") or {}
+        if by_reason:
+            interp.append("- Most common failure reasons: " + ", ".join([f"{k} ({v})" for k, v in list(by_reason.items())[:5]]))
+        top_nm = nm.get("top") or []
+        if top_nm:
             interp.append("- Example near-miss candidates:")
-            for c in nm["top_candidates"]:
+            for c in top_nm[:3]:
                 parts = []
-                if c.get("filter_summary"):
-                    parts.append(c["filter_summary"])
-                if c.get("failed_gates"):
-                    parts.append("failed: " + ", ".join(c["failed_gates"]))
-                if c.get("val_roi") is not None:
-                    parts.append(f"val ROI {c['val_roi']:+.3f}")
-                if c.get("test_roi") is not None:
-                    parts.append(f"test ROI {c['test_roi']:+.3f}")
-                interp.append("  - " + " | ".join(parts))
+                rule_spec = c.get("rule") or []
+                if rule_spec:
+                    parts.append(f"rule_len={len(rule_spec)}")
+                reason = c.get("reason")
+                if reason:
+                    parts.append(f"failed: {reason}")
+                gate = c.get("gate") or {}
+                if gate:
+                    parts.append(f"gate={gate}")
+                if parts:
+                    interp.append("  - " + " | ".join(parts))
         b_warn = ((payload.get("baseline") or {}).get("test_regime_warning") or {})
         if b_warn.get("warn"):
             interp.append(
@@ -1515,7 +1519,7 @@ def _autopilot_tick():
 
         merged = {**base_params, **(auto_params or {})}
 
-        _append_chat("assistant", f"🟡 No rules passed gates → running automatic diagnostics: **{auto_task}**\n{why}")
+        _append("assistant", f"🟡 No rules passed gates → running automatic diagnostics: **{auto_task}**\n{why}")
         submitted = _run_tool("submit_job", {"task_type": auto_task, "params": merged})
         new_job_id = (submitted or {}).get("job_id") if isinstance(submitted, dict) else None
 
@@ -1526,10 +1530,10 @@ def _autopilot_tick():
             st.session_state["active_job_last_event_ts"] = ""
             st.session_state.active_job_last_status = ""
             st.session_state.active_job_last_update_ts = 0.0
-            _append_chat("assistant", f"🚀 Started next job: **{auto_task}** for **{merged.get('pl_column')}**. Job ID: `{new_job_id}`")
+            _append("assistant", f"🚀 Started next job: **{auto_task}** for **{merged.get('pl_column')}**. Job ID: `{new_job_id}`")
             return
         else:
-            _append_chat("assistant", f"⚠️ Could not submit diagnostic job. Response: {submitted}")
+            _append("assistant", f"⚠️ Could not submit diagnostic job. Response: {submitted}")
 
     # ------------------------------------------------------------
     # AGENT SESSION CONTINUATION (LLM-driven), only if explicitly active
@@ -1565,7 +1569,7 @@ def _autopilot_tick():
                 "recent_actions": [],
             }
         st.session_state["agent_session_last_decision"] = json.dumps(decision, ensure_ascii=False)[:2000]
-        _append_chat("assistant", "🧠 Agent decision: " + (decision.get("narration") or ""))
+        _append("assistant", "🧠 Agent decision: " + (decision.get("narration") or ""))
 
         # Decide whether to continue, and with which diagnostic tool.
         next_task = decision.get("next_task_type")
@@ -1573,7 +1577,7 @@ def _autopilot_tick():
 
         # If the agent wants to stop AND we already have passing rules, stop cleanly.
         if decision.get("stop") and rules:
-            _append_chat("assistant", "🛑 Agent session stopped (rules found and decision=stop).")
+            _append("assistant", "🛑 Agent session stopped (rules found and decision=stop).")
             st.session_state["agent_session_active"] = False
             st.session_state.active_job_id = ""
             return
@@ -1591,10 +1595,10 @@ def _autopilot_tick():
             next_task = auto_task
             # Allow decision params to override auto params (but keep required dataset/pl defaults from auto if present)
             next_params = {**auto_params, **next_params}
-            _append_chat("assistant", f"🟡 No rules passed; running diagnostic next: {next_task}. {why}")
+            _append("assistant", f"🟡 No rules passed; running diagnostic next: {next_task}. {why}")
 
         if not next_task:
-            _append_chat("assistant", "🛑 Agent did not select a next task. Stopping agent session.")
+            _append("assistant", "🛑 Agent did not select a next task. Stopping agent session.")
             st.session_state["agent_session_active"] = False
             st.session_state.active_job_id = ""
             return
@@ -1654,9 +1658,9 @@ def _autopilot_tick():
             st.session_state["active_job_last_event_ts"] = ""
             st.session_state.active_job_last_status = ""
             st.session_state.active_job_last_update_ts = 0.0
-            _append_chat("assistant", f"🚀 Started next job: {next_task} for **{merged.get('pl_column')}**. Job ID: `{new_job_id}`")
+            _append("assistant", f"🚀 Started next job: {next_task} for **{merged.get('pl_column')}**. Job ID: `{new_job_id}`")
         else:
-            _append_chat("assistant", "⚠️ Could not submit next job. Stopping agent.")
+            _append("assistant", "⚠️ Could not submit next job. Stopping agent.")
             st.session_state["agent_session_active"] = False
             st.session_state.active_job_id = ""
         return
