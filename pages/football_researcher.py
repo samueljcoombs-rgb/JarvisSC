@@ -106,7 +106,6 @@ def _record_action_in_state(ctx: dict, action: dict, result_summary: dict) -> No
 
 
 
-
 def _run_tool(name: str, args: Optional[Dict[str, Any]] = None) -> Any:
     """Execute a tool function.
 
@@ -1066,7 +1065,7 @@ def _maybe_start_narrated_pl_research(user_text: str) -> bool:
     st.session_state["agent_session_steps_done"] = 0
     st.session_state["agent_session_pl_column"] = pl_col
     st.session_state["agent_session_minutes_per_job"] = int(minutes)
-    st.session_state["agent_session_autodiag_on_no_rules"] = True
+    # Enable auto-diagnostic chaining for narrated PL research flow
     st.session_state["agent_session_autodiag_on_no_rules"] = True
 
     st.session_state.active_job_last_status = ""
@@ -1317,7 +1316,8 @@ def _autopilot_tick():
 
     if status == "error":
         _append("assistant", f"❌ Job failed.\n```json\n{json.dumps(job, indent=2)}\n```")
-        st.session_state.get("_handled_job_ids", set()).add(job_id)
+        # FIX: Use direct assignment instead of .get().add() to ensure it persists
+        st.session_state["_handled_job_ids"].add(job_id)
         st.session_state.active_job_id = ""
         return
 
@@ -1343,7 +1343,8 @@ def _autopilot_tick():
         return
 
     # Mark as handled so we don't process it repeatedly on reruns.
-    st.session_state.get("_handled_job_ids", set()).add(job_id)
+    # FIX: Use direct assignment instead of .get().add() to ensure it persists
+    st.session_state["_handled_job_ids"].add(job_id)
 
     _append("assistant", _render_distilled_top(result_obj, top_n=3))
 
@@ -1420,13 +1421,8 @@ def _autopilot_tick():
 
     has_passing_rules = bool(rules)
 
-    # If we already have passing rules, do not auto-run diagnostics; wait for explicit user direction.
-    if has_passing_rules and st.session_state.get("agent_session_active"):
-        st.session_state["agent_session_active"] = False
-
-    has_passing_rules = bool(rules)
-
     # If we already have passing rules, stop autopilot chaining (wait for explicit user direction).
+    # FIX: Removed duplicate block - this was appearing twice in the original
     if has_passing_rules and st.session_state.get("agent_session_active"):
         st.session_state["agent_session_active"] = False
 
@@ -1436,6 +1432,7 @@ def _autopilot_tick():
     # diagnostic job immediately (prevents the "talks about next step but
     # doesn't actually submit it" failure mode on Streamlit reruns).
     # ------------------------------------------------------------
+    # Safely coerce _chained_from_job_ids to a set
     try:
         chained = st.session_state.get("_chained_from_job_ids")
         if not isinstance(chained, set):
@@ -1445,8 +1442,12 @@ def _autopilot_tick():
         chained = set()
         st.session_state["_chained_from_job_ids"] = chained
 
+    # FIX: Add task type check - only auto-chain for pl_lab jobs
+    job_task_type = (job.get("task_type") or "").lower().strip()
+
     if (
-        (not has_passing_rules)
+        job_task_type == "pl_lab"  # FIX: Only chain from pl_lab jobs
+        and (not has_passing_rules)
         and st.session_state.get("agent_session_autodiag_on_no_rules", True)
         and job_id not in st.session_state.get("_chained_from_job_ids", set())
     ):
@@ -1504,7 +1505,7 @@ def _autopilot_tick():
             "side": (job.get("params") or {}).get("side"),
             "odds_col": (job.get("params") or {}).get("odds_col"),
             "top_fracs": (job.get("params") or {}).get("top_fracs"),
-            # Runtime controls
+            # Runtime controls - FIX: Preserve duration_minutes from original job
             "duration_minutes": int(
                 (job.get("params") or {}).get(
                     "duration_minutes",
@@ -1720,6 +1721,11 @@ def _maybe_handle_job_queries(user_text: str) -> bool:
 # ============================================================
 
 def _chat_with_tools(user_text: str, max_rounds: int = 6):
+    # FIX: Check for "automatically run diagnostics" phrase and enable the flag
+    t_lower = (user_text or "").lower()
+    if "automatically run diagnostics" in t_lower or "auto run diagnostics" in t_lower or "autodiag" in t_lower:
+        st.session_state["agent_session_autodiag_on_no_rules"] = True
+
     # Autopilot "native" behaviours first
     nt = _normalize(user_text)
     if st.session_state.agent_mode == "autopilot":
