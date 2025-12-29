@@ -1,3 +1,15 @@
+"""
+Football Tools v2 - Autonomous Agent Edition
+
+New in v2:
+- query_data: Submit data exploration jobs
+- test_filter: Submit quick hypothesis testing jobs
+- regime_check: Submit stability analysis jobs
+- Enhanced research context with full Bible loading
+
+All tools are designed to be called by the autonomous agent.
+"""
+
 from __future__ import annotations
 
 import os
@@ -6,7 +18,7 @@ import re
 import time
 from datetime import datetime
 from io import StringIO
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import pandas as pd
 import requests
@@ -23,143 +35,14 @@ except Exception:
     StorageException = Exception
 
 
-
 # ============================================================
-# New research job types (server-side tools)
-# ============================================================
-
-def start_subgroup_scan(
-    pl_column: str,
-    duration_minutes: int = 30,
-    group_cols: Optional[List[str]] = None,
-    max_groups: int = 50,
-    enforcement: Optional[Dict[str, Any]] = None,
-    row_filters: Optional[List[Dict[str, Any]]] = None,
-) -> Dict[str, Any]:
-    """
-    Queue a subgroup scan job (categorical buckets).
-    Returns a jobs row payload (includes job_id).
-    """
-    ctx = get_research_context(limit_notes=10)
-    derived = (ctx.get("derived") or {})
-    ignored_columns = derived.get("ignored_columns") or []
-    outcome_columns = derived.get("outcome_columns") or []
-    ignored_feature_columns = derived.get("ignored_feature_columns") or ctx.get("ignored_feature_columns") or []
-
-    storage_bucket = (st.secrets.get("DATA_STORAGE_BUCKET") or os.getenv("DATA_STORAGE_BUCKET") or "football-data").strip()
-    storage_path = (st.secrets.get("DATA_STORAGE_PATH") or os.getenv("DATA_STORAGE_PATH") or "football_ai_NNIA.csv").strip()
-    results_bucket = (st.secrets.get("RESULTS_BUCKET") or os.getenv("RESULTS_BUCKET") or "football-results").strip()
-
-    params = {
-        "storage_bucket": storage_bucket,
-        "storage_path": storage_path,
-        "_results_bucket": results_bucket,
-        "pl_column": pl_column,
-        "duration_minutes": int(duration_minutes),
-        "group_cols": group_cols or ["MODE", "MARKET", "LEAGUE", "BRACKET"],
-        "max_groups": int(max_groups),
-        "ignored_columns": ignored_columns,
-        "outcome_columns": outcome_columns,
-        "ignored_feature_columns": ignored_feature_columns,
-        "row_filters": row_filters or [],
-        "enforcement": enforcement or {},
-    }
-    return submit_job("subgroup_scan", params)
-
-def start_bracket_sweep(
-    pl_column: str,
-    duration_minutes: int = 30,
-    sweep_cols: Optional[List[str]] = None,
-    n_bins: int = 12,
-    max_results: int = 50,
-    enforcement: Optional[Dict[str, Any]] = None,
-    row_filters: Optional[List[Dict[str, Any]]] = None,
-) -> Dict[str, Any]:
-    """
-    Queue a bracket sweep job (numeric quantile ranges).
-    """
-    ctx = get_research_context(limit_notes=10)
-    derived = (ctx.get("derived") or {})
-    ignored_columns = derived.get("ignored_columns") or []
-    outcome_columns = derived.get("outcome_columns") or []
-    ignored_feature_columns = derived.get("ignored_feature_columns") or ctx.get("ignored_feature_columns") or []
-
-    storage_bucket = (st.secrets.get("DATA_STORAGE_BUCKET") or os.getenv("DATA_STORAGE_BUCKET") or "football-data").strip()
-    storage_path = (st.secrets.get("DATA_STORAGE_PATH") or os.getenv("DATA_STORAGE_PATH") or "football_ai_NNIA.csv").strip()
-    results_bucket = (st.secrets.get("RESULTS_BUCKET") or os.getenv("RESULTS_BUCKET") or "football-results").strip()
-
-    params = {
-        "storage_bucket": storage_bucket,
-        "storage_path": storage_path,
-        "_results_bucket": results_bucket,
-        "pl_column": pl_column,
-        "duration_minutes": int(duration_minutes),
-        "sweep_cols": sweep_cols or [],
-        "n_bins": int(n_bins),
-        "max_results": int(max_results),
-        "ignored_columns": ignored_columns,
-        "outcome_columns": outcome_columns,
-        "ignored_feature_columns": ignored_feature_columns,
-        "row_filters": row_filters or [],
-        "enforcement": enforcement or {},
-    }
-    return submit_job("bracket_sweep", params)
-
-def start_hyperopt_pl_lab(
-    pl_column: str,
-    duration_minutes: int = 120,
-    hyperopt_trials: int = 30,
-    top_fracs: Optional[List[float]] = None,
-    enforcement: Optional[Dict[str, Any]] = None,
-    row_filters: Optional[List[Dict[str, Any]]] = None,
-) -> Dict[str, Any]:
-    """
-    Queue an Optuna-driven hyperopt PL lab job (val-only tuning, test report).
-    """
-    ctx = get_research_context(limit_notes=10)
-    derived = (ctx.get("derived") or {})
-    ignored_columns = derived.get("ignored_columns") or []
-    outcome_columns = derived.get("outcome_columns") or []
-    ignored_feature_columns = derived.get("ignored_feature_columns") or ctx.get("ignored_feature_columns") or []
-
-    storage_bucket = (st.secrets.get("DATA_STORAGE_BUCKET") or os.getenv("DATA_STORAGE_BUCKET") or "football-data").strip()
-    storage_path = (st.secrets.get("DATA_STORAGE_PATH") or os.getenv("DATA_STORAGE_PATH") or "football_ai_NNIA.csv").strip()
-    results_bucket = (st.secrets.get("RESULTS_BUCKET") or os.getenv("RESULTS_BUCKET") or "football-results").strip()
-
-    params = {
-        "storage_bucket": storage_bucket,
-        "storage_path": storage_path,
-        "_results_bucket": results_bucket,
-        "pl_column": pl_column,
-        "duration_minutes": int(duration_minutes),
-        "hyperopt_trials": int(hyperopt_trials),
-        "top_fracs": top_fracs or [0.05, 0.1, 0.2],
-        "ignored_columns": ignored_columns,
-        "outcome_columns": outcome_columns,
-        "ignored_feature_columns": ignored_feature_columns,
-        "row_filters": row_filters or [],
-        "enforcement": enforcement or {},
-    }
-    return submit_job("hyperopt_pl_lab", params)
-
-def get_job_events(job_id: str, limit: int = 100) -> Dict[str, Any]:
-    """
-    Fetch latest job events for a job_id (requires public.job_events).
-    """
-    sb = _sb()
-    rows = sb.table("job_events").select("*").eq("job_id", job_id).order("ts", desc=True).limit(int(limit)).execute().data
-    return {"job_id": job_id, "events": rows}
-
-# ============================================================
-# Google Sheets tabs (agreed names)
+# Google Sheets configuration
 # ============================================================
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive.readonly",
 ]
-
-SHEET_URL_DEFAULT = os.getenv("FOOTBALL_MEMORY_SHEET_URL") or st.secrets.get("FOOTBALL_MEMORY_SHEET_URL", "")
 
 TAB_RESEARCH_MEMORY = "research_memory"
 TAB_DATASET_OVERVIEW = "dataset_overview"
@@ -168,11 +51,13 @@ TAB_COLUMN_DEFS = "column_definitions"
 TAB_RESEARCH_STATE = "research_state"
 TAB_EVAL_FRAMEWORK = "evaluation_framework"
 
+
 def _now_iso() -> str:
     return datetime.utcnow().isoformat()
 
+
 # ============================================================
-# Google Sheets helpers (fault tolerant)
+# Google Sheets helpers
 # ============================================================
 
 def _gs_creds() -> Credentials:
@@ -182,17 +67,19 @@ def _gs_creds() -> Credentials:
     data = json.loads(raw) if isinstance(raw, str) else raw
     return Credentials.from_service_account_info(data, scopes=SCOPES)
 
+
 def _sheet_url() -> str:
-    url = st.secrets.get("FOOTBALL_MEMORY_SHEET_URL") or os.getenv("FOOTBALL_MEMORY_SHEET_URL") or SHEET_URL_DEFAULT
-    url = (url or "").strip()
+    url = st.secrets.get("FOOTBALL_MEMORY_SHEET_URL") or os.getenv("FOOTBALL_MEMORY_SHEET_URL", "")
     if not url:
         raise RuntimeError("Missing FOOTBALL_MEMORY_SHEET_URL in Streamlit secrets/env.")
-    return url
+    return url.strip()
+
 
 @st.cache_resource(show_spinner=False)
 def _sh_cached():
     gc = gspread.authorize(_gs_creds())
     return gc.open_by_url(_sheet_url())
+
 
 def _ws(name: str):
     sh = _sh_cached()
@@ -201,11 +88,13 @@ def _ws(name: str):
     except WorksheetNotFound:
         raise RuntimeError(f"WorksheetNotFound: '{name}'. Create this tab in the Google Sheet.")
 
+
 def _safe_get_all_values(tab: str) -> List[List[str]]:
     try:
         return _ws(tab).get_all_values()
     except Exception:
         return []
+
 
 def _ensure_header(tab: str, header: List[str]) -> Dict[str, Any]:
     try:
@@ -214,21 +103,21 @@ def _ensure_header(tab: str, header: List[str]) -> Dict[str, Any]:
         if not vals:
             ws.append_row(header, value_input_option="RAW")
             return {"ok": True, "changed": True, "created": True}
-
         first = [c.strip() for c in (vals[0] or [])]
         if len(first) < len(header):
             try:
                 ws.insert_row(header, index=1)
                 return {"ok": True, "changed": True, "inserted": True}
             except Exception:
-                return {"ok": True, "changed": False, "note": "Header short but cannot insert (possibly protected)."}
+                return {"ok": True, "changed": False}
         return {"ok": True, "changed": False}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
+
 def _read_kv_tab(tab_name: str) -> Dict[str, str]:
     vals = _safe_get_all_values(tab_name)
-    out: Dict[str, str] = {}
+    out = {}
     if not vals or len(vals) < 2:
         return out
     for row in vals[1:]:
@@ -239,6 +128,7 @@ def _read_kv_tab(tab_name: str) -> Dict[str, str]:
         if k:
             out[k] = v
     return out
+
 
 def _read_table_tab(tab_name: str) -> List[Dict[str, str]]:
     vals = _safe_get_all_values(tab_name)
@@ -255,21 +145,33 @@ def _read_table_tab(tab_name: str) -> List[Dict[str, str]]:
         rows.append(d)
     return rows
 
-# ---------------- Public getters ----------------
+
+# ============================================================
+# Public getters for Bible tabs
+# ============================================================
 
 def get_dataset_overview() -> Dict[str, Any]:
+    """Get the dataset_overview tab from the Bible."""
     return {"tab": TAB_DATASET_OVERVIEW, "data": _read_kv_tab(TAB_DATASET_OVERVIEW)}
 
+
 def get_research_rules() -> Dict[str, Any]:
+    """Get the research_rules tab from the Bible (THE LAW)."""
     return {"tab": TAB_RESEARCH_RULES, "data": _read_table_tab(TAB_RESEARCH_RULES)}
 
+
 def get_column_definitions() -> Dict[str, Any]:
+    """Get column definitions - crucial for understanding what features mean."""
     return {"tab": TAB_COLUMN_DEFS, "data": _read_table_tab(TAB_COLUMN_DEFS)}
 
+
 def get_evaluation_framework() -> Dict[str, Any]:
+    """Get the evaluation framework - how to judge strategies."""
     return {"tab": TAB_EVAL_FRAMEWORK, "data": _read_table_tab(TAB_EVAL_FRAMEWORK)}
 
+
 def get_recent_research_notes(limit: int = 20) -> Dict[str, Any]:
+    """Get recent research notes - memory of past sessions."""
     vals = _safe_get_all_values(TAB_RESEARCH_MEMORY)
     if not vals or len(vals) < 2:
         return {"tab": TAB_RESEARCH_MEMORY, "rows": []}
@@ -284,21 +186,27 @@ def get_recent_research_notes(limit: int = 20) -> Dict[str, Any]:
         rows.append(d)
     return {"tab": TAB_RESEARCH_MEMORY, "rows": rows}
 
+
 def append_research_note(note: str, tags: str = "") -> Dict[str, Any]:
+    """Append a research note to the Bible's research_memory tab."""
     _ensure_header(TAB_RESEARCH_MEMORY, ["timestamp", "note", "tags"])
     try:
         ws = _ws(TAB_RESEARCH_MEMORY)
         ws.append_row([_now_iso(), note, tags or ""], value_input_option="RAW")
         return {"ok": True, "tab": TAB_RESEARCH_MEMORY}
     except APIError as e:
-        return {"ok": False, "error": f"gspread APIError append_research_note: {e}"}
+        return {"ok": False, "error": f"gspread APIError: {e}"}
     except Exception as e:
         return {"ok": False, "error": f"append_research_note failed: {e}"}
 
+
 def get_research_state() -> Dict[str, Any]:
+    """Get the research_state tab - key/value persistent state."""
     return {"tab": TAB_RESEARCH_STATE, "data": _read_kv_tab(TAB_RESEARCH_STATE)}
 
+
 def set_research_state(key: str, value: str) -> Dict[str, Any]:
+    """Set a key-value pair in research_state."""
     _ensure_header(TAB_RESEARCH_STATE, ["key", "value"])
     try:
         ws = _ws(TAB_RESEARCH_STATE)
@@ -308,33 +216,27 @@ def set_research_state(key: str, value: str) -> Dict[str, Any]:
                 try:
                     ws.update_cell(idx, 2, value)
                     return {"ok": True, "key": key, "value": value, "updated": True}
-                except APIError as e:
-                    try:
-                        ws.append_row([key, value], value_input_option="RAW")
-                        return {"ok": True, "key": key, "value": value, "appended_fallback": True, "update_error": str(e)}
-                    except Exception as e2:
-                        return {"ok": False, "error": f"update failed ({e}); append fallback failed ({e2})"}
-
+                except Exception:
+                    ws.append_row([key, value], value_input_option="RAW")
+                    return {"ok": True, "key": key, "value": value, "appended_fallback": True}
         ws.append_row([key, value], value_input_option="RAW")
         return {"ok": True, "key": key, "value": value, "created": True}
-    except APIError as e:
-        return {"ok": False, "error": f"set_research_state APIError: {e}"}
     except Exception as e:
         return {"ok": False, "error": f"set_research_state failed: {e}"}
 
+
 # ============================================================
-# Source-of-truth context fetch + derived constraints
+# Derived context extraction
 # ============================================================
 
 def _extract_ignored_columns(rules_rows: List[Dict[str, str]]) -> List[str]:
-    ignored: List[str] = []
+    ignored = []
     for r in rules_rows or []:
         txt = (r.get("rule") or r.get("Rule") or "").strip()
         if not txt:
             continue
         low = txt.lower()
         if "should be ignored" in low or "ignored completely" in low:
-            # quick heuristic: pull backtick-quoted or comma-separated column names if present
             cols = re.findall(r"`([^`]+)`", txt)
             if cols:
                 ignored.extend([c.strip() for c in cols if c.strip()])
@@ -343,7 +245,6 @@ def _extract_ignored_columns(rules_rows: List[Dict[str, str]]) -> List[str]:
                 ignored.append("Result")
             if "home form" in low:
                 ignored.append("HOME FORM")
-    # de-dupe preserve order
     seen = set()
     out = []
     for x in ignored:
@@ -352,6 +253,7 @@ def _extract_ignored_columns(rules_rows: List[Dict[str, str]]) -> List[str]:
             seen.add(k)
             out.append(x)
     return out
+
 
 def _extract_outcome_columns(col_defs: List[Dict[str, str]]) -> List[str]:
     out = []
@@ -363,7 +265,26 @@ def _extract_outcome_columns(col_defs: List[Dict[str, str]]) -> List[str]:
     return out
 
 
-def _parse_csv_list(v):
+def _extract_feature_columns(col_defs: List[Dict[str, str]]) -> Dict[str, List[str]]:
+    """Extract features by type from column definitions."""
+    numeric = []
+    categorical = []
+    for r in col_defs or []:
+        col = (r.get("column") or r.get("Column") or "").strip()
+        role = (r.get("role") or r.get("Role") or "").strip().lower()
+        if not col:
+            continue
+        if "numeric" in role or "feature" in role:
+            if "categorical" in role:
+                categorical.append(col)
+            else:
+                numeric.append(col)
+        elif "categorical" in role:
+            categorical.append(col)
+    return {"numeric": numeric, "categorical": categorical}
+
+
+def _parse_csv_list(v) -> List[str]:
     if v is None:
         return []
     if not isinstance(v, str):
@@ -371,23 +292,68 @@ def _parse_csv_list(v):
     parts = [p.strip() for p in v.replace("\n", ",").split(",")]
     return [p for p in parts if p]
 
+
 def get_research_context(limit_notes: int = 20) -> Dict[str, Any]:
+    """
+    Get the FULL Bible context - everything the agent needs to make decisions.
+    
+    Returns:
+        - dataset_overview: Goal, output format, key advice
+        - research_rules: THE LAW - what to never do, what to always do
+        - column_definitions: What each column means
+        - evaluation_framework: How to judge strategies
+        - research_state: Current gates, recent actions
+        - recent_notes: Memory from past sessions
+        - derived: Extracted constraints (ignored cols, outcome cols, features)
+    """
     overview = get_dataset_overview().get("data") or {}
     rules_rows = get_research_rules().get("data") or []
     col_defs = get_column_definitions().get("data") or []
     eval_fw = get_evaluation_framework().get("data") or []
     state = get_research_state().get("data") or {}
+    notes = get_recent_research_notes(limit=limit_notes).get("rows") or []
 
-    # Optional feature blacklist: exclude from predictive inputs (but keep for grouping/reporting)
+    # Extract derived constraints
     ignored_feature_columns = []
     for k in ("ignored_feature_columns", "feature_blacklist", "ignored_features"):
         if k in state and state.get(k):
             ignored_feature_columns.extend(_parse_csv_list(state.get(k)))
     ignored_feature_columns = sorted(set([c for c in ignored_feature_columns if c]))
-    notes = get_recent_research_notes(limit=limit_notes).get("rows") or []
 
     ignored_cols = _extract_ignored_columns(rules_rows)
     outcome_cols = _extract_outcome_columns(col_defs)
+    feature_cols = _extract_feature_columns(col_defs)
+
+    # Parse gates from state with safe defaults
+    def _safe_int(v, default):
+        try:
+            return int(float(v))
+        except:
+            return default
+    
+    def _safe_float(v, default):
+        try:
+            return float(v)
+        except:
+            return default
+
+    gates = {
+        "min_train_rows": _safe_int(state.get("min_train_rows"), 300),
+        "min_val_rows": _safe_int(state.get("min_val_rows"), 60),
+        "min_test_rows": _safe_int(state.get("min_test_rows"), 60),
+        "max_train_val_gap_roi": _safe_float(state.get("max_train_val_gap_roi"), 0.4),
+        "max_test_drawdown": _safe_float(state.get("max_test_drawdown"), -50),
+        "max_test_losing_streak_bets": _safe_int(state.get("max_test_losing_streak_bets"), 50),
+    }
+
+    # Parse recent actions from state
+    recent_actions = []
+    try:
+        actions_json = state.get("recent_actions", "[]")
+        if actions_json:
+            recent_actions = json.loads(actions_json) if isinstance(actions_json, str) else actions_json
+    except Exception:
+        pass
 
     return {
         "ok": True,
@@ -397,14 +363,20 @@ def get_research_context(limit_notes: int = 20) -> Dict[str, Any]:
         "evaluation_framework": eval_fw,
         "research_state": state,
         "recent_notes": notes,
+        "gates": gates,
+        "recent_actions": recent_actions,
         "derived": {
             "ignored_feature_columns": ignored_feature_columns,
-"ignored_columns": ignored_cols, "outcome_columns": outcome_cols},
+            "ignored_columns": ignored_cols,
+            "outcome_columns": outcome_cols,
+            "feature_columns": feature_cols,
+        },
         "ts": _now_iso(),
     }
 
+
 # ============================================================
-# Supabase
+# Supabase client
 # ============================================================
 
 @st.cache_resource(show_spinner=False)
@@ -415,64 +387,71 @@ def _sb_cached():
         raise RuntimeError("Missing SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY in Streamlit secrets/env.")
     return create_client(url, key)
 
+
 def _sb():
     return _sb_cached()
 
+
 # ============================================================
-# CSV loading (Supabase Storage preferred)
+# Storage helpers
 # ============================================================
+
+def _get_storage_config() -> Dict[str, str]:
+    """Get storage bucket/path configuration."""
+    return {
+        "storage_bucket": (st.secrets.get("DATA_STORAGE_BUCKET") or os.getenv("DATA_STORAGE_BUCKET") or "football-data").strip(),
+        "storage_path": (st.secrets.get("DATA_STORAGE_PATH") or os.getenv("DATA_STORAGE_PATH") or "football_ai_NNIA.csv").strip(),
+        "results_bucket": (st.secrets.get("RESULTS_BUCKET") or os.getenv("RESULTS_BUCKET") or "football-results").strip(),
+    }
+
 
 def _download_from_storage(bucket: str, path: str) -> bytes:
     sb = _sb()
     return sb.storage.from_(bucket).download(path)
 
-def _download_from_url(csv_url: str) -> bytes:
-    r = requests.get(csv_url, timeout=180)
-    r.raise_for_status()
-    return r.content
 
-def _load_csv(storage_bucket: Optional[str] = None, storage_path: Optional[str] = None, csv_url: Optional[str] = None) -> pd.DataFrame:
-    if storage_bucket and storage_path:
-        raw = _download_from_storage(storage_bucket, storage_path)
-    elif csv_url:
-        raw = _download_from_url(csv_url)
-    else:
-        raise ValueError("Provide either (storage_bucket + storage_path) OR csv_url.")
+def _load_csv(storage_bucket: Optional[str] = None, storage_path: Optional[str] = None) -> pd.DataFrame:
+    cfg = _get_storage_config()
+    bucket = storage_bucket or cfg["storage_bucket"]
+    path = storage_path or cfg["storage_path"]
+    raw = _download_from_storage(bucket, path)
     try:
         text = raw.decode("utf-8")
     except Exception:
         text = raw.decode("latin-1", errors="replace")
     return pd.read_csv(StringIO(text), low_memory=False)
 
-def load_data_basic(storage_bucket: str = "", storage_path: str = "", csv_url: str = "") -> Dict[str, Any]:
-    df = _load_csv(storage_bucket or None, storage_path or None, csv_url or None)
-    return {"rows": int(df.shape[0]), "cols": int(df.shape[1]), "head": df.head(5).to_dict(orient="records")}
-
-def list_columns(storage_bucket: str = "", storage_path: str = "", csv_url: str = "") -> Dict[str, Any]:
-    df = _load_csv(storage_bucket or None, storage_path or None, csv_url or None)
-    return {"columns": df.columns.tolist(), "n": int(len(df.columns))}
 
 # ============================================================
 # Jobs (Supabase table + Storage results)
 # ============================================================
 
 def submit_job(task_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Submit a job to the queue."""
     sb = _sb()
-    row = {"status": "queued", "task_type": task_type, "params": params or {}, "created_at": _now_iso(), "updated_at": _now_iso()}
+    row = {
+        "status": "queued",
+        "task_type": task_type,
+        "params": params or {},
+        "created_at": _now_iso(),
+        "updated_at": _now_iso(),
+    }
     try:
         res = sb.table("jobs").insert(row).execute()
-        data = (res.data or [])
+        data = res.data or []
         if not data:
             return {"error": "Insert returned no rows. Check table schema/RLS.", "raw": str(res)}
         return data[0]
     except Exception as e:
         return {"error": f"submit_job failed: {e}"}
 
+
 def get_job(job_id: str) -> Dict[str, Any]:
+    """Get job status and details."""
     sb = _sb()
     try:
         res = sb.table("jobs").select("*").eq("job_id", job_id).limit(1).execute()
-        data = (res.data or [])
+        data = res.data or []
         if not data:
             return {"error": "job not found", "job_id": job_id}
         return data[0]
@@ -480,37 +459,32 @@ def get_job(job_id: str) -> Dict[str, Any]:
         return {"error": f"get_job failed: {e}", "job_id": job_id}
 
 
-
 def get_job_events(job_id: str, since_ts: Optional[str] = None, limit: int = 200) -> Dict[str, Any]:
-    """
-    Fetch narrated worker events for a job from Supabase `job_events`.
-    since_ts: ISO timestamp string; if provided, only events with ts > since_ts are returned.
-    """
+    """Fetch job events for progress tracking."""
     sb = _sb()
-    q = sb.table("job_events").select("event_id,job_id,ts,level,message,payload").eq("job_id", job_id).order("ts", desc=False).limit(limit)
+    q = sb.table("job_events").select("*").eq("job_id", job_id).order("ts", desc=False).limit(limit)
     if since_ts:
         q = q.gt("ts", since_ts)
     res = q.execute()
-    rows = res.data or []
-    return {"job_id": job_id, "events": rows}
+    return {"job_id": job_id, "events": res.data or []}
 
-def download_result(result_path: str = "", bucket: str = "", path: str = "") -> Dict[str, Any]:
+
+def download_result(result_path: str, bucket: str = "") -> Dict[str, Any]:
+    """Download job result JSON."""
     sb = _sb()
-    if (not result_path) and path:
-        result_path = path
-    b = (bucket or st.secrets.get("RESULTS_BUCKET") or os.getenv("RESULTS_BUCKET") or "football-results").strip()
+    cfg = _get_storage_config()
+    b = bucket or cfg["results_bucket"]
     raw = sb.storage.from_(b).download(result_path)
     try:
         return {"ok": True, "bucket": b, "result_path": result_path, "result": json.loads(raw.decode("utf-8"))}
     except Exception:
         return {"ok": True, "bucket": b, "result_path": result_path, "raw_text": raw.decode("latin-1", errors="replace")}
 
-def wait_for_job(job_id: str, timeout_s: int = 300, poll_s: int = 5, auto_download: bool = True, timeout_seconds: Optional[int] = None) -> Dict[str, Any]:
-    if timeout_seconds is not None:
-        timeout_s = timeout_seconds
-    deadline = time.time() + int(timeout_s or 300)
-    poll = max(1, int(poll_s or 5))
-    last_job: Dict[str, Any] = {}
+
+def wait_for_job(job_id: str, timeout_s: int = 300, poll_s: int = 5, auto_download: bool = True) -> Dict[str, Any]:
+    """Wait for a job to complete."""
+    deadline = time.time() + int(timeout_s)
+    last_job = {}
     while time.time() < deadline:
         last_job = get_job(job_id)
         if last_job.get("error"):
@@ -521,97 +495,327 @@ def wait_for_job(job_id: str, timeout_s: int = 300, poll_s: int = 5, auto_downlo
             if status == "done" and auto_download and last_job.get("result_path"):
                 out["result"] = download_result(last_job["result_path"]).get("result")
             return out
-        time.sleep(poll)
+        time.sleep(poll_s)
     return {"status": "timeout", "job": last_job, "job_id": job_id}
 
+
 # ============================================================
-# PL lab starter
+# Job starters - Existing tools
 # ============================================================
 
 def start_pl_lab(
-    duration_minutes: int = 300,
-    pl_column: str = "BTTS PL",
+    pl_column: str = "BO 2.5 PL",
+    duration_minutes: int = 10,
     do_hyperopt: bool = False,
     hyperopt_iter: int = 12,
     enforcement: Optional[Dict[str, Any]] = None,
+    row_filters: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
+    """Start a PL Lab job - full ML pipeline with distillation."""
     ctx = get_research_context(limit_notes=10)
-    derived = (ctx.get("derived") or {})
-    ignored_columns = derived.get("ignored_columns") or []
-    outcome_columns = derived.get("outcome_columns") or []
-
-    ignored_feature_columns = derived.get("ignored_feature_columns") or ctx.get("ignored_feature_columns") or []
-    storage_bucket = (st.secrets.get("DATA_STORAGE_BUCKET") or os.getenv("DATA_STORAGE_BUCKET") or "football-data").strip()
-    storage_path = (st.secrets.get("DATA_STORAGE_PATH") or os.getenv("DATA_STORAGE_PATH") or "football_ai_NNIA.csv").strip()
-    results_bucket = (st.secrets.get("RESULTS_BUCKET") or os.getenv("RESULTS_BUCKET") or "football-results").strip()
+    derived = ctx.get("derived") or {}
+    cfg = _get_storage_config()
 
     params = {
-        "storage_bucket": storage_bucket,
-        "storage_path": storage_path,
-        "_results_bucket": results_bucket,
+        "storage_bucket": cfg["storage_bucket"],
+        "storage_path": cfg["storage_path"],
+        "_results_bucket": cfg["results_bucket"],
         "pl_column": pl_column,
-        "duration_minutes": int(duration_minutes),
         "duration_minutes": int(duration_minutes),
         "top_fracs": [0.05, 0.1, 0.2],
         "do_hyperopt": bool(do_hyperopt),
         "hyperopt_iter": int(hyperopt_iter),
-        "hyperopt_iter": int(hyperopt_iter),
-        "top_n": 12,
-        "ignored_columns": ignored_columns,
-        "outcome_columns": outcome_columns,
-        "ignored_feature_columns": ignored_feature_columns,
-        "enforcement": enforcement or {},
+        "ignored_columns": derived.get("ignored_columns") or [],
+        "outcome_columns": derived.get("outcome_columns") or [],
+        "ignored_feature_columns": derived.get("ignored_feature_columns") or [],
+        "row_filters": row_filters or [],
+        "enforcement": enforcement or ctx.get("gates") or {},
     }
     return submit_job("pl_lab", params)
 
+
+def start_subgroup_scan(
+    pl_column: str,
+    duration_minutes: int = 15,
+    group_cols: Optional[List[str]] = None,
+    max_groups: int = 50,
+    enforcement: Optional[Dict[str, Any]] = None,
+    row_filters: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Start a subgroup scan - find stable categorical buckets."""
+    ctx = get_research_context(limit_notes=10)
+    derived = ctx.get("derived") or {}
+    cfg = _get_storage_config()
+
+    params = {
+        "storage_bucket": cfg["storage_bucket"],
+        "storage_path": cfg["storage_path"],
+        "_results_bucket": cfg["results_bucket"],
+        "pl_column": pl_column,
+        "duration_minutes": int(duration_minutes),
+        "group_cols": group_cols or ["MODE", "MARKET", "LEAGUE", "BRACKET"],
+        "max_groups": int(max_groups),
+        "ignored_columns": derived.get("ignored_columns") or [],
+        "outcome_columns": derived.get("outcome_columns") or [],
+        "row_filters": row_filters or [],
+        "enforcement": enforcement or ctx.get("gates") or {},
+    }
+    return submit_job("subgroup_scan", params)
+
+
+def start_bracket_sweep(
+    pl_column: str,
+    duration_minutes: int = 15,
+    sweep_cols: Optional[List[str]] = None,
+    n_bins: int = 12,
+    max_results: int = 50,
+    enforcement: Optional[Dict[str, Any]] = None,
+    row_filters: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Start a bracket sweep - find profitable numeric ranges."""
+    ctx = get_research_context(limit_notes=10)
+    derived = ctx.get("derived") or {}
+    cfg = _get_storage_config()
+
+    params = {
+        "storage_bucket": cfg["storage_bucket"],
+        "storage_path": cfg["storage_path"],
+        "_results_bucket": cfg["results_bucket"],
+        "pl_column": pl_column,
+        "duration_minutes": int(duration_minutes),
+        "sweep_cols": sweep_cols or [],
+        "n_bins": int(n_bins),
+        "max_results": int(max_results),
+        "ignored_columns": derived.get("ignored_columns") or [],
+        "outcome_columns": derived.get("outcome_columns") or [],
+        "row_filters": row_filters or [],
+        "enforcement": enforcement or ctx.get("gates") or {},
+    }
+    return submit_job("bracket_sweep", params)
+
+
+def start_hyperopt_pl_lab(
+    pl_column: str,
+    duration_minutes: int = 30,
+    hyperopt_trials: int = 10,
+    top_fracs: Optional[List[float]] = None,
+    enforcement: Optional[Dict[str, Any]] = None,
+    row_filters: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Start hyperopt PL lab - Optuna-driven optimization."""
+    ctx = get_research_context(limit_notes=10)
+    derived = ctx.get("derived") or {}
+    cfg = _get_storage_config()
+
+    params = {
+        "storage_bucket": cfg["storage_bucket"],
+        "storage_path": cfg["storage_path"],
+        "_results_bucket": cfg["results_bucket"],
+        "pl_column": pl_column,
+        "duration_minutes": int(duration_minutes),
+        "hyperopt_trials": int(hyperopt_trials),
+        "top_fracs": top_fracs or [0.05, 0.1, 0.2],
+        "ignored_columns": derived.get("ignored_columns") or [],
+        "outcome_columns": derived.get("outcome_columns") or [],
+        "row_filters": row_filters or [],
+        "enforcement": enforcement or ctx.get("gates") or {},
+    }
+    return submit_job("hyperopt_pl_lab", params)
+
+
 # ============================================================
-# Chat sessions (Supabase Storage)
+# NEW Job starters - Agent exploration tools
+# ============================================================
+
+def start_query_data(
+    query_type: str = "aggregate",
+    filters: Optional[List[Dict[str, Any]]] = None,
+    group_by: Optional[List[str]] = None,
+    metrics: Optional[List[str]] = None,
+    pl_column: Optional[str] = None,
+    limit: int = 100,
+) -> Dict[str, Any]:
+    """
+    Start a data exploration query.
+    
+    query_type: "aggregate", "filter", "sample", "describe"
+    filters: List of filter conditions
+    group_by: Columns to group by
+    metrics: ["count", "sum:PL_COL", "mean:PL_COL"]
+    """
+    cfg = _get_storage_config()
+    
+    params = {
+        "storage_bucket": cfg["storage_bucket"],
+        "storage_path": cfg["storage_path"],
+        "_results_bucket": cfg["results_bucket"],
+        "query_type": query_type,
+        "filters": filters or [],
+        "group_by": group_by or [],
+        "metrics": metrics or ["count"],
+        "pl_column": pl_column,
+        "limit": int(limit),
+    }
+    return submit_job("query_data", params)
+
+
+def start_test_filter(
+    filters: List[Dict[str, Any]],
+    pl_column: str,
+    enforcement: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Quick hypothesis test - test a specific filter combination.
+    
+    filters: List of filter conditions like:
+        [{"col": "LEAGUE", "op": "in", "values": ["EPL"]},
+         {"col": "ACTUAL ODDS", "op": "between", "min": 1.8, "max": 2.5}]
+    """
+    ctx = get_research_context(limit_notes=5)
+    cfg = _get_storage_config()
+    
+    params = {
+        "storage_bucket": cfg["storage_bucket"],
+        "storage_path": cfg["storage_path"],
+        "_results_bucket": cfg["results_bucket"],
+        "filters": filters,
+        "pl_column": pl_column,
+        "enforcement": enforcement or ctx.get("gates") or {},
+    }
+    return submit_job("test_filter", params)
+
+
+def start_regime_check(
+    filters: List[Dict[str, Any]],
+    pl_column: str,
+    split_by: str = "month",
+) -> Dict[str, Any]:
+    """
+    Check time-period stability of a filter combination.
+    
+    split_by: "week", "month", "quarter"
+    """
+    cfg = _get_storage_config()
+    
+    params = {
+        "storage_bucket": cfg["storage_bucket"],
+        "storage_path": cfg["storage_path"],
+        "_results_bucket": cfg["results_bucket"],
+        "filters": filters,
+        "pl_column": pl_column,
+        "split_by": split_by,
+    }
+    return submit_job("regime_check", params)
+
+
+# ============================================================
+# Convenience aliases
+# ============================================================
+
+def subgroup_scan(pl_column: str, **kwargs) -> Dict[str, Any]:
+    """Alias for start_subgroup_scan."""
+    return start_subgroup_scan(pl_column=pl_column, **kwargs)
+
+
+def bracket_sweep(pl_column: str, **kwargs) -> Dict[str, Any]:
+    """Alias for start_bracket_sweep."""
+    return start_bracket_sweep(pl_column=pl_column, **kwargs)
+
+
+def hyperopt_pl_lab(pl_column: str, **kwargs) -> Dict[str, Any]:
+    """Alias for start_hyperopt_pl_lab."""
+    return start_hyperopt_pl_lab(pl_column=pl_column, **kwargs)
+
+
+def query_data(**kwargs) -> Dict[str, Any]:
+    """Alias for start_query_data."""
+    return start_query_data(**kwargs)
+
+
+def test_filter(filters: List[Dict], pl_column: str, **kwargs) -> Dict[str, Any]:
+    """Alias for start_test_filter."""
+    return start_test_filter(filters=filters, pl_column=pl_column, **kwargs)
+
+
+def regime_check(filters: List[Dict], pl_column: str, **kwargs) -> Dict[str, Any]:
+    """Alias for start_regime_check."""
+    return start_regime_check(filters=filters, pl_column=pl_column, **kwargs)
+
+
+# ============================================================
+# Data loading (for quick local checks)
+# ============================================================
+
+def load_data_basic(storage_bucket: str = "", storage_path: str = "") -> Dict[str, Any]:
+    """Load basic data info."""
+    df = _load_csv(storage_bucket or None, storage_path or None)
+    return {"rows": int(df.shape[0]), "cols": int(df.shape[1]), "head": df.head(5).to_dict(orient="records")}
+
+
+def list_columns(storage_bucket: str = "", storage_path: str = "") -> Dict[str, Any]:
+    """List all columns in the dataset."""
+    df = _load_csv(storage_bucket or None, storage_path or None)
+    return {"columns": df.columns.tolist(), "n": int(len(df.columns))}
+
+
+# ============================================================
+# Chat session management
 # ============================================================
 
 def _chat_bucket() -> str:
     return (st.secrets.get("CHAT_BUCKET") or os.getenv("CHAT_BUCKET") or "football-chats").strip()
 
+
 def _chat_index_path() -> str:
     return "sessions/index.json"
 
+
 def _load_chat_index(sb) -> Dict[str, Any]:
-    bucket = _chat_bucket()
     try:
-        raw = sb.storage.from_(bucket).download(_chat_index_path())
+        raw = sb.storage.from_(_chat_bucket()).download(_chat_index_path())
         return json.loads(raw.decode("utf-8"))
     except Exception:
         return {"sessions": []}
 
+
 def _save_chat_index(sb, index: Dict[str, Any]) -> None:
-    bucket = _chat_bucket()
     payload = json.dumps(index, ensure_ascii=False, indent=2).encode("utf-8")
-    sb.storage.from_(bucket).upload(
+    sb.storage.from_(_chat_bucket()).upload(
         path=_chat_index_path(),
         file=payload,
         file_options={"content-type": "application/json", "upsert": "true"},
     )
 
+
 def list_chats(limit: int = 200) -> Dict[str, Any]:
+    """List saved chat sessions."""
     sb = _sb()
-    bucket = _chat_bucket()
     idx = _load_chat_index(sb)
     sessions = idx.get("sessions") or []
-    sessions = sessions[-int(limit):] if limit else sessions[-200:]
-    return {"ok": True, "bucket": bucket, "sessions": sessions}
+    sessions = sessions[-int(limit):]
+    return {"ok": True, "bucket": _chat_bucket(), "sessions": sessions}
+
 
 def save_chat(session_id: str, messages: List[Dict[str, Any]], title: str = "") -> Dict[str, Any]:
+    """Save a chat session."""
     sb = _sb()
-    bucket = _chat_bucket()
     path = f"sessions/{session_id}.json"
-    payload = json.dumps({"session_id": session_id, "title": title or "", "messages": messages, "saved_at": _now_iso()}, ensure_ascii=False, indent=2).encode("utf-8")
+    payload = json.dumps({
+        "session_id": session_id,
+        "title": title or "",
+        "messages": messages,
+        "saved_at": _now_iso()
+    }, ensure_ascii=False, indent=2).encode("utf-8")
+    
     try:
-        sb.storage.from_(bucket).upload(path=path, file=payload, file_options={"content-type": "application/json", "upsert": "true"})
-    except StorageException as e:
-        return {"ok": False, "error": f"Storage upload failed. Create bucket '{bucket}' in Supabase Storage. Details: {e}", "bucket": bucket, "path": path}
+        sb.storage.from_(_chat_bucket()).upload(
+            path=path,
+            file=payload,
+            file_options={"content-type": "application/json", "upsert": "true"}
+        )
     except Exception as e:
-        return {"ok": False, "error": f"save_chat failed: {e}", "bucket": bucket, "path": path}
+        return {"ok": False, "error": f"save_chat failed: {e}"}
 
-    # update index best-effort
     try:
         idx = _load_chat_index(sb)
         sessions = idx.get("sessions") or []
@@ -627,45 +831,28 @@ def save_chat(session_id: str, messages: List[Dict[str, Any]], title: str = "") 
     except Exception:
         pass
 
-    return {"ok": True, "bucket": bucket, "path": path}
+    return {"ok": True, "bucket": _chat_bucket(), "path": path}
+
 
 def load_chat(session_id: str) -> Dict[str, Any]:
+    """Load a chat session."""
     sb = _sb()
-    bucket = _chat_bucket()
     path = f"sessions/{session_id}.json"
     try:
-        raw = sb.storage.from_(bucket).download(path)
-        return {"ok": True, "bucket": bucket, "path": path, "data": json.loads(raw.decode("utf-8"))}
+        raw = sb.storage.from_(_chat_bucket()).download(path)
+        return {"ok": True, "data": json.loads(raw.decode("utf-8"))}
     except Exception:
-        return {"ok": False, "bucket": bucket, "path": path, "data": {}}
+        return {"ok": False, "data": {}}
 
-def rename_chat(session_id: str, title: str) -> Dict[str, Any]:
-    sb = _sb()
-    idx = _load_chat_index(sb)
-    sessions = idx.get("sessions") or []
-    found = False
-    for s in sessions:
-        if s.get("session_id") == session_id:
-            s["title"] = title
-            s["saved_at"] = _now_iso()
-            found = True
-            break
-    if not found:
-        sessions.append({"session_id": session_id, "title": title, "saved_at": _now_iso()})
-    idx["sessions"] = sessions
-    try:
-        _save_chat_index(sb, idx)
-    except Exception:
-        pass
-    return {"ok": True, "session_id": session_id, "title": title}
 
 def delete_chat(session_id: str) -> Dict[str, Any]:
+    """Delete a chat session."""
     sb = _sb()
-    bucket = _chat_bucket()
     try:
-        sb.storage.from_(bucket).remove([f"sessions/{session_id}.json"])
+        sb.storage.from_(_chat_bucket()).remove([f"sessions/{session_id}.json"])
     except Exception:
         pass
+    
     idx = _load_chat_index(sb)
     sessions = idx.get("sessions") or []
     idx["sessions"] = [s for s in sessions if s.get("session_id") != session_id]
@@ -673,39 +860,55 @@ def delete_chat(session_id: str) -> Dict[str, Any]:
         _save_chat_index(sb, idx)
     except Exception:
         pass
+    
     return {"ok": True, "deleted": True, "session_id": session_id}
 
-# -------------------------
-# Alias tool entrypoints
-# -------------------------
-def subgroup_scan(pl_column, top_n=12, duration_minutes=10, enforcement=None, row_filters=None):
-    """Alias for start_subgroup_scan (some prompts will call subgroup_scan)."""
-    return start_subgroup_scan(
-        pl_column=pl_column,
-        top_n=top_n,
-        duration_minutes=duration_minutes,
-        enforcement=enforcement,
-        row_filters=row_filters,
+
+# ============================================================
+# Action logging for agent memory
+# ============================================================
+
+def log_agent_action(
+    action_type: str,
+    params: Dict[str, Any],
+    result_summary: Dict[str, Any],
+    tags: str = "",
+) -> Dict[str, Any]:
+    """
+    Log an agent action to research_memory for learning.
+    
+    This helps the agent remember what it tried and what worked/didn't.
+    """
+    note = {
+        "ts_utc": _now_iso(),
+        "action_type": action_type,
+        "params": params,
+        "result": result_summary,
+    }
+    
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+    tag_list.append(action_type)
+    
+    return append_research_note(
+        note=json.dumps(note, ensure_ascii=False),
+        tags=",".join(tag_list)
     )
 
-def bracket_sweep(pl_column, sweep_feature, top_n=12, duration_minutes=15, enforcement=None, row_filters=None):
-    """Alias for start_bracket_sweep (some prompts will call bracket_sweep)."""
-    return start_bracket_sweep(
-        pl_column=pl_column,
-        sweep_feature=sweep_feature,
-        top_n=top_n,
-        duration_minutes=duration_minutes,
-        enforcement=enforcement,
-        row_filters=row_filters,
-    )
 
-def hyperopt_pl_lab(pl_column, top_n=12, duration_minutes=20, enforcement=None, row_filters=None, hyperopt_iter=25):
-    """Alias for start_hyperopt_pl_lab (some prompts will call hyperopt_pl_lab)."""
-    return start_hyperopt_pl_lab(
-        pl_column=pl_column,
-        top_n=top_n,
-        duration_minutes=duration_minutes,
-        enforcement=enforcement,
-        row_filters=row_filters,
-        hyperopt_iter=hyperopt_iter,
-    )
+def update_recent_actions(action: Dict[str, Any]) -> Dict[str, Any]:
+    """Update the recent_actions list in research_state."""
+    state = get_research_state().get("data") or {}
+    
+    try:
+        actions_json = state.get("recent_actions", "[]")
+        recent = json.loads(actions_json) if isinstance(actions_json, str) else actions_json
+    except Exception:
+        recent = []
+    
+    if not isinstance(recent, list):
+        recent = []
+    
+    recent.append(action)
+    recent = recent[-50:]  # Keep last 50
+    
+    return set_research_state("recent_actions", json.dumps(recent))
