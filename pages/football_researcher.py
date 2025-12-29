@@ -1442,14 +1442,20 @@ def _autopilot_tick():
         chained = set()
         st.session_state["_chained_from_job_ids"] = chained
 
-    # FIX: Add task type check - only auto-chain for pl_lab jobs
+    # Get task type from job
     job_task_type = (job.get("task_type") or "").lower().strip()
+    
+    # DEBUG: Log all condition values to help diagnose chaining issues
+    autodiag_flag = st.session_state.get("agent_session_autodiag_on_no_rules", True)
+    already_chained = job_id in st.session_state.get("_chained_from_job_ids", set())
+    
+    _append("assistant", f"🔍 **Debug chaining check**: task_type=`{job_task_type}`, has_passing_rules=`{has_passing_rules}`, autodiag_flag=`{autodiag_flag}`, already_chained=`{already_chained}`")
 
     if (
-        job_task_type == "pl_lab"  # FIX: Only chain from pl_lab jobs
+        job_task_type == "pl_lab"
         and (not has_passing_rules)
-        and st.session_state.get("agent_session_autodiag_on_no_rules", True)
-        and job_id not in st.session_state.get("_chained_from_job_ids", set())
+        and autodiag_flag
+        and (not already_chained)
     ):
         # Mark as chained BEFORE submitting to avoid duplicates on reruns.
         st.session_state["_chained_from_job_ids"].add(job_id)
