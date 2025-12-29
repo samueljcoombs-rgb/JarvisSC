@@ -376,14 +376,20 @@ def run_agent():
     with st.status("📖 Loading Bible...", expanded=True) as status:
         bible = _load_bible()
         st.markdown(_format_bible(bible))
-        with st.expander("📚 Full Bible Context", expanded=False):
-            st.markdown("**Research Rules:**")
-            st.code(_safe_json(bible.get("research_rules", []), 1500), language="json")
-            st.markdown("**Column Definitions:**")
-            st.code(_safe_json(bible.get("column_definitions", []), 1500), language="json")
-            st.markdown("**Recent Notes:**")
-            st.code(_safe_json(bible.get("research_notes", [])[:10], 1500), language="json")
         status.update(label="📖 Bible loaded", state="complete")
+    
+    # Show full Bible context outside status
+    with st.expander("📚 Full Bible Context", expanded=False):
+        st.markdown("**Research Rules:**")
+        rules = bible.get("research_rules", [])
+        st.code(_safe_json(rules if rules else "No rules loaded", 1500), language="json")
+        st.markdown("**Column Definitions:**")
+        cols = bible.get("column_definitions", [])
+        st.code(_safe_json(cols if cols else "No column defs", 1500), language="json")
+        st.markdown("**Recent Notes:**")
+        notes = bible.get("research_notes", [])
+        st.code(_safe_json(notes[:10] if notes else "No notes yet", 1500), language="json")
+    
     _append("assistant", _format_bible(bible))
     
     # Exploration
