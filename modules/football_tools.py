@@ -743,6 +743,147 @@ def regime_check(filters: List[Dict], pl_column: str, **kwargs) -> Dict[str, Any
 
 
 # ============================================================
+# NEW v4: Additional analysis tools
+# ============================================================
+
+def start_combination_scan(
+    pl_column: str,
+    base_filters: Optional[List[Dict]] = None,
+    scan_cols: Optional[List[str]] = None,
+    max_combinations: int = 50,
+    enforcement: Optional[Dict] = None,
+    **kwargs
+) -> Dict[str, Any]:
+    """
+    Start a combination scan job to find synergistic filter combinations.
+    
+    Args:
+        pl_column: Target P&L column
+        base_filters: Starting filters to combine with
+        scan_cols: Columns to scan for additional filters
+        max_combinations: Max combinations to test
+        enforcement: Gate parameters
+    """
+    cfg = _get_storage_config()
+    params = {
+        "storage_bucket": kwargs.get("storage_bucket") or cfg["bucket"],
+        "storage_path": kwargs.get("storage_path") or cfg["path"],
+        "_results_bucket": kwargs.get("results_bucket") or cfg["results_bucket"],
+        "pl_column": pl_column,
+        "base_filters": base_filters or [],
+        "scan_cols": scan_cols or ["MODE", "MARKET", "DRIFT IN / OUT", "LEAGUE"],
+        "max_combinations": max_combinations,
+        "enforcement": enforcement or {},
+    }
+    return submit_job("combination_scan", params)
+
+
+def start_forward_walk(
+    pl_column: str,
+    filters: Optional[List[Dict]] = None,
+    n_windows: int = 6,
+    train_months: int = 4,
+    test_months: int = 2,
+    **kwargs
+) -> Dict[str, Any]:
+    """
+    Start a walk-forward validation job.
+    
+    Args:
+        pl_column: Target P&L column
+        filters: Filter criteria to test
+        n_windows: Number of walk-forward windows
+        train_months: Months per training window
+        test_months: Months per test window
+    """
+    cfg = _get_storage_config()
+    params = {
+        "storage_bucket": kwargs.get("storage_bucket") or cfg["bucket"],
+        "storage_path": kwargs.get("storage_path") or cfg["path"],
+        "_results_bucket": kwargs.get("results_bucket") or cfg["results_bucket"],
+        "pl_column": pl_column,
+        "filters": filters or [],
+        "n_windows": n_windows,
+        "train_months": train_months,
+        "test_months": test_months,
+    }
+    return submit_job("forward_walk", params)
+
+
+def start_monte_carlo_sim(
+    pl_column: str,
+    filters: Optional[List[Dict]] = None,
+    n_simulations: int = 1000,
+    sample_frac: float = 0.7,
+    **kwargs
+) -> Dict[str, Any]:
+    """
+    Start a Monte Carlo simulation for confidence intervals.
+    
+    Args:
+        pl_column: Target P&L column
+        filters: Filter criteria
+        n_simulations: Number of bootstrap samples
+        sample_frac: Fraction of data to sample each iteration
+    """
+    cfg = _get_storage_config()
+    params = {
+        "storage_bucket": kwargs.get("storage_bucket") or cfg["bucket"],
+        "storage_path": kwargs.get("storage_path") or cfg["path"],
+        "_results_bucket": kwargs.get("results_bucket") or cfg["results_bucket"],
+        "pl_column": pl_column,
+        "filters": filters or [],
+        "n_simulations": n_simulations,
+        "sample_frac": sample_frac,
+    }
+    return submit_job("monte_carlo_sim", params)
+
+
+def start_correlation_check(
+    filters: Optional[List[Dict]] = None,
+    outcome_columns: Optional[List[str]] = None,
+    **kwargs
+) -> Dict[str, Any]:
+    """
+    Start a correlation check to detect potential data leakage.
+    
+    Args:
+        filters: Filter criteria to check
+        outcome_columns: Known outcome columns to check against
+    """
+    cfg = _get_storage_config()
+    params = {
+        "storage_bucket": kwargs.get("storage_bucket") or cfg["bucket"],
+        "storage_path": kwargs.get("storage_path") or cfg["path"],
+        "_results_bucket": kwargs.get("results_bucket") or cfg["results_bucket"],
+        "filters": filters or [],
+        "outcome_columns": outcome_columns or [],
+    }
+    return submit_job("correlation_check", params)
+
+
+# Aliases for convenience
+def combination_scan(pl_column: str, **kwargs) -> Dict[str, Any]:
+    """Alias for start_combination_scan."""
+    return start_combination_scan(pl_column=pl_column, **kwargs)
+
+
+def forward_walk(pl_column: str, filters: List[Dict], **kwargs) -> Dict[str, Any]:
+    """Alias for start_forward_walk."""
+    return start_forward_walk(pl_column=pl_column, filters=filters, **kwargs)
+
+
+def monte_carlo_sim(pl_column: str, filters: List[Dict], **kwargs) -> Dict[str, Any]:
+    """Alias for start_monte_carlo_sim."""
+    return start_monte_carlo_sim(pl_column=pl_column, filters=filters, **kwargs)
+
+
+def correlation_check(filters: List[Dict], **kwargs) -> Dict[str, Any]:
+    """Alias for start_correlation_check."""
+    return start_correlation_check(filters=filters, **kwargs)
+
+
+# ============================================================
 # Data loading (for quick local checks)
 # ============================================================
 
