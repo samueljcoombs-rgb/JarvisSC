@@ -1342,9 +1342,9 @@ def _autopilot_tick():
         st.session_state.active_job_id = ""
         return
 
-    # Mark as handled so we don't process it repeatedly on reruns.
-    # FIX: Use direct assignment instead of .get().add() to ensure it persists
-    st.session_state["_handled_job_ids"].add(job_id)
+    # NOTE: We intentionally do NOT add to _handled_job_ids here yet.
+    # We must complete all processing including auto-chaining BEFORE marking as handled,
+    # otherwise Streamlit reruns will hit the early return before chaining executes.
 
     _append("assistant", _render_distilled_top(result_obj, top_n=3))
 
@@ -1445,11 +1445,9 @@ def _autopilot_tick():
     # Get task type from job
     job_task_type = (job.get("task_type") or "").lower().strip()
     
-    # DEBUG: Log all condition values to help diagnose chaining issues
+    # Check all conditions for auto-chaining
     autodiag_flag = st.session_state.get("agent_session_autodiag_on_no_rules", True)
     already_chained = job_id in st.session_state.get("_chained_from_job_ids", set())
-    
-    _append("assistant", f"🔍 **Debug chaining check**: task_type=`{job_task_type}`, has_passing_rules=`{has_passing_rules}`, autodiag_flag=`{autodiag_flag}`, already_chained=`{already_chained}`")
 
     if (
         job_task_type == "pl_lab"
@@ -1531,6 +1529,8 @@ def _autopilot_tick():
         new_job_id = (submitted or {}).get("job_id") if isinstance(submitted, dict) else None
 
         if new_job_id:
+            # Mark original job as handled AFTER successful chaining
+            st.session_state["_handled_job_ids"].add(job_id)
             st.session_state.active_job_id = new_job_id
             st.session_state.active_job_pl_col = merged.get("pl_column")
             st.session_state.active_job_bucket = merged.get("_results_bucket") or DEFAULT_RESULTS_BUCKET
@@ -1540,6 +1540,8 @@ def _autopilot_tick():
             _append("assistant", f"🚀 Started next job: **{auto_task}** for **{merged.get('pl_column')}**. Job ID: `{new_job_id}`")
             return
         else:
+            # Mark as handled even if chaining failed - we tried
+            st.session_state["_handled_job_ids"].add(job_id)
             _append("assistant", f"⚠️ Could not submit diagnostic job. Response: {submitted}")
 
     # ------------------------------------------------------------
@@ -1660,6 +1662,7 @@ def _autopilot_tick():
         new_job_id = (submitted or {}).get("job_id") if isinstance(submitted, dict) else None
         if new_job_id:
             st.session_state["_chained_from_job_ids"].add(job_id)
+            st.session_state["_handled_job_ids"].add(job_id)  # Mark as handled after chaining
             st.session_state.active_job_id = new_job_id
             st.session_state.active_job_pl_col = merged.get("pl_column")
             st.session_state["active_job_last_event_ts"] = ""
@@ -1667,12 +1670,14 @@ def _autopilot_tick():
             st.session_state.active_job_last_update_ts = 0.0
             _append("assistant", f"🚀 Started next job: {next_task} for **{merged.get('pl_column')}**. Job ID: `{new_job_id}`")
         else:
+            st.session_state["_handled_job_ids"].add(job_id)  # Mark as handled even on failure
             _append("assistant", "⚠️ Could not submit next job. Stopping agent.")
             st.session_state["agent_session_active"] = False
             st.session_state.active_job_id = ""
         return
 
-    # Clear active job (no agent continuation)
+    # No chaining happened - mark as handled and clear active job
+    st.session_state["_handled_job_ids"].add(job_id)
     st.session_state.active_job_id = ""
 
 # ============================================================
