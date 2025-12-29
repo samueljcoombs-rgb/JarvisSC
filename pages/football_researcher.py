@@ -1443,7 +1443,7 @@ def _autopilot_tick():
 
     if (
         (not has_passing_rules)
-        and st.session_state.get("agent_session_autodiag_on_no_rules", False)
+        and st.session_state.get("agent_session_autodiag_on_no_rules", True)
         and job_id not in st.session_state.get("_chained_from_job_ids", set())
     ):
         # Mark as chained BEFORE submitting to avoid duplicates on reruns.
