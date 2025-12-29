@@ -1,3 +1,13 @@
+"""
+Football Researcher v2 - Autonomous Agent Edition
+
+A truly autonomous research agent that:
+1. Reads and internalizes the Bible before starting
+2. Forms and tests hypotheses
+3. Learns from failures
+4. Outputs explicit strategy criteria or explains why no edge exists
+"""
+
 from __future__ import annotations
 
 import os
@@ -5,1879 +15,493 @@ import json
 import uuid
 import re
 import time
-import inspect
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional
 
 import streamlit as st
 
-# Optional dependency for non-blocking auto refresh
 try:
     from streamlit_autorefresh import st_autorefresh
 except Exception:
     st_autorefresh = None
 
-from openai import OpenAI, BadRequestError
-
-from modules import football_tools as functions
-import difflib
+from openai import OpenAI
+from modules import football_tools as tools
 
 # ============================================================
-# OpenAI client + model
+# Configuration
 # ============================================================
 
 def _init_client() -> OpenAI:
     api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY")
     if not api_key:
-        st.error("Missing OPENAI_API_KEY in Streamlit secrets.")
+        st.error("Missing OPENAI_API_KEY")
         st.stop()
     return OpenAI(api_key=api_key)
 
 client = _init_client()
+MODEL = os.getenv("PREFERRED_OPENAI_MODEL") or st.secrets.get("PREFERRED_OPENAI_MODEL", "gpt-4o")
 
-PREFERRED = (os.getenv("PREFERRED_OPENAI_MODEL") or st.secrets.get("PREFERRED_OPENAI_MODEL") or "").strip()
-MODEL = PREFERRED or "gpt-5.1"
-
-DEFAULT_STORAGE_BUCKET = os.getenv("DATA_STORAGE_BUCKET") or st.secrets.get("DATA_STORAGE_BUCKET", "football-data")
-DEFAULT_STORAGE_PATH = os.getenv("DATA_STORAGE_PATH") or st.secrets.get("DATA_STORAGE_PATH", "football_ai_NNIA.csv")
-DEFAULT_RESULTS_BUCKET = os.getenv("RESULTS_BUCKET") or st.secrets.get("RESULTS_BUCKET", "football-results")
-
-MAX_MESSAGES_TO_KEEP = int(os.getenv("MAX_CHAT_MESSAGES") or st.secrets.get("MAX_CHAT_MESSAGES", 220))
+MAX_ITERATIONS = 8
+MAX_MESSAGES = 150
 
 # ============================================================
-# Autopilot diagnostics helpers
+# Session state
 # ============================================================
 
-def _safe_json_load(s: str, default):
-    try:
-        return json.loads(s)
-    except Exception:
-        return default
-
-
-def _summarize_near_misses(near_misses: list, max_items: int = 8) -> dict:
-    """Summarise why candidate rules failed so the agent can pick the next experiment."""
-    if not near_misses:
-        return {"count": 0, "by_reason": {}, "top": []}
-
-    by_reason = {}
-    for nm in near_misses:
-        reason = (nm or {}).get("reason", "unknown")
-        by_reason[reason] = by_reason.get(reason, 0) + 1
-
-    top = []
-    for nm in near_misses[:max_items]:
-        spec = (nm or {}).get("rule", [])
-        gate = (nm or {}).get("gate", {})
-        top.append({"rule": spec, "reason": (nm or {}).get("reason"), "gate": gate})
-
-    return {"count": len(near_misses), "by_reason": by_reason, "top": top}
-
-
-def _record_action_in_state(ctx: dict, action: dict, result_summary: dict) -> None:
-    """Persist a compact action log into research_state (key/value sheet) to avoid repetition."""
-    rs = (ctx or {}).get("research_state") or {}
-    key = "agent_recent_actions_json"
-    hist = _safe_json_load(str(rs.get(key, "[]")), [])
-    if not isinstance(hist, list):
-        hist = []
-
-    entry = {
-        "ts": datetime.utcnow().isoformat(),
-        "action": action,
-        "result": result_summary,
+def _init_state():
+    defaults = {
+        "messages": [],
+        "session_id": str(uuid.uuid4()),
+        "bible": None,
+        "agent_active": False,
+        "agent_iteration": 0,
+        "agent_findings": [],
+        "current_job_id": None,
+        "target_pl_column": "BO 2.5 PL",
     }
-    hist.append(entry)
-    # Keep last 50
-    hist = hist[-50:]
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
 
-    try:
-        _run_tool("set_research_state", {"key": key, "value": json.dumps(hist)})
-    except Exception:
-        # Don't hard-fail UI if the sheet write is temporarily unavailable
-        pass
-
-# ============================================================
-# Tool runner (signature-safe, never hard-crashes on kwargs drift)
-# ============================================================
-
-
-
-
-
-
-def _run_tool(name: str, args: Optional[Dict[str, Any]] = None) -> Any:
-    """Execute a tool function.
-
-    We do NOT crash the app on unknown tool names.
-
-    In real runs, the model may occasionally reference a tool name that isn't
-    present (e.g. shorthand like "bracket_sweep" instead of
-    "start_bracket_sweep").
-
-    Returning a structured error keeps the chat usable and makes the issue
-    visible to you in the UI.
-    """
-    args = args or {}
-
-    aliases = {
-        # Allow shorthand tool names (LLM sometimes uses these)
-        "bracket_sweep": "start_bracket_sweep",
-        "subgroup_scan": "start_subgroup_scan",
-        "hyperopt_pl_lab": "start_hyperopt_pl_lab",
-    }
-
-    resolved_name = aliases.get(name, name)
-    fn = getattr(functions, resolved_name, None)
-
-    if not callable(fn):
-        available = sorted(
-            [
-                n
-                for n in dir(functions)
-                if not n.startswith("_") and callable(getattr(functions, n, None))
-            ]
-        )
-        return {
-            "ok": False,
-            "error": f"Unknown tool: {name}",
-            "resolved_name": resolved_name,
-            "available_tools": available,
-        }
-
-    try:
-        return fn(**args)
-    except Exception as e:
-        return {
-            "ok": False,
-            "error": f"Tool {resolved_name} failed: {type(e).__name__}: {e}",
-        }
-
-# =================================
-# Tools schema
-
-# ============================================================
-# Tools schema
-# ============================================================
-
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_research_context",
-            "description": "Fetch the current governance/bible context, column definitions, and recent notes from Google Sheets and the app state.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "limit_notes": {"type": "integer", "default": 20}
-                }
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "append_research_note",
-            "description": "Append a research note to the research_memory tab in Google Sheets.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "note": {"type": "string"}
-                },
-                "required": ["note"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "set_research_state",
-            "description": "Set key-value pairs in the Google Sheets research_state tab (used for defaults and gates).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "updates": {
-                        "type": "object",
-                        "additionalProperties": True
-                    }
-                },
-                "required": ["updates"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "submit_job",
-            "description": "Submit a raw job to the Supabase jobs queue (advanced; prefer start_* helpers).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "task_type": {"type": "string"},
-                    "params": {"type": "object"}
-                },
-                "required": ["task_type", "params"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "start_pl_lab",
-            "description": "Queue a PL Lab job that trains models and distills explicit filter rules.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pl_column": {"type": "string"},
-                    "duration_minutes": {"type": "integer", "default": 30},
-                    "do_hyperopt": {"type": "boolean", "default": False},
-                    "hyperopt_iter": {"type": "integer", "default": 0},
-                    "enforcement": {"type": "object"},
-                    "row_filters": {"type": "array", "items": {"type": "object"}}
-                },
-                "required": ["pl_column"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "start_subgroup_scan",
-            "description": "Queue a subgroup scan job to find profitable stable categorical buckets.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pl_column": {"type": "string"},
-                    "duration_minutes": {"type": "integer", "default": 30},
-                    "group_cols": {"type": "array", "items": {"type": "string"}},
-                    "max_groups": {"type": "integer", "default": 50},
-                    "enforcement": {"type": "object"},
-                    "row_filters": {"type": "array", "items": {"type": "object"}}
-                },
-                "required": ["pl_column"]
-            }
-        }
-    },
-        {
-        "type": "function",
-        "function": {
-            "name": "subgroup_scan",
-            "description": "Run a subgroup scan (alias for start_subgroup_scan).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pl_column": {"type": "string"},
-                    "duration_minutes": {"type": "integer", "default": 30},
-                    "group_cols": {"type": "array", "items": {"type": "string"}},
-                    "max_groups": {"type": "integer", "default": 50},
-                    "enforcement": {"type": "object"},
-                    "row_filters": {"type": "array", "items": {"type": "object"}}
-                },
-                "required": ["pl_column"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "start_bracket_sweep",
-            "description": "Queue a bracket sweep job to search numeric quantile brackets for stable profit.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pl_column": {"type": "string"},
-                    "duration_minutes": {"type": "integer", "default": 30},
-                    "sweep_cols": {"type": "array", "items": {"type": "string"}},
-                    "n_bins": {"type": "integer", "default": 12},
-                    "max_results": {"type": "integer", "default": 50},
-                    "enforcement": {"type": "object"},
-                    "row_filters": {"type": "array", "items": {"type": "object"}}
-                },
-                "required": ["pl_column"]
-            }
-        }
-    },
-        {
-        "type": "function",
-        "function": {
-            "name": "bracket_sweep",
-            "description": "Run a bracket sweep (alias for start_bracket_sweep).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pl_column": {"type": "string"},
-                    "duration_minutes": {"type": "integer", "default": 30},
-                    "sweep_cols": {"type": "array", "items": {"type": "string"}},
-                    "n_bins": {"type": "integer", "default": 12},
-                    "max_results": {"type": "integer", "default": 50},
-                    "enforcement": {"type": "object"},
-                    "row_filters": {"type": "array", "items": {"type": "object"}}
-                },
-                "required": ["pl_column"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "start_hyperopt_pl_lab",
-            "description": "Queue an Optuna-driven hyperopt job (val-only tuning) then distill to rules.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pl_column": {"type": "string"},
-                    "duration_minutes": {"type": "integer", "default": 120},
-                    "hyperopt_trials": {"type": "integer", "default": 30},
-                    "top_fracs": {"type": "array", "items": {"type": "number"}},
-                    "enforcement": {"type": "object"},
-                    "row_filters": {"type": "array", "items": {"type": "object"}}
-                },
-                "required": ["pl_column"]
-            }
-        }
-    },
-        {
-        "type": "function",
-        "function": {
-            "name": "hyperopt_pl_lab",
-            "description": "Run hyperopt PL lab (alias for start_hyperopt_pl_lab).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pl_column": {"type": "string"},
-                    "duration_minutes": {"type": "integer", "default": 120},
-                    "hyperopt_trials": {"type": "integer", "default": 30},
-                    "top_fracs": {"type": "array", "items": {"type": "number"}},
-                    "enforcement": {"type": "object"},
-                    "row_filters": {"type": "array", "items": {"type": "object"}}
-                },
-                "required": ["pl_column"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_job",
-            "description": "Fetch a job row from Supabase by job_id.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "job_id": {"type": "string"}
-                },
-                "required": ["job_id"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "wait_for_job",
-            "description": "Poll Supabase until a job is done/failed, then return the final job row.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "job_id": {"type": "string"},
-                    "timeout_seconds": {"type": "integer", "default": 600}
-                },
-                "required": ["job_id"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "download_result",
-            "description": "Download a raw result file (JSON) from Supabase Storage given a bucket and path.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "bucket": {"type": "string"},
-                    "path": {"type": "string"}
-                },
-                "required": ["bucket", "path"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_result_json",
-            "description": "Download and parse the result JSON for a given job_id.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "job_id": {"type": "string"}
-                },
-                "required": ["job_id"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_job_events",
-            "description": "Fetch latest job events for a job_id.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "job_id": {"type": "string"},
-                    "limit": {"type": "integer", "default": 100}
-                },
-                "required": ["job_id"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "save_chat",
-            "description": "Save the current chat session to Supabase (or local store) for persistence.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "chat_id": {"type": "string"},
-                    "messages": {"type": "array", "items": {"type": "object"}}
-                },
-                "required": ["chat_id", "messages"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "load_chat",
-            "description": "Load a chat session by chat_id.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "chat_id": {"type": "string"}
-                },
-                "required": ["chat_id"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_chats",
-            "description": "List recent chat sessions.",
-            "parameters": {"type": "object", "properties": {}}
-        }
-    }
-]
-
-
-SYSTEM_PROMPT = """You are FootballResearcher - an autonomous strategy R&D agent.
-
-NON-NEGOTIABLE SOURCE OF TRUTH
-- You MUST use Google Sheet tabs via get_research_context():
-  dataset_overview, research_rules, column_definitions, evaluation_framework, research_state, research_memory.
-- Treat research_rules as ENFORCEMENT rules, not suggestions.
-
-MISSION / PURPOSE
-- Discover strategies that are REPEATABLE on future matches.
-- Avoid overfitting and leakage. You are judged on out-of-sample stability and risk:
-  - P&L, ROI
-  - max drawdown and longest losing streak (in POINTS)
-- Output strategies as explicit filters:
-  - Numeric ranges + categorical constraints
-  - With minimum sample sizes on train/val/test (and unique IDs where possible)
-- You MUST separate discovery (train/val) from final confirmation (test).
-- Narrate what you are doing, and keep the user updated with job status and interpretation.
-"""
-
-# ============================================================
-# Streamlit UI setup
-# ============================================================
-
-st.set_page_config(page_title="Football Researcher", layout="wide")
-st.title("⚽ Football Researcher")
-
-# ============================================================
-# Session management + persistence
-# ============================================================
-
-def _sid() -> str:
-    return st.session_state.session_id
-
-def _new_session_id() -> str:
-    return str(uuid.uuid4())
-
-def _set_session(sid: str):
-    st.session_state.session_id = sid
-    st.query_params["sid"] = sid
-
-def _init_messages_if_needed():
-    if "messages" not in st.session_state:
-        st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-
-def _trim_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    if len(messages) <= MAX_MESSAGES_TO_KEEP:
-        return messages
-    system = messages[0:1]
-    tail = messages[-(MAX_MESSAGES_TO_KEEP - 1):]
-    return system + tail
-
-def _persist_chat(title: str = ""):
-    st.session_state.messages = _trim_messages(st.session_state.messages)
-    out = _run_tool("save_chat", {"session_id": _sid(), "messages": st.session_state.messages, "title": title})
-    if isinstance(out, dict) and out.get("ok") is False:
-        st.session_state.last_chat_save_error = out
-
-def _try_load_chat(sid: str) -> bool:
-    loaded = _run_tool("load_chat", {"session_id": sid})
-    if isinstance(loaded, dict) and loaded.get("ok") and loaded.get("data", {}).get("messages"):
-        st.session_state.messages = _trim_messages(loaded["data"]["messages"])
-        return True
-    return False
-
-if "session_id" not in st.session_state:
-    qp = st.query_params.get("sid")
-    st.session_state.session_id = qp if qp else _new_session_id()
-
-_init_messages_if_needed()
-
-if "loaded_for_sid" not in st.session_state or st.session_state.loaded_for_sid != _sid():
-    st.session_state.loaded_for_sid = _sid()
-    if not _try_load_chat(_sid()):
-        _persist_chat(title=f"Session {_sid()[:8]}")
-
-# Agent modes
-if "agent_mode" not in st.session_state:
-    st.session_state.agent_mode = "autopilot"  # default to autopilot for your use-case
-if "autopilot_narrate" not in st.session_state:
-    st.session_state.autopilot_narrate = True
-
-# Autopilot job tracking
-for k, default in [
-    ("active_job_id", ""),
-    ("active_job_last_status", ""),
-    ("active_job_last_update_ts", 0.0),
-    ("active_job_bucket", ""),
-    ("active_job_pl_col", ""),
-    ("active_job_last_event_ts", ""),
-    ("agent_session_active", False),
-    ("agent_session_steps_done", 0),
-    ("agent_session_max_steps", 8),
-    ("agent_session_budget_minutes", 30),
-    ("agent_session_minutes_per_job", 10),
-    ("agent_session_pl_column", ""),
-    ("agent_session_filters", {}),
-    ("agent_session_last_decision", ""),
-    ("agent_session_autodiag_on_no_rules", True),
-]:
-    if k not in st.session_state:
-        st.session_state[k] = default
-
-# ============================================================
-# Sanitise history for OpenAI (prevents tool-choice / tool-call mismatches)
-# ============================================================
-
-def _sanitize_history_for_llm(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    if not messages:
-        return [{"role": "system", "content": SYSTEM_PROMPT}]
-
-    out: List[Dict[str, Any]] = []
-    first = messages[0]
-    out.append({"role": "system", "content": first.get("content", SYSTEM_PROMPT)})
-
-    expecting_tool_ids: Set[str] = set()
-
-    for m in messages[1:]:
-        role = (m.get("role") or "").strip()
-
-        if role == "assistant":
-            expecting_tool_ids = set()
-            clean_assistant: Dict[str, Any] = {"role": "assistant", "content": m.get("content", "") or ""}
-            tc = m.get("tool_calls")
-            if isinstance(tc, list) and tc:
-                cleaned_tool_calls = []
-                for call in tc:
-                    cid = call.get("id")
-                    fn = call.get("function") or {}
-                    name = fn.get("name")
-                    args = fn.get("arguments", "{}")
-                    if cid and name:
-                        cleaned_tool_calls.append({"id": cid, "type": "function", "function": {"name": name, "arguments": args}})
-                        expecting_tool_ids.add(cid)
-                if cleaned_tool_calls:
-                    clean_assistant["tool_calls"] = cleaned_tool_calls
-            out.append(clean_assistant)
-            continue
-
-        if role == "tool":
-            tcid = m.get("tool_call_id")
-            if tcid and expecting_tool_ids and tcid in expecting_tool_ids:
-                out.append({"role": "tool", "tool_call_id": tcid, "content": m.get("content", "") or ""})
-            continue
-
-        if role == "user":
-            out.append({"role": "user", "content": m.get("content", "") or ""})
-            continue
-
-    return out
-
-# ============================================================
-# LLM call
-# ============================================================
-
-def _call_llm(messages: List[Dict[str, Any]]):
-    mode = st.session_state.agent_mode
-    safe_messages = _sanitize_history_for_llm(messages)
-
-    if mode == "chat":
-        # Chat-only mode: do not send tools/tool_choice
-        chat_only: List[Dict[str, Any]] = []
-        for m in safe_messages:
-            if m.get("role") == "tool":
-                continue
-            if m.get("role") == "assistant" and "tool_calls" in m:
-                mm = dict(m)
-                mm.pop("tool_calls", None)
-                chat_only.append(mm)
-            else:
-                chat_only.append(m)
-        return client.chat.completions.create(model=MODEL, messages=chat_only)
-
-    return client.chat.completions.create(model=MODEL, messages=safe_messages, tools=TOOLS, tool_choice="auto")
+_init_state()
 
 # ============================================================
 # Helpers
 # ============================================================
 
-_UUID_RE = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I)
+def _append(role: str, content: str):
+    st.session_state.messages.append({"role": role, "content": content, "ts": datetime.utcnow().isoformat()})
+    if len(st.session_state.messages) > MAX_MESSAGES:
+        st.session_state.messages = st.session_state.messages[-MAX_MESSAGES:]
 
-def _normalize(s: str) -> str:
-    s = (s or "").strip().lower()
-    s = re.sub(r"[\(\)\[\]\{\}\,\;\:]+", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    # common typo: "1o" (letter o) -> "10"
-    s = s.replace("1o ", "10 ").replace("1o", "10")
-    return s
-
-def _minutes_from_text(t: str, default_minutes: int = 30) -> int:
-    s = _normalize(t)
-    m = re.search(r"\b(\d+(?:\.\d+)?)\s*(h|hr|hrs|hour|hours)\b", s)
-    if m:
-        mins = int(round(float(m.group(1)) * 60))
-        return max(5, min(mins, 360))
-
-    m2 = re.search(r"\b(\d+)\s*(m|min|mins|minute|minutes)\b", s)
-    if m2:
-        mins = int(m2.group(1))
-        return max(5, min(mins, 360))
-
-    m3 = re.search(r"\b(for|in)\s+(\d{1,3})\b", s)
-    if m3:
-        mins = int(m3.group(2))
-        return max(5, min(mins, 360))
-
-    nums = re.findall(r"\b(\d{1,3})\b", s)
-    if len(nums) == 1:
-        mins = int(nums[0])
-        if 5 <= mins <= 360:
-            return mins
-
-    return max(5, min(int(default_minutes), 360))
-
-def _fmt_num(x: Any) -> str:
-    try:
-        return f"{float(x):.2f}"
-    except Exception:
-        return str(x)
-
-def _append(role: str, content: str, persist: bool = True):
-    st.session_state.messages.append({"role": role, "content": content})
-    st.session_state.messages = _trim_messages(st.session_state.messages)
-    if persist:
-        _persist_chat()
-
-def _context_snapshot_text(ctx: Dict[str, Any]) -> str:
-    ov = (ctx.get("dataset_overview") or {})
-    derived = (ctx.get("derived") or {})
-    ignored = derived.get("ignored_columns") or []
-    outcomes = derived.get("outcome_columns") or []
-    primary_goal = ov.get("primary_goal", "")
-    fmt = ov.get("strategy_output_format", "")
-    return (
-        "Context loaded (Google Sheets is the bible):\n"
-        f"- primary_goal: {primary_goal}\n"
-        f"- strategy_output_format: {fmt}\n"
-        f"- ignored_columns: {ignored}\n"
-        f"- outcome_columns: {outcomes}\n"
-    )
-
-def _resolve_pl_column(user_text: str, ctx: Dict[str, Any]) -> str:
-    t = _normalize(user_text)
-    outcomes: List[str] = ((ctx.get("derived") or {}).get("outcome_columns") or [])
-
+def _run_tool(name: str, args: Optional[Dict] = None) -> Any:
+    args = args or {}
     aliases = {
-        "btts": "BTTS PL",
-        "both teams to score": "BTTS PL",
-        "over 2.5": "BO 2.5 PL",
-        "o2.5": "BO 2.5 PL",
-        "bo 2.5": "BO 2.5 PL",
-        "bo2.5": "BO 2.5 PL",
-        "fh over 1.5": "BO1.5 FHG PL",
-        "shg": "SHG PL",
+        "bracket_sweep": "start_bracket_sweep",
+        "subgroup_scan": "start_subgroup_scan",
+        "hyperopt_pl_lab": "start_hyperopt_pl_lab",
+        "query_data": "start_query_data",
+        "test_filter": "start_test_filter",
+        "regime_check": "start_regime_check",
     }
-    for k, v in aliases.items():
-        if k in t:
-            return v
-
-    # match against outcome columns text if present
-    def nn(x: str) -> str:
-        return _normalize(x).replace(" ", "")
-
-    t_compact = t.replace(" ", "")
-    for col in outcomes:
-        if nn(col) in t_compact:
-            return col
-
-    # default
-    return "BO 2.5 PL"
-
-def _render_rule_spec(spec: Dict[str, Any]) -> str:
-    parts: List[str] = []
-    for c in (spec.get("categorical") or []):
-        col = c.get("col")
-        if not col:
-            continue
-        if c.get("in"):
-            parts.append(f"**{col} IN** {c['in']}")
-        if c.get("not_in"):
-            parts.append(f"**{col} NOT IN** {c['not_in']}")
-    for n in (spec.get("numeric") or []):
-        col = n.get("col")
-        if not col:
-            continue
-        mn = n.get("min")
-        mx = n.get("max")
-        if mn is not None and mx is not None:
-            parts.append(f"**{col}** in [{_fmt_num(mn)}, {_fmt_num(mx)}]")
-        elif mn is not None:
-            parts.append(f"**{col}** >= {_fmt_num(mn)}")
-        elif mx is not None:
-            parts.append(f"**{col}** <= {_fmt_num(mx)}")
-    return "  \n".join(parts) if parts else "(no constraints)"
-
-def _render_distilled_top(result_obj: Dict[str, Any], top_n: int = 3) -> str:
-    payload = (result_obj or {}).get("result") or {}
-    distilled = payload.get("distilled") or {}
-    picked = payload.get("picked") or {}
-
-    if not distilled or "top_distilled_rules" not in distilled:
-        if isinstance(distilled, dict) and distilled.get("error"):
-            return f"Distillation error: {distilled.get('error')}"
-        return "No distilled strategies found in this result."
-
-    rules = (distilled.get("top_distilled_rules") or [])[: max(1, int(top_n))]
-
-    out: List[str] = []
-    out.append(f"### ✅ Distilled strategies (top {len(rules)})")
-    out.append(f"- Picked: `{picked}`")
-    out.append(f"- Base model: `{distilled.get('best_base_model')}`")
-    out.append("")
-
-    for i, rr in enumerate(rules, start=1):
-        spec = rr.get("spec") or {}
-        tr = rr.get("train") or {}
-        va = rr.get("val") or {}
-        te = rr.get("test") or {}
-        gl = rr.get("test_game_level") or {}
-        gap = rr.get("gap_train_minus_val")
-
-        out.append(f"#### Strategy #{i}")
-        out.append(_render_rule_spec(spec))
-        out.append("")
-        out.append(f"- Train: rows={tr.get('rows')} roi={_fmt_num(tr.get('roi'))} total_pl={_fmt_num(tr.get('total_pl'))}")
-        out.append(f"- Val: rows={va.get('rows')} roi={_fmt_num(va.get('roi'))} total_pl={_fmt_num(va.get('total_pl'))}")
-        out.append(f"- Test: rows={te.get('rows')} roi={_fmt_num(te.get('roi'))} total_pl={_fmt_num(te.get('total_pl'))}")
-        out.append(f"- Stability: gap(train-val)={_fmt_num(gap)}")
-        out.append(f"- Test risk (by ID): unique_ids={gl.get('unique_ids')} max_dd={_fmt_num(gl.get('max_dd'))} losing_streak={gl.get('losing_streak')}")
-        tf = rr.get("trade_frequency") or {}
-        if tf:
-            out.append(f"- Test trade frequency: bets/week={_fmt_num(tf.get('bets_per_week'))} games/week={_fmt_num(tf.get('games_per_week'))} (span_weeks={_fmt_num(tf.get('weeks'))})")
-        ms = rr.get("test_monthly_stats") or {}
-        if ms and ms.get("months"):
-            out.append(
-                f"- Test regime check: months={ms.get('months')} monthly_roi_std={_fmt_num(ms.get('roi_std'))} neg_month_frac={_fmt_num(ms.get('negative_month_frac'))}"
-            )
-            try:
-                if float(ms.get('roi_std') or 0.0) > 0.25:
-                    out.append("  - ⚠️ High month-to-month variance; consider regime/subgroup filters.")
-            except Exception:
-                pass
-        out.append("")
-    return "\n".join(out)
-
-def _log_lab_to_sheet(job_id: str, result_obj: Dict[str, Any], tags: str):
-    # Best-effort only; should never crash the UI
+    resolved = aliases.get(name, name)
+    fn = getattr(tools, resolved, None)
+    if not callable(fn):
+        return {"ok": False, "error": f"Unknown tool: {name}"}
     try:
-        payload = (result_obj or {}).get("result") or {}
-        if not payload:
-            return
-        picked = payload.get("picked") or {}
-        pl_col = str((picked.get("pl_column") or "")).strip()
-        distilled_rules = ((payload.get("distilled") or {}).get("top_distilled_rules") or [])[:3]
-
-        note = {
-            "ts": datetime.utcnow().isoformat(),
-            "kind": "pl_lab_result",
-            "job_id": job_id,
-            "picked": picked,
-            "sheet_enforcement": payload.get("sheet_enforcement"),
-            "enforcement": payload.get("enforcement"),
-            "splits": payload.get("splits"),
-            "features": payload.get("features"),
-            "baseline": payload.get("baseline"),
-            "top_distilled_rules": [
-                {
-                    "spec": rr.get("spec"),
-                    "train": rr.get("train"),
-                    "val": rr.get("val"),
-                    "test": rr.get("test"),
-                    "test_game_level": rr.get("test_game_level"),
-                    "gap_train_minus_val": rr.get("gap_train_minus_val"),
-                    "samples": rr.get("samples"),
-                }
-                for rr in distilled_rules
-            ],
-        }
-
-        tag_bits = [t.strip() for t in (tags or "").split(",") if t.strip()]
-        if pl_col:
-            tag_bits.append(pl_col.replace(" ", "_"))
-        final_tags = ",".join(tag_bits)
-        _run_tool("append_research_note", {"note": json.dumps(note, ensure_ascii=False), "tags": final_tags})
-    except Exception:
-        return
+        return fn(**args)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 # ============================================================
-# Enforcement defaults (+ explanation)
+# Bible helpers
 # ============================================================
 
-DEFAULT_ENFORCEMENT = {
-    "min_train_rows": 300,
-    "min_val_rows": 60,
-    "min_test_rows": 60,
-    "max_train_val_gap_roi": 0.4,
-    "max_test_drawdown": -50.0,
-    "max_test_losing_streak_bets": 50.0,
-}
-
-
-def _choose_diagnostic_task(payload: dict, ctx: dict, recent_actions: Optional[list] = None) -> tuple[str, dict, str]:
-    """Pick a diagnostic task + params when we have no passing distilled rules.
-
-    This is a deterministic safety net (Bible-aligned) so the agent never "stops"
-    just because distillation didn't find a stable rule on the first run.
-
-    Preference order (with simple anti-repeat):
-      1) bracket_sweep on top numeric features
-      2) subgroup_scan on strong categorical columns
-      3) hyperopt_pl_lab (val-only tuning, short)
-
-    Returns: (task_type, params, why)
-    """
-    payload = payload or {}
-    ctx = ctx or {}
-    recent_actions = recent_actions or []
-
-    # Dataset location from context (best-effort)
-    dataset = (ctx.get("dataset") or {}) if isinstance(ctx, dict) else {}
-    storage_bucket = dataset.get("storage_bucket") or "football-data"
-    storage_path = dataset.get("storage_path") or "football_ai_NNIA.csv"
-
-    picked = payload.get("picked") or {}
-    pl_col = picked.get("pl_column") or payload.get("pl_column") or "BO 2.5 PL"
-    side = picked.get("side") or payload.get("side") or ("lay" if str(pl_col).startswith("L") else "back")
-    odds_col = picked.get("odds_col") or payload.get("odds_col")
-
-    # Pull out feature hints
-    num_cols = picked.get("numeric_cols") or payload.get("numeric_cols") or []
-    cat_cols = picked.get("categorical_cols") or payload.get("categorical_cols") or []
-
-    feat_imp = payload.get("feature_importance") or []
-    # Feature importance is a list of dicts: {"feature": ..., "importance": ...}
-    imp_order = []
-    try:
-        for row in feat_imp:
-            f = (row or {}).get("feature")
-            if f:
-                imp_order.append(str(f))
-    except Exception:
-        imp_order = []
-
-    # Prefer the important numeric columns first (keep it small for speed)
-    top_num = [c for c in imp_order if c in set(num_cols)] or list(num_cols)
-    top_num = [c for c in top_num if isinstance(c, str) and c.strip()][:5]
-
-    # Prefer important categorical columns
-    top_cat = [c for c in imp_order if c in set(cat_cols)] or list(cat_cols)
-    top_cat = [c for c in top_cat if isinstance(c, str) and c.strip()][:6]
-
-    # What have we already tried in this agent session?
-    tried = set()
-    try:
-        for a in (recent_actions or []):
-            if isinstance(a, dict) and a.get("task_type"):
-                tried.add(str(a["task_type"]))
-    except Exception:
-        tried = set()
-
-    # --- 1) Bracket sweep ---
-    if "bracket_sweep" not in tried and top_num:
-        cols = top_num[:3]
-        params = {
-            "storage_bucket": storage_bucket,
-            "storage_path": storage_path,
-            "pl_column": pl_col,
-            "side": side,
-            "odds_col": odds_col,
-            "sweep_cols": cols,
-            "n_bins": 10,
-            "max_results": 60,
-        }
-        why = f"Bracket sweep on top numeric features: {', '.join(cols)}."
-        return "bracket_sweep", params, why
-
-    # --- 2) Subgroup scan ---
-    if "subgroup_scan" not in tried and (top_cat or top_num):
-        # Use up to 4 categorical cols; worker will skip missing/non-categorical.
-        cols = top_cat[:4] if top_cat else ["MODE", "MARKET", "LEAGUE", "BRACKET"]
-        params = {
-            "storage_bucket": storage_bucket,
-            "storage_path": storage_path,
-            "pl_column": pl_col,
-            "side": side,
-            "odds_col": odds_col,
-            "group_cols": cols,
-            "max_groups": 80,
-        }
-        why = f"Subgroup scan to find stable buckets using: {', '.join(cols)}."
-        return "subgroup_scan", params, why
-
-    # --- 3) Hyperopt (short) ---
-    params = {
-        "storage_bucket": storage_bucket,
-        "storage_path": storage_path,
-        "pl_column": pl_col,
-        "side": side,
-        "odds_col": odds_col,
-        "hyperopt_trials": 15,
-        "top_fracs": payload.get("top_fracs") or [0.05, 0.1, 0.2],
-    }
-    why = "Hyperopt (val-only) to tune model/distillation knobs when simple scans didn't produce a stable rule."
-    return "hyperopt_pl_lab", params, why
-
-
-
-ENFORCEMENT_EXPLANATION = {
-    "min_train_rows": "Minimum number of scan-rows needed in TRAIN for a rule to be considered (avoid tiny-sample mirages).",
-    "min_val_rows": "Minimum number of scan-rows needed in VALIDATION (we tune on val, so it must be meaningful).",
-    "min_test_rows": "Minimum number of scan-rows needed in TEST (final proof; if too small, it's not trusted).",
-    "max_train_val_gap_roi": "Max allowed drop from train ROI to val ROI (penalises overfitting). Example 0.10 means train ROI can be at most 0.10 higher than validation ROI.",
-    "max_test_drawdown": "Worst allowed peak-to-trough drawdown on TEST, measured in points (negative). Example -25 means we reject strategies that at any point fall more than 25 points from peak.",
-    "max_test_losing_streak_bets": "Maximum allowed consecutive losing bets (by unique match ID) on TEST.",
-}
-
-def _enforcement_from_state(ctx: Dict[str, Any]) -> Dict[str, Any]:
-    stt = (ctx.get("research_state") or {}) if isinstance(ctx, dict) else {}
-    out = dict(DEFAULT_ENFORCEMENT)
-    for k in list(out.keys()):
-        if k in stt and str(stt[k]).strip() != "":
-            try:
-                out[k] = float(stt[k]) if "max_" in k else int(float(stt[k]))
-            except Exception:
-                pass
-    return out
-
-# ============================================================
-# Autopilot: submit-and-follow (non-blocking, uses autorefresh)
-# ============================================================
-
-def _maybe_start_narrated_pl_research(user_text: str) -> bool:
-    if st.session_state.agent_mode != "autopilot":
-        return False
-
-    t = _normalize(user_text)
-    wants_strategy = ("strategy" in t) or ("build" in t and ("pl" in t or "btts" in t or "over" in t or "shg" in t))
-    if not wants_strategy:
-        return False
-
-    # If a job is already active, don't start a new one
-    if st.session_state.get("active_job_id"):
-        _append("assistant", f"⚠️ You already have an active job running: `{st.session_state.active_job_id}`. Say **Show results** or wait for it to finish.")
-        return True
-
-    ctx = _run_tool("get_research_context", {"limit_notes": 20})
-    st.session_state["cached_research_context"] = ctx
-    st.session_state.last_context = ctx
-
-    minutes = _minutes_from_text(user_text, default_minutes=10)
-    do_hyperopt = any(k in t for k in ["hyperopt", "grid", "cv", "bayes", "optuna"])
-    pl_col = _resolve_pl_column(user_text, ctx)
-    enforcement = _enforcement_from_state(ctx)
-
-    _append("user", user_text, persist=False)
-    _append("assistant", _context_snapshot_text(ctx), persist=False)
-
-    _append(
-        "assistant",
-        (
-            f"✅ **Yes - I'll build a `{pl_col}` strategy.**\n\n"
-            f"**What I'm going to do (Bible-aligned):**\n"
-            f"1) Start an ML lab using only leakage-safe features (never use PL columns as inputs).\n"
-            f"2) Use strict time split: train -> val -> test.\n"
-            f"3) Distill the signal into **explicit rule filters**.\n"
-            f"4) Enforce stability + risk gates.\n\n"
-            f"**Time budget:** {minutes} minutes\n"
-            f"**Enforcement gates:** `{enforcement}`\n\n"
-            f"If you want, I can explain these gates: type **Explain enforcement**."
-        ),
-        persist=False,
-    )
-    _persist_chat()
-
-    submitted = _run_tool(
-        "start_pl_lab",
-        {
-            "duration_minutes": minutes,
-            "pl_column": pl_col,
-            "do_hyperopt": do_hyperopt,
-            "hyperopt_iter": 16,
-            "enforcement": enforcement,
-        },
-    )
-    job_id = (submitted or {}).get("job_id") if isinstance(submitted, dict) else None
-    if not job_id:
-        _append("assistant", f"❌ Failed to start job. Response:\n```json\n{json.dumps(submitted, indent=2)}\n```")
-        return True
-
-    # Track job in session state (so the UI can keep narrating without blocking)
-    st.session_state.active_job_id = job_id
-    st.session_state.active_job_pl_col = pl_col
-    st.session_state.active_job_bucket = DEFAULT_RESULTS_BUCKET
-    st.session_state["active_job_last_event_ts"] = ""
-    st.session_state["agent_session_active"] = True
-    st.session_state["agent_session_steps_done"] = 0
-    st.session_state["agent_session_pl_column"] = pl_col
-    st.session_state["agent_session_minutes_per_job"] = int(minutes)
-    # Enable auto-diagnostic chaining for narrated PL research flow
-    st.session_state["agent_session_autodiag_on_no_rules"] = True
-
-    st.session_state.active_job_last_status = ""
-    st.session_state.active_job_last_update_ts = 0.0
-
-    # Save state to sheet (best-effort)
-    try:
-        _run_tool("set_research_state", {"key": "last_pl_lab_job_id", "value": job_id})
-        _run_tool("set_research_state", {"key": "last_pl_lab_pl_column", "value": pl_col})
-        _run_tool("set_research_state", {"key": "last_pl_lab_started_at", "value": datetime.utcnow().isoformat()})
-    except Exception:
-        pass
-
-    _append("assistant", f"🚀 Started **PL Lab** for **{pl_col}**. Job ID: `{job_id}`\n\nI'll keep checking it automatically and will post results when they're ready.")
-    return True
-
-
-def _summarise_job_result(task_type: str, result: dict) -> str:
-    """Create a compact summary for the LLM 'brain'."""
-    try:
-        if task_type == "pl_lab":
-            picked = result.get("picked") or {}
-            base = result.get("baseline") or {}
-            lb = result.get("leaderboard") or {}
-            best = (result.get("best_candidates") or [{}])[0]
-            return (
-                f"PL_LAB picked={picked}. "
-                f"baseline_val_roi={base.get('val', {}).get('roi'):.4f} baseline_test_roi={base.get('test', {}).get('roi'):.4f}. "
-                f"best_candidates={best}. "
-                f"distilled_rules_count={len((result.get('distilled') or {}).get('top_distilled_rules') or [])}."
-            )
-        if task_type == "categorical_scan":
-            scan = result.get("scan") or {}
-            parts = []
-            for col, rows in scan.items():
-                if rows:
-                    top = rows[0]
-                    parts.append(f"{col} top={top.get('value')} val_roi={top.get('val', {}).get('roi'):.4f} test_roi={top.get('test', {}).get('roi'):.4f} n_test={top.get('samples', {}).get('test')}")
-            return "CATEGORICAL_SCAN " + " | ".join(parts[:6])
-        if task_type == "bracket_sweep":
-            sweep = result.get("sweep") or {}
-            parts = []
-            for col, rows in sweep.items():
-                if rows:
-                    top = rows[0]
-                    rg = top.get("range") or {}
-                    parts.append(f"{col} best_range=[{rg.get('min'):.3g},{rg.get('max'):.3g}] val_roi={top.get('val', {}).get('roi'):.4f} test_roi={top.get('test', {}).get('roi'):.4f} n_test={top.get('samples', {}).get('test')}")
-            return "BRACKET_SWEEP " + " | ".join(parts[:6])
-        if task_type == "rule_search":
-            best = result.get("best_greedy_path")
-            if best:
-                return f"RULE_SEARCH best_score={best.get('score'):.4f} rule={best.get('rule')} val_roi={best.get('val', {}).get('roi'):.4f} test_roi={best.get('test', {}).get('roi'):.4f}"
-            return "RULE_SEARCH no_rule_found"
-        if task_type == "feature_audit":
-            return f"FEATURE_AUDIT n_features={len(result.get('feature_cols') or [])} top_missing={result.get('top_missing', [])[:3]}"
-        if task_type == "explain_best_model":
-            return f"EXPLAIN top_features={[x.get('feature') for x in (result.get('top_features') or [])[:8]]}"
-        if task_type == "hyperopt":
-            if result.get("error"):
-                return f"HYPEROPT error={result.get('error')}"
-            return f"HYPEROPT best_value={result.get('best_value'):.4f} best_params={result.get('best_params')}"
-    except Exception:
-        pass
-    return f"{task_type} (summary unavailable)"
-
-def _agent_choose_next_action(*, ctx: dict, last_task_type: str, last_result: dict) -> dict:
-    """
-    Uses the LLM to choose the next tool/job to run.
-    Returns dict with keys: narration, stop(bool), next_task(optional), next_params(optional), note(optional).
-    """
-    # Guardrails: user dictates budgets; agent decides next action within allowed set.
-    allowed = [
-        "pl_lab",
-        "feature_audit",
-        "categorical_scan",
-        "bracket_sweep",
-        "rule_search",
-        "explain_best_model",
-        "hyperopt",
-    ]
-    summary = _summarise_job_result(last_task_type, last_result)
-    enforcement = ctx.get("enforcement") or {}
-    ignored_cols = ctx.get("ignored_columns") or []
-    outcome_cols = ctx.get("outcome_columns") or []
-    ignored_feat = ctx.get("ignored_feature_columns") or []
-    filters = st.session_state.get("agent_session_filters") or {}
-    recent_actions = []
-    try:
-        ra_raw = (ctx.get('research_state') or {}).get('recent_actions')
-        if isinstance(ra_raw, str) and ra_raw.strip():
-            recent_actions = json.loads(ra_raw)
-        elif isinstance(ra_raw, list):
-            recent_actions = ra_raw
-    except Exception:
-        recent_actions = []
-
-    near_misses = ((last_result or {}).get('distilled') or {}).get('near_misses') or []
-    near_summary = _summarize_near_misses(near_misses, max_items=8)
-
-    system = """You are Jarvis Football Research Agent.
-You must follow the Bible rules:
-- Each row is a scan outcome, not a match.
-- PL columns are outcomes only; NEVER use them as predictive features.
-- Always split by time (train/val/test). Do not tune on test.
-- Strategies must become explicit filters (ranges + categorical constraints) with minimum samples.
-- Prefer simple stable rules; penalize overfit/regime dependence.
-You can choose what job to run next, within the available job types.
-
-Behaviour requirements (very important):
-- If the latest job produced NO passing rules, do NOT stop. First summarise why (use near_misses_summary, feature_importance, drift_report, monthly stats), then run a diagnostic/refinement job.
-- Prefer these fallbacks when stuck: bracket_sweep -> categorical_scan -> rule_search -> hyperopt -> explain_best_model.
-- Avoid repeating recently-tried experiments (recent_actions) unless you explicitly explain what is changing.
-- Always keep strategies leakage-safe and tune ONLY on train/val."""
-
-    user = {
-        "goal": "Build a BO2.5 strategy with explicit filters that generalise to future matches.",
-        "last_summary": summary,
-        "last_task_type": last_task_type,
-        "budget": {
-            "steps_done": int(st.session_state.get("agent_session_steps_done", 0)),
-            "max_steps": int(st.session_state.get("agent_session_max_steps", 8)),
-        },
-        "current_filters": filters,
-        "enforcement_gates": enforcement,
-        "ignored_columns": ignored_cols,
-        "outcome_columns": outcome_cols,
-        "ignored_feature_columns": ignored_feat,
-        "available_job_types": allowed,
-        "near_misses_summary": near_summary,
-        "recent_actions": recent_actions,
-        "instruction": "Choose the next job to run. If there are no passing rules yet, you MUST continue with a diagnostic/refinement job (do not stop). Keep params small and focused. Only use train/val for decision-making; test is for final reporting only."
-    }
-
-    prompt = f"""Return STRICT JSON with this schema:
-{{
-  "narration": "what you're doing next and why",
-  "stop": false,
-  "next_task_type": "one of {allowed}",
-  "next_params": {{ ... }}
-}}
-If you decide to stop, set stop=true and omit next_task_type/next_params.
-
-Context JSON:
-{json.dumps(user, ensure_ascii=False)}
-"""
-    # Call LLM (no tools here)
-    resp = _call_llm([
-        {"role": "system", "content": system},
-        {"role": "user", "content": prompt},
-    ])
-    txt = (resp or "").strip()
-    # Extract JSON
-    try:
-        j = json.loads(txt)
-        return j
-    except Exception:
-        # fallback: stop with explanation
-        return {"narration": f"Agent could not parse JSON. Raw: {txt[:400]}", "stop": True}
-
-
-
-def _coerce_row_filters(filters_any: Any) -> List[Dict[str, Any]]:
-    """Normalize user/agent filters into worker-friendly row_filters.
-
-    Accepts:
-      - list[dict] already in row_filter form
-      - dict[str, Any] meaning equality filters
-      - None/empty
-    """
-    if not filters_any:
-        return []
-    if isinstance(filters_any, list):
-        return [f for f in filters_any if isinstance(f, dict)]
-    if isinstance(filters_any, dict):
-        out: List[Dict[str, Any]] = []
-        for k, v in filters_any.items():
-            if k is None:
-                continue
-            col = str(k)
-            if isinstance(v, (list, tuple, set)):
-                out.append({"col": col, "op": "in", "value": list(v)})
-            else:
-                out.append({"col": col, "op": "==", "value": v})
-        return out
-    # unknown type → ignore
-    return []
-
-
-def _autopilot_tick():
-    # Cached Bible context (loaded when strategy run starts).
-    ctx_local = st.session_state.get('cached_research_context')
-    if not isinstance(ctx_local, dict):
-        ctx_local = {}
-
-    job_id = st.session_state.get("active_job_id") or ""
-
-    # Prevent duplicate processing of the same completed job across Streamlit reruns.
-    # Without this, when a job finishes and st_autorefresh keeps firing, the UI can
-    # repeatedly download/interpret the same result and spam the chat.
-    if "_handled_job_ids" not in st.session_state:
-        st.session_state["_handled_job_ids"] = set()
-    if "_chained_from_job_ids" not in st.session_state:
-        st.session_state["_chained_from_job_ids"] = set()
-    # In case previous runs accidentally stored a non-set type, coerce back safely.
-    val = st.session_state.get("_chained_from_job_ids")
-    if not isinstance(val, set):
-        try:
-            st.session_state["_chained_from_job_ids"] = set(val or [])
-        except Exception:
-            st.session_state["_chained_from_job_ids"] = set()
-
-    # Stream worker events (narrated progress)
-    try:
-        last_ts = st.session_state.get("active_job_last_event_ts") or None
-        ev = _run_tool("get_job_events", {"job_id": job_id, "since_ts": last_ts, "limit": 200})
-        events = (ev or {}).get("events", []) if isinstance(ev, dict) else []
-        if events:
-            for e in events:
-                ts = e.get("ts")
-                lvl = (e.get("level") or "info").upper()
-                msg = e.get("message") or ""
-                _append("assistant", f"🧩 {lvl} {msg}")
-                if ts:
-                    st.session_state["active_job_last_event_ts"] = ts
-    except Exception:
-        pass
-    if not job_id:
-        return
-
-    job = _run_tool("get_job", {"job_id": job_id})
-    status = (job.get("status") or "").lower().strip()
-
-    # If the job is terminal (done/error) and we've already processed it once,
-    # don't process it again on subsequent Streamlit reruns.
-    if status in ("done", "error") and job_id in st.session_state.get("_handled_job_ids", set()):
-        st.session_state.active_job_id = ""
-        return
-
-    now = time.time()
-    last_status = st.session_state.get("active_job_last_status") or ""
-    last_update = float(st.session_state.get("active_job_last_update_ts") or 0.0)
-
-    should_update = (status != last_status) or ((now - last_update) > 30)
-    if should_update:
-        _append("assistant", f"⏳ Job `{job_id}` status: **{status or 'unknown'}** (UTC {datetime.utcnow().isoformat()}Z)")
-        st.session_state.active_job_last_status = status
-        st.session_state.active_job_last_update_ts = now
-
-    if status == "error":
-        _append("assistant", f"❌ Job failed.\n```json\n{json.dumps(job, indent=2)}\n```")
-        # FIX: Use direct assignment instead of .get().add() to ensure it persists
-        st.session_state["_handled_job_ids"].add(job_id)
-        st.session_state.active_job_id = ""
-        return
-
-    if status != "done":
-        return
-
-    rp = job.get("result_path")
-    params = job.get("params") or {}
-    bucket = (params.get("_results_bucket") or DEFAULT_RESULTS_BUCKET).strip()
-
-    if not rp:
-        _append("assistant", f"⚠️ Job finished but no result_path was set.\n```json\n{json.dumps(job, indent=2)}\n```")
-        st.session_state.active_job_id = ""
-        return
-
-    _append("assistant", f"📥 Job done. Downloading results `{rp}` from `{bucket}`...")
-    res = _run_tool("download_result", {"bucket": bucket, "result_path": rp})
-    result_obj = (res or {}).get("result") if isinstance(res, dict) else None
-
-    if not result_obj:
-        _append("assistant", f"⚠️ Could not load result payload.\n```json\n{json.dumps(res, indent=2)[:12000]}\n```")
-        st.session_state.active_job_id = ""
-        return
-
-    # NOTE: We intentionally do NOT add to _handled_job_ids here yet.
-    # We must complete all processing including auto-chaining BEFORE marking as handled,
-    # otherwise Streamlit reruns will hit the early return before chaining executes.
-
-    _append("assistant", _render_distilled_top(result_obj, top_n=3))
-
-    # Interpretation (still short, but diagnostic even on failure)
-    payload = (result_obj or {}).get("result") or {}
-    distilled = (payload.get("distilled") or {})
-    rules = distilled.get("top_distilled_rules") or []
-    near_misses = distilled.get("near_misses") or []
-    nm = _summarize_near_misses(near_misses)
-
-    interp: List[str] = []
-    interp.append("### 🧠 Interpretation + next step")
-    if rules:
-        interp.append(f"- Found **{len(rules)}** rule candidates that passed the current gates (showing top {min(3, len(rules))}).")
-        interp.append("- Next: refine brackets/odds bands and verify regime stability (monthly/seasonal), then re-validate on the strict time-split.")
-    else:
-        interp.append("- **No rules passed the gates** in this run. That doesn't mean there's no signal; it means nothing met the current stability/risk requirements.")
-        by_reason = nm.get("by_reason") or {}
-        if by_reason:
-            interp.append("- Most common failure reasons: " + ", ".join([f"{k} ({v})" for k, v in list(by_reason.items())[:5]]))
-        top_nm = nm.get("top") or []
-        if top_nm:
-            interp.append("- Example near-miss candidates:")
-            for c in top_nm[:3]:
-                parts = []
-                rule_spec = c.get("rule") or []
-                if rule_spec:
-                    parts.append(f"rule_len={len(rule_spec)}")
-                reason = c.get("reason")
-                if reason:
-                    parts.append(f"failed: {reason}")
-                gate = c.get("gate") or {}
-                if gate:
-                    parts.append(f"gate={gate}")
-                if parts:
-                    interp.append("  - " + " | ".join(parts))
-        b_warn = ((payload.get("baseline") or {}).get("test_regime_warning") or {})
-        if b_warn.get("warn"):
-            interp.append(
-                f"- ⚠️ Regime instability warning: test monthly ROI std {float(b_warn.get('roi_std', 0.0)):.3f} > {float(b_warn.get('roi_std_warn_threshold', 0.25)):.2f}. Consider subgroup/regime filters."
-            )
-        interp.append("- Next: run a **diagnostic** job (bracket_sweep/subgroup_scan/hyperopt_pl_lab) using the strongest features and near-miss patterns.")
-    _append("assistant", "\n".join(interp))
-
-    # Log to sheet
-    _log_lab_to_sheet(job_id, result_obj, tags="pl_lab,bo2.5,narrated_autopilot")
-
-    # Persist a compact action/result memory to research_state to avoid repetition
-    try:
-        ra = []
-        ra_raw = (ctx_local.get("research_state") or {}).get("recent_actions")
-        if isinstance(ra_raw, str) and ra_raw.strip():
-            ra = json.loads(ra_raw)
-        elif isinstance(ra_raw, list):
-            ra = ra_raw
-        # derive a compact summary
-        baseline_test = ((payload.get("baseline") or {}).get("test") or {})
-        top_rule = None
-        if rules:
-            top_rule = rules[0].get("filter_summary") or rules[0].get("filter")
-        ra.append({
-            "ts_utc": datetime.utcnow().isoformat(),
-            "job_id": str(job_id),
-            "task_type": str(job.get("task_type") or ""),
-            "pl_column": str(payload.get("picked") or payload.get("pl_column") or ""),
-            "passed_rules": bool(rules),
-            "baseline_test_roi": float(baseline_test.get("roi", 0.0)),
-            "top_rule": top_rule,
-        })
-        ra = ra[-60:]
-        _run_tool("set_research_state", {"key": "recent_actions", "value": json.dumps(ra)})
-    except Exception:
-        pass
-
-    has_passing_rules = bool(rules)
-
-    # If we already have passing rules, stop autopilot chaining (wait for explicit user direction).
-    # FIX: Removed duplicate block - this was appearing twice in the original
-    if has_passing_rules and st.session_state.get("agent_session_active"):
-        st.session_state["agent_session_active"] = False
-
-    # ------------------------------------------------------------
-    # AUTO-DIAGNOSTIC CHAINING (independent of agent_session_active)
-    # If no rules passed and autodiag is enabled, submit a deterministic
-    # diagnostic job immediately (prevents the "talks about next step but
-    # doesn't actually submit it" failure mode on Streamlit reruns).
-    # ------------------------------------------------------------
-    # Safely coerce _chained_from_job_ids to a set
-    try:
-        chained = st.session_state.get("_chained_from_job_ids")
-        if not isinstance(chained, set):
-            chained = set(chained or [])
-            st.session_state["_chained_from_job_ids"] = chained
-    except Exception:
-        chained = set()
-        st.session_state["_chained_from_job_ids"] = chained
-
-    # Get task type from job
-    job_task_type = (job.get("task_type") or "").lower().strip()
+def _load_bible() -> Dict:
+    if st.session_state.bible:
+        return st.session_state.bible
+    bible = _run_tool("get_research_context", {"limit_notes": 30})
+    st.session_state.bible = bible
+    return bible
+
+def _format_bible(bible: Dict) -> str:
+    overview = bible.get("dataset_overview") or {}
+    gates = bible.get("gates") or {}
+    derived = bible.get("derived") or {}
     
-    # Check all conditions for auto-chaining
-    autodiag_flag = st.session_state.get("agent_session_autodiag_on_no_rules", True)
-    already_chained = job_id in st.session_state.get("_chained_from_job_ids", set())
+    return f"""## 📖 Bible Loaded
 
-    if (
-        job_task_type == "pl_lab"
-        and (not has_passing_rules)
-        and autodiag_flag
-        and (not already_chained)
-    ):
-        # Mark as chained BEFORE submitting to avoid duplicates on reruns.
-        st.session_state["_chained_from_job_ids"].add(job_id)
+**Goal:** {overview.get('primary_goal', 'Find profitable betting strategies')}
+**Output:** {overview.get('strategy_output_format', 'Explicit filter criteria')}
 
-        # Pull recent actions (best-effort) for anti-repeat.
-        recent_actions = []
-        try:
-            ra_raw = (ctx_local.get("research_state") or {}).get("recent_actions")
-            if isinstance(ra_raw, str) and ra_raw.strip():
-                recent_actions = json.loads(ra_raw)
-            elif isinstance(ra_raw, list):
-                recent_actions = ra_raw
-        except Exception:
-            recent_actions = []
+**Gates:**
+- min_train_rows: {gates.get('min_train_rows', 300)}
+- min_val_rows: {gates.get('min_val_rows', 60)}
+- min_test_rows: {gates.get('min_test_rows', 60)}
+- max_train_val_gap_roi: {gates.get('max_train_val_gap_roi', 0.4)}
+- max_test_drawdown: {gates.get('max_test_drawdown', -50)}
 
-        auto_task, auto_params, why = _choose_diagnostic_task(payload, ctx_local, recent_actions)
+**Outcome Columns (NEVER use as features):** {', '.join(derived.get('outcome_columns', []))}
+"""
 
-        # Build base params from the original job + Bible context.
-        base_params = {
-            "pl_column": (
-                st.session_state.get("agent_session_pl_column")
-                or (job.get("params") or {}).get("pl_column")
-                or "BO 2.5 PL"
-            ),
-            "storage_path": (job.get("params") or {}).get("storage_path", "football_ai_NNIA.csv"),
-            "storage_bucket": (job.get("params") or {}).get("storage_bucket", "football-data"),
-            "_results_bucket": (
-                (job.get("params") or {}).get("_results_bucket")
-                or st.session_state.get("active_job_bucket")
-                or DEFAULT_RESULTS_BUCKET
-            ),
-            "ignored_columns": (
-                (ctx_local.get("derived") or {}).get("ignored_columns")
-                or (job.get("params") or {}).get("ignored_columns")
-                or []
-            ),
-            "outcome_columns": (
-                (ctx_local.get("derived") or {}).get("outcome_columns")
-                or (job.get("params") or {}).get("outcome_columns")
-                or []
-            ),
-            "ignored_feature_columns": (
-                (ctx_local.get("derived") or {}).get("ignored_feature_columns")
-                or (job.get("params") or {}).get("ignored_feature_columns")
-                or []
-            ),
-            "enforcement": (
-                (job.get("params") or {}).get("enforcement")
-                or (ctx_local.get("enforcement") if isinstance(ctx_local, dict) else {})
-                or {}
-            ),
-            # Carry through market metadata (if any)
-            "side": (job.get("params") or {}).get("side"),
-            "odds_col": (job.get("params") or {}).get("odds_col"),
-            "top_fracs": (job.get("params") or {}).get("top_fracs"),
-            # Runtime controls - FIX: Preserve duration_minutes from original job
-            "duration_minutes": int(
-                (job.get("params") or {}).get(
-                    "duration_minutes",
-                    st.session_state.get("agent_session_minutes_per_job", 10),
-                )
-            ),
-            # Filters (keep both representations for backwards compatibility)
-            "filters": st.session_state.get("agent_session_filters") or {},
-            "row_filters": _coerce_row_filters(st.session_state.get("agent_session_filters") or {}),
-            "top_n": int((job.get("params") or {}).get("top_n", 12)),
-        }
+# ============================================================
+# Agent LLM
+# ============================================================
 
-        merged = {**base_params, **(auto_params or {})}
+SYSTEM_PROMPT = """You are an autonomous football betting research agent.
 
-        _append("assistant", f"🟡 No rules passed gates → running automatic diagnostics: **{auto_task}**\n{why}")
-        submitted = _run_tool("submit_job", {"task_type": auto_task, "params": merged})
-        
-        # Debug: show what submit_job returned
-        _append("assistant", f"🔍 Debug submit_job response: `{submitted}`")
-        
-        new_job_id = (submitted or {}).get("job_id") if isinstance(submitted, dict) else None
+## Mission
+Find EXPLICIT filter criteria for profitable bets. Output like:
+"MARKET='BO 2.5', LEAGUE IN ['EPL'], ACTUAL ODDS BETWEEN 1.7-2.3"
 
-        if new_job_id:
-            # Mark original job as handled AFTER successful chaining
-            st.session_state["_handled_job_ids"].add(job_id)
-            st.session_state.active_job_id = new_job_id
-            st.session_state.active_job_pl_col = merged.get("pl_column")
-            st.session_state.active_job_bucket = merged.get("_results_bucket") or DEFAULT_RESULTS_BUCKET
-            st.session_state["active_job_last_event_ts"] = ""
-            st.session_state.active_job_last_status = ""
-            st.session_state.active_job_last_update_ts = 0.0
-            _append("assistant", f"🚀 Started next job: **{auto_task}** for **{merged.get('pl_column')}**. Job ID: `{new_job_id}`")
-            return
-        else:
-            # Mark as handled even if chaining failed - we tried
-            st.session_state["_handled_job_ids"].add(job_id)
-            _append("assistant", f"⚠️ Could not submit diagnostic job. Response: {submitted}")
+## Rules (THE LAW)
+1. NEVER use PL columns as features - they're outcomes!
+2. Split by TIME: train older, test newer
+3. Check stability across months
+4. Simple rules > complex rules
+5. Think WHY something works
 
-    # ------------------------------------------------------------
-    # AGENT SESSION CONTINUATION (LLM-driven), only if explicitly active
-    # ------------------------------------------------------------
-    if (
-        st.session_state.get("agent_session_active")
-        and st.session_state.get("agent_session_steps_done", 0) < st.session_state.get("agent_session_max_steps", 8)
-        and not has_passing_rules
-    ):
-        if job_id in st.session_state["_chained_from_job_ids"]:
-            if st.session_state.get("active_job_id") == job_id:
-                st.session_state["active_job_id"] = ""
-            return
+## Process
+1. EXPLORE data baseline
+2. HYPOTHESIZE with specific filters
+3. TEST quickly
+4. ITERATE or CONCLUDE
 
-        st.session_state["agent_session_steps_done"] = int(st.session_state.get("agent_session_steps_done", 0)) + 1
+Respond with JSON when asked for decisions."""
 
-        # LLM decides what to try next based on results (Bible-safe)
-        decision = _agent_choose_next_action(
-            ctx=ctx_local,
-            last_task_type=str(job.get("task_type") or ""),
-            last_result=(result_obj.get("result") or {}) if isinstance(result_obj, dict) else {}
+def _agent_decide(context: str, question: str) -> str:
+    try:
+        resp = client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": f"{context}\n\n---\n{question}"}
+            ],
+            max_tokens=2000,
+            temperature=0.7,
         )
+        return resp.choices[0].message.content
+    except Exception as e:
+        return f"[Error: {e}]"
 
-        # If no rules passed, force a diagnostic job next (regardless of what the LLM decided).
-        if st.session_state.get("agent_session_autodiag_on_no_rules", True) and not rules:
-            auto_task, auto_params, why = _choose_diagnostic_task(payload, ctx_local)
-            decision = {
-                "stop": False,
-                "narration": f"No rules passed gates → running diagnostics: {auto_task}",
-                "next_task_type": auto_task,
-                "next_params": auto_params,
-                "why": why,
-                "recent_actions": [],
-            }
-        st.session_state["agent_session_last_decision"] = json.dumps(decision, ensure_ascii=False)[:2000]
-        _append("assistant", "🧠 Agent decision: " + (decision.get("narration") or ""))
+def _form_hypothesis(bible: Dict, exploration: Dict, failures: List) -> Dict:
+    context = f"""
+Bible Gates: {bible.get('gates', {})}
+Exploration: {json.dumps(exploration, default=str)[:2000]}
+Past Failures: {json.dumps(failures[-3:], default=str) if failures else 'None'}
+"""
+    question = """Form a SPECIFIC hypothesis. Respond with JSON:
+{
+    "hypothesis": "What you're testing",
+    "reasoning": "Why it might work", 
+    "filters": [{"col": "COL", "op": "OP", "value": VAL}],
+    "confidence": "low/medium/high"
+}"""
+    
+    resp = _agent_decide(context, question)
+    try:
+        match = re.search(r'\{[\s\S]*\}', resp)
+        if match:
+            return json.loads(match.group())
+    except:
+        pass
+    return {"hypothesis": resp, "filters": [], "confidence": "low"}
 
-        # Decide whether to continue, and with which diagnostic tool.
-        next_task = decision.get("next_task_type")
-        next_params = decision.get("next_params") or {}
+def _analyze_result(bible: Dict, hypothesis: Dict, result: Dict, iteration: int) -> Dict:
+    context = f"""
+Gates: {bible.get('gates', {})}
+Hypothesis: {json.dumps(hypothesis, default=str)}
+Result: {json.dumps(result, default=str)[:3000]}
+Iteration: {iteration}/{MAX_ITERATIONS}
+"""
+    question = """Analyze and decide next step. JSON:
+{
+    "analysis": "What result shows",
+    "passed_gates": true/false,
+    "decision": "refine|new_hypothesis|success|conclude_no_edge",
+    "learning": "What to remember"
+}"""
+    
+    resp = _agent_decide(context, question)
+    try:
+        match = re.search(r'\{[\s\S]*\}', resp)
+        if match:
+            return json.loads(match.group())
+    except:
+        pass
+    return {"analysis": resp, "decision": "new_hypothesis"}
 
-        # If the agent wants to stop AND we already have passing rules, stop cleanly.
-        if decision.get("stop") and rules:
-            _append("assistant", "🛑 Agent session stopped (rules found and decision=stop).")
-            st.session_state["agent_session_active"] = False
-            st.session_state.active_job_id = ""
-            return
+def _format_conclusion(bible: Dict, findings: List, success: bool) -> str:
+    context = f"Findings: {json.dumps(findings, default=str)[:4000]}"
+    
+    if success:
+        question = """Format the winning strategy:
+═══════════════════════════════════════
+STRATEGY DISCOVERED: [Name]
+═══════════════════════════════════════
+EXPLICIT CRITERIA:
+[Each filter]
 
-        # If no passing rules, never stop. Also, if the agent didn't propose a next tool, pick one deterministically.
-        if (not rules) and (decision.get("stop") or not next_task):
-            recent_actions = []
-            try:
-                ra_raw = (ctx_local.get("research_state") or {}).get("recent_actions")
-                if ra_raw:
-                    recent_actions = json.loads(ra_raw) if isinstance(ra_raw, str) else list(ra_raw)
-            except Exception:
-                recent_actions = []
-            auto_task, auto_params, why = _choose_diagnostic_task(payload, ctx_local, recent_actions)
-            next_task = auto_task
-            # Allow decision params to override auto params (but keep required dataset/pl defaults from auto if present)
-            next_params = {**auto_params, **next_params}
-            _append("assistant", f"🟡 No rules passed; running diagnostic next: {next_task}. {why}")
+PERFORMANCE:
+[ROI, samples, drawdown]
 
-        if not next_task:
-            _append("assistant", "🛑 Agent did not select a next task. Stopping agent session.")
-            st.session_state["agent_session_active"] = False
-            st.session_state.active_job_id = ""
-            return
-
-        base_params = {
-            "pl_column": (
-                st.session_state.get("agent_session_pl_column")
-                or (job.get("params") or {}).get("pl_column")
-                or "BO 2.5 PL"
-            ),
-            "storage_path": (job.get("params") or {}).get("storage_path", "football_ai_NNIA.csv"),
-            "storage_bucket": (job.get("params") or {}).get("storage_bucket", "football-data"),
-            "_results_bucket": (
-                (job.get("params") or {}).get("_results_bucket")
-                or st.session_state.get("active_job_bucket")
-                or DEFAULT_RESULTS_BUCKET
-            ),
-            # Bible governance (always carry forward)
-            "ignored_columns": (
-                (ctx_local.get("derived") or {}).get("ignored_columns")
-                or (job.get("params") or {}).get("ignored_columns")
-                or []
-            ),
-            "outcome_columns": (
-                (ctx_local.get("derived") or {}).get("outcome_columns")
-                or (job.get("params") or {}).get("outcome_columns")
-                or []
-            ),
-            "ignored_feature_columns": (
-                (ctx_local.get("derived") or {}).get("ignored_feature_columns")
-                or (job.get("params") or {}).get("ignored_feature_columns")
-                or []
-            ),
-            "enforcement": (
-                (job.get("params") or {}).get("enforcement")
-                or (ctx_local.get("enforcement") if isinstance(ctx_local, dict) else {})
-                or {}
-            ),
-            # Carry through market metadata
-            "side": (job.get("params") or {}).get("side"),
-            "odds_col": (job.get("params") or {}).get("odds_col"),
-            "top_fracs": (job.get("params") or {}).get("top_fracs"),
-            # Runtime controls
-            "duration_minutes": int((job.get("params") or {}).get("duration_minutes", st.session_state.get("agent_session_minutes_per_job", 10))),
-            # Filters (keep both representations for backwards compatibility)
-            "filters": st.session_state.get("agent_session_filters") or {},
-            "row_filters": _coerce_row_filters(st.session_state.get("agent_session_filters") or {}),
-            "top_n": int((job.get("params") or {}).get("top_n", 12)),
-        }
-        merged = {**base_params, **next_params}
-        submitted = _run_tool("submit_job", {"task_type": next_task, "params": merged})
-        new_job_id = (submitted or {}).get("job_id") if isinstance(submitted, dict) else None
-        if new_job_id:
-            st.session_state["_chained_from_job_ids"].add(job_id)
-            st.session_state["_handled_job_ids"].add(job_id)  # Mark as handled after chaining
-            st.session_state.active_job_id = new_job_id
-            st.session_state.active_job_pl_col = merged.get("pl_column")
-            st.session_state["active_job_last_event_ts"] = ""
-            st.session_state.active_job_last_status = ""
-            st.session_state.active_job_last_update_ts = 0.0
-            _append("assistant", f"🚀 Started next job: {next_task} for **{merged.get('pl_column')}**. Job ID: `{new_job_id}`")
-        else:
-            st.session_state["_handled_job_ids"].add(job_id)  # Mark as handled even on failure
-            _append("assistant", "⚠️ Could not submit next job. Stopping agent.")
-            st.session_state["agent_session_active"] = False
-            st.session_state.active_job_id = ""
-        return
-
-    # No chaining happened - mark as handled and clear active job
-    st.session_state["_handled_job_ids"].add(job_id)
-    st.session_state.active_job_id = ""
+STABILITY:
+[Monthly consistency]
+═══════════════════════════════════════"""
+    else:
+        question = """Explain why no edge found:
+- What was tried
+- Why each failed  
+- Learnings
+- Recommendations"""
+    
+    return _agent_decide(context, question)
 
 # ============================================================
-# Manual job commands (robust UUID extraction)
+# Agent execution
 # ============================================================
 
-def _maybe_handle_job_queries(user_text: str) -> bool:
-    t = (user_text or "").strip().lower()
-    uuids = _UUID_RE.findall(t)
-    if not uuids:
-        return False
+def _explore(pl_column: str) -> Dict:
+    results = {}
+    
+    # By MODE
+    job = _run_tool("query_data", {
+        "query_type": "aggregate",
+        "group_by": ["MODE"],
+        "metrics": ["count", f"sum:{pl_column}", f"mean:{pl_column}"],
+    })
+    if job.get("job_id"):
+        res = _run_tool("wait_for_job", {"job_id": job["job_id"], "timeout_s": 120})
+        results["by_mode"] = res.get("result", {}).get("result", {})
+    
+    # By DRIFT
+    job = _run_tool("query_data", {
+        "query_type": "aggregate", 
+        "group_by": ["DRIFT IN / OUT"],
+        "metrics": ["count", f"sum:{pl_column}", f"mean:{pl_column}"],
+    })
+    if job.get("job_id"):
+        res = _run_tool("wait_for_job", {"job_id": job["job_id"], "timeout_s": 120})
+        results["by_drift"] = res.get("result", {}).get("result", {})
+    
+    # By LEAGUE
+    job = _run_tool("query_data", {
+        "query_type": "aggregate",
+        "group_by": ["LEAGUE"],
+        "metrics": ["count", f"sum:{pl_column}", f"mean:{pl_column}"],
+        "limit": 15,
+    })
+    if job.get("job_id"):
+        res = _run_tool("wait_for_job", {"job_id": job["job_id"], "timeout_s": 120})
+        results["by_league"] = res.get("result", {}).get("result", {})
+    
+    return results
 
-    wants_check = "check job" in t
-    wants_show = "show results" in t or "results for" in t
+def _test_hypothesis(hypothesis: Dict, pl_column: str, bible: Dict) -> Dict:
+    filters = hypothesis.get("filters", [])
+    if not filters:
+        return {"error": "No filters"}
+    
+    job = _run_tool("test_filter", {
+        "filters": filters,
+        "pl_column": pl_column,
+        "enforcement": bible.get("gates", {}),
+    })
+    
+    if not job.get("job_id"):
+        return {"error": job.get("error", "Job failed")}
+    
+    result = _run_tool("wait_for_job", {"job_id": job["job_id"], "timeout_s": 300})
+    return result.get("result", result)
 
-    if not (wants_check or wants_show):
-        return False
+def run_agent_session(pl_column: str):
+    """Main agent session."""
+    st.session_state.agent_active = True
+    st.session_state.agent_iteration = 0
+    st.session_state.agent_findings = []
+    st.session_state.target_pl_column = pl_column
+    
+    _append("assistant", f"""
+# 🤖 Autonomous Research Session
 
-    job_id = uuids[0]
-    _append("user", user_text, persist=False)
+**Target:** {pl_column}
+**Max Iterations:** {MAX_ITERATIONS}
 
-    if wants_check:
-        job = _run_tool("get_job", {"job_id": job_id})
-        _append("assistant", f"```json\n{json.dumps(job, indent=2)}\n```", persist=False)
-
-    if wants_show:
-        waited = _run_tool("wait_for_job", {"job_id": job_id, "timeout_s": 2, "poll_s": 1, "auto_download": False})
-        job = waited.get("job") or {}
-        rp = job.get("result_path")
-        params = job.get("params") or {}
-        bucket = (params.get("_results_bucket") or DEFAULT_RESULTS_BUCKET).strip()
-
-        if not rp:
-            _append("assistant", f"No result_path yet.\n```json\n{json.dumps(job, indent=2)}\n```", persist=False)
-            _persist_chat()
-            return True
-
-        res = _run_tool("download_result", {"bucket": bucket, "result_path": rp})
-        result_obj = (res or {}).get("result") if isinstance(res, dict) else None
-        if result_obj:
-            _append("assistant", _render_distilled_top(result_obj, top_n=3), persist=False)
-            _append("assistant", f"```json\n{json.dumps(result_obj, indent=2)[:12000]}\n```", persist=False)
-            _log_lab_to_sheet(job_id, result_obj, tags="pl_lab,manual")
-        else:
-            _append("assistant", f"⚠️ Could not download/parse results.\n```json\n{json.dumps(res, indent=2)[:12000]}\n```", persist=False)
-
-    _persist_chat()
-    return True
+Starting research...
+""")
+    
+    # Load Bible
+    bible = _load_bible()
+    _append("assistant", _format_bible(bible))
+    
+    # Explore
+    _append("assistant", "🔍 **Phase 1: Exploring data...**")
+    exploration = _explore(pl_column)
+    _append("assistant", f"**Exploration Results:**\n```json\n{json.dumps(exploration, indent=2, default=str)[:1500]}\n```")
+    st.session_state.agent_findings.append({"phase": "exploration", "results": exploration})
+    
+    # Iteration loop
+    failures = []
+    
+    for i in range(1, MAX_ITERATIONS + 1):
+        st.session_state.agent_iteration = i
+        _append("assistant", f"\n---\n### 🧪 Iteration {i}/{MAX_ITERATIONS}")
+        
+        # Form hypothesis
+        hypothesis = _form_hypothesis(bible, exploration, failures)
+        _append("assistant", f"""**Hypothesis:** {hypothesis.get('hypothesis', 'N/A')}
+**Filters:** `{hypothesis.get('filters', [])}`
+**Confidence:** {hypothesis.get('confidence', 'N/A')}""")
+        
+        if not hypothesis.get("filters"):
+            failures.append({"iteration": i, "error": "No filters"})
+            continue
+        
+        # Test
+        _append("assistant", "Testing...")
+        result = _test_hypothesis(hypothesis, pl_column, bible)
+        
+        st.session_state.agent_findings.append({
+            "iteration": i,
+            "hypothesis": hypothesis,
+            "result": result,
+        })
+        
+        # Analyze
+        analysis = _analyze_result(bible, hypothesis, result, i)
+        _append("assistant", f"""**Analysis:** {analysis.get('analysis', 'N/A')}
+**Gates Passed:** {analysis.get('passed_gates', 'Unknown')}
+**Decision:** {analysis.get('decision', 'Unknown')}""")
+        
+        decision = analysis.get("decision", "")
+        
+        if decision == "success":
+            _append("assistant", "# 🎉 Strategy Found!")
+            conclusion = _format_conclusion(bible, st.session_state.agent_findings, True)
+            _append("assistant", conclusion)
+            
+            _run_tool("append_research_note", {
+                "note": json.dumps({"type": "success", "pl_column": pl_column, "iterations": i}),
+                "tags": f"success,{pl_column.replace(' ', '_')}"
+            })
+            
+            st.session_state.agent_active = False
+            return
+        
+        elif decision == "conclude_no_edge":
+            break
+        
+        failures.append({
+            "iteration": i,
+            "hypothesis": hypothesis,
+            "reason": analysis.get("learning", ""),
+        })
+    
+    # No edge found
+    _append("assistant", "# 📋 Research Complete - No Edge Found")
+    conclusion = _format_conclusion(bible, st.session_state.agent_findings, False)
+    _append("assistant", conclusion)
+    
+    _run_tool("append_research_note", {
+        "note": json.dumps({"type": "no_edge", "pl_column": pl_column, "iterations": st.session_state.agent_iteration}),
+        "tags": f"no_edge,{pl_column.replace(' ', '_')}"
+    })
+    
+    st.session_state.agent_active = False
 
 # ============================================================
-# Chat handler
+# Manual chat mode
 # ============================================================
 
-def _chat_with_tools(user_text: str, max_rounds: int = 6):
-    # FIX: Check for "automatically run diagnostics" phrase and enable the flag
-    t_lower = (user_text or "").lower()
-    if "automatically run diagnostics" in t_lower or "auto run diagnostics" in t_lower or "autodiag" in t_lower:
-        st.session_state["agent_session_autodiag_on_no_rules"] = True
+TOOLS_SCHEMA = [
+    {"type": "function", "function": {"name": "get_research_context", "description": "Load the Bible", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "start_pl_lab", "description": "Start ML pipeline", "parameters": {"type": "object", "properties": {"pl_column": {"type": "string"}}, "required": ["pl_column"]}}},
+    {"type": "function", "function": {"name": "start_test_filter", "description": "Test filter combination", "parameters": {"type": "object", "properties": {"filters": {"type": "array"}, "pl_column": {"type": "string"}}, "required": ["filters", "pl_column"]}}},
+    {"type": "function", "function": {"name": "start_query_data", "description": "Explore data", "parameters": {"type": "object", "properties": {"query_type": {"type": "string"}, "group_by": {"type": "array"}, "metrics": {"type": "array"}}}}},
+    {"type": "function", "function": {"name": "start_regime_check", "description": "Check stability", "parameters": {"type": "object", "properties": {"filters": {"type": "array"}, "pl_column": {"type": "string"}}, "required": ["filters", "pl_column"]}}},
+    {"type": "function", "function": {"name": "start_bracket_sweep", "description": "Find profitable ranges", "parameters": {"type": "object", "properties": {"pl_column": {"type": "string"}}, "required": ["pl_column"]}}},
+    {"type": "function", "function": {"name": "start_subgroup_scan", "description": "Find profitable groups", "parameters": {"type": "object", "properties": {"pl_column": {"type": "string"}}, "required": ["pl_column"]}}},
+    {"type": "function", "function": {"name": "get_job", "description": "Check job status", "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]}}},
+    {"type": "function", "function": {"name": "wait_for_job", "description": "Wait for job", "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]}}},
+    {"type": "function", "function": {"name": "append_research_note", "description": "Save note", "parameters": {"type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"]}}},
+]
 
-    # Autopilot "native" behaviours first
-    nt = _normalize(user_text)
-    if st.session_state.agent_mode == "autopilot":
-        if nt in ("explain enforcement", "explain gates", "gates"):
-            lines = ["### Enforcement gates (what they mean)"]
-            for k, v in DEFAULT_ENFORCEMENT.items():
-                lines.append(f"- **{k}={v}**: {ENFORCEMENT_EXPLANATION.get(k, '')}")
-            _append("user", user_text, persist=False)
-            _append("assistant", "\n".join(lines))
-            return
-
-        if _maybe_handle_job_queries(user_text):
-            return
-        if _maybe_start_narrated_pl_research(user_text):
-            return
-
-    # Otherwise, normal LLM chat/tools loop
-    _append("user", user_text, persist=False)
-
-    st.session_state.messages = _trim_messages(st.session_state.messages)
-
-    for _ in range(max_rounds):
-        try:
-            resp = _call_llm(st.session_state.messages)
-        except BadRequestError as e:
-            st.error("OpenAI BadRequestError (see details).")
-            try:
-                st.json(e.response.json())
-            except Exception:
-                st.exception(e)
-            raise
-
+def _chat_response(user_input: str):
+    """Handle chat mode with function calling."""
+    _append("user", user_input)
+    
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for m in st.session_state.messages[-20:]:
+        messages.append({"role": m["role"], "content": m["content"]})
+    
+    try:
+        resp = client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            tools=TOOLS_SCHEMA,
+            tool_choice="auto",
+            max_tokens=2000,
+        )
+        
         msg = resp.choices[0].message
-        tool_calls = getattr(msg, "tool_calls", None)
-
-        assistant_msg: Dict[str, Any] = {"role": "assistant", "content": msg.content or ""}
-        if tool_calls:
-            assistant_msg["tool_calls"] = [
-                {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
-                for tc in tool_calls
-            ]
-        st.session_state.messages.append(assistant_msg)
-
-        if st.session_state.agent_mode == "chat":
-            break
-        if not tool_calls:
-            break
-
-        for tc in tool_calls:
-            name = tc.function.name
-            args = json.loads(tc.function.arguments or "{}")
-            out = _run_tool(name, args)
-            st.session_state.messages.append({"role": "tool", "tool_call_id": tc.id, "content": json.dumps(out, ensure_ascii=False)})
-
-        st.session_state.messages = _trim_messages(st.session_state.messages)
-
-    _persist_chat()
+        
+        # Handle tool calls
+        if msg.tool_calls:
+            for tc in msg.tool_calls:
+                fn_name = tc.function.name
+                fn_args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+                
+                _append("assistant", f"🔧 Calling `{fn_name}`...")
+                result = _run_tool(fn_name, fn_args)
+                _append("assistant", f"```json\n{json.dumps(result, indent=2, default=str)[:2000]}\n```")
+        
+        if msg.content:
+            _append("assistant", msg.content)
+    
+    except Exception as e:
+        _append("assistant", f"Error: {e}")
 
 # ============================================================
+# UI
+# ============================================================
+
+st.set_page_config(page_title="Football Research Agent v2", page_icon="⚽", layout="wide")
+st.title("⚽ Football Research Agent v2")
+
 # Sidebar
-# ============================================================
-
 with st.sidebar:
-    st.caption(f"Model: `{MODEL}`")
-    st.caption(f"Data: `{DEFAULT_STORAGE_BUCKET}/{DEFAULT_STORAGE_PATH}`")
-    st.caption(f"Results: `{DEFAULT_RESULTS_BUCKET}`")
-
-    st.radio("Agent mode", ["chat", "autopilot"], key="agent_mode")
-    st.checkbox("Narrate autopilot runs", key="autopilot_narrate", value=True)
-
-    st.divider()
-    if st.button("➕ New chat"):
-        new_id = _new_session_id()
-        _set_session(new_id)
-        st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-        st.session_state.loaded_for_sid = new_id
-        st.session_state.active_job_id = ""
-        _persist_chat(title=f"Session {new_id[:8]}")
-        st.rerun()
-
-    st.subheader("Enforcement gates (current defaults)")
-    for k, v in DEFAULT_ENFORCEMENT.items():
-        st.write(f"- {k}={v}")
-        with st.expander(f"Why {k}?"):
-            st.write(ENFORCEMENT_EXPLANATION.get(k, ""))
-
-    st.divider()
-    if st.session_state.get("last_chat_save_error"):
-        st.warning(f"Chat persistence warning: {st.session_state.last_chat_save_error}")
-        if st.button("Clear chat save warning"):
-            st.session_state.last_chat_save_error = None
-
-    st.subheader("Chat sessions")
-    sessions = _run_tool("list_chats", {"limit": 200}).get("sessions") or []
-    sessions_display = list(reversed(sessions))
-    options = [{"session_id": _sid(), "title": f"(current) {_sid()[:8]}"}] + [
-        {"session_id": s.get("session_id"), "title": s.get("title") or s.get("session_id")[:8]}
-        for s in sessions_display
-        if s.get("session_id") and s.get("session_id") != _sid()
-    ]
-    labels = [f"{o['title']} - {o['session_id'][:8]}" for o in options]
-    chosen = st.selectbox("Select session", options=list(range(len(options))), format_func=lambda i: labels[i], index=0)
-    if options[chosen]["session_id"] != _sid():
-        _set_session(options[chosen]["session_id"])
-        st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-        _try_load_chat(st.session_state.session_id)
-        st.session_state.active_job_id = ""
-        st.rerun()
-
-# ============================================================
-# Main content
-# ============================================================
-
-# If a job is active, auto-refresh so you get status updates without manual input.
-if st.session_state.get("active_job_id") and st.session_state.get("autopilot_narrate", True):
-    st.caption("Autopilot is monitoring a running job. This page will auto-refresh for live updates.")
-    if st_autorefresh is None:
-        st.info("Live auto-refresh needs the 'streamlit-autorefresh' package. Add it to requirements.txt. For now, use the button below.")
-        if st.button("Refresh now"):
+    st.header("🎛️ Controls")
+    
+    mode = st.radio("Mode", ["💬 Chat", "🤖 Autonomous Agent"], index=1)
+    
+    if mode == "🤖 Autonomous Agent":
+        st.divider()
+        pl_col = st.selectbox("Target Market", [
+            "BO 2.5 PL", "BTTS PL", "SHG PL", "SHG 2+ PL", 
+            "LU1.5 PL", "LFGHU0.5 PL", "BO1.5 FHG PL"
+        ])
+        
+        if st.button("🚀 Start Research", type="primary", disabled=st.session_state.agent_active):
+            run_agent_session(pl_col)
             st.rerun()
-    (
-        st_autorefresh(interval=5000, key="autopilot_refresh")
-        if st_autorefresh is not None
-        else None
-    )
+        
+        if st.session_state.agent_active:
+            st.warning(f"🔄 Agent active: Iteration {st.session_state.agent_iteration}")
+        
+        if st.session_state.agent_findings:
+            st.success(f"📊 {len(st.session_state.agent_findings)} findings")
+    
+    st.divider()
+    if st.button("🗑️ Clear Chat"):
+        st.session_state.messages = []
+        st.session_state.agent_findings = []
+        st.session_state.bible = None
+        st.rerun()
+    
+    st.divider()
+    st.caption("v2 - Autonomous Agent Edition")
 
-# Tick once per run
-_autopilot_tick()
+# Main area
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
 
-st.subheader("💬 Chat")
-for m in st.session_state.messages:
-    if m.get("role") == "system":
-        continue
-    with st.chat_message(m.get("role", "assistant")):
-        st.markdown(m.get("content", ""))
+# Chat input
+if mode == "💬 Chat":
+    if prompt := st.chat_input("Ask me anything..."):
+        _chat_response(prompt)
+        st.rerun()
+else:
+    st.info("👆 Select a market and click **Start Research** to begin autonomous analysis.")
 
-user_msg = st.chat_input("Ask the researcher...")
-if user_msg:
-    _chat_with_tools(user_msg)
-    st.rerun()
+# Debug panel
+with st.expander("🔍 Debug Info"):
+    st.json({
+        "session_id": st.session_state.session_id,
+        "messages": len(st.session_state.messages),
+        "agent_active": st.session_state.agent_active,
+        "agent_iteration": st.session_state.agent_iteration,
+        "findings": len(st.session_state.agent_findings),
+        "bible_loaded": st.session_state.bible is not None,
+    })
