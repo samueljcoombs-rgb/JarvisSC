@@ -1526,6 +1526,10 @@ def _autopilot_tick():
 
         _append("assistant", f"🟡 No rules passed gates → running automatic diagnostics: **{auto_task}**\n{why}")
         submitted = _run_tool("submit_job", {"task_type": auto_task, "params": merged})
+        
+        # Debug: show what submit_job returned
+        _append("assistant", f"🔍 Debug submit_job response: `{submitted}`")
+        
         new_job_id = (submitted or {}).get("job_id") if isinstance(submitted, dict) else None
 
         if new_job_id:
