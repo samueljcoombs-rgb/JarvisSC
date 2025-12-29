@@ -136,12 +136,23 @@ def _format_bible(bible: Dict) -> str:
     overview = bible.get("dataset_overview") or {}
     gates = bible.get("gates") or {}
     derived = bible.get("derived") or {}
+    rules = bible.get("research_rules") or []
+    notes = bible.get("research_notes") or []
+    col_defs = bible.get("column_definitions") or []
+    
     outcome_cols = derived.get('outcome_columns', [])
     outcome_str = ', '.join(str(c) for c in outcome_cols) if isinstance(outcome_cols, list) else str(outcome_cols)
+    
+    # Count what we loaded
+    rules_count = len(rules) if isinstance(rules, list) else 1
+    notes_count = len(notes) if isinstance(notes, list) else 0
+    cols_count = len(col_defs) if isinstance(col_defs, list) else 0
+    
     return f"""## 📖 Bible Loaded
 **Goal:** {overview.get('primary_goal', 'Find profitable strategies')}
 **Gates (v4):** min_train={gates.get('min_train_rows', 300)}, min_val={gates.get('min_val_rows', 60)}, min_test={gates.get('min_test_rows', 60)}, max_gap={gates.get('max_train_val_gap_roi', 0.4)}, max_rolling_dd={gates.get('max_rolling_dd', -50)}
-**Outcome Columns (NEVER features):** {outcome_str}"""
+**Outcome Columns (NEVER features):** {outcome_str}
+**Loaded:** {rules_count} rules, {cols_count} column defs, {notes_count} past notes"""
 
 # ============================================================
 # LLM
@@ -196,7 +207,7 @@ def _parse_json(resp: str) -> Optional[Dict]:
 # Phase 1: Exploration (with MARKET)
 # ============================================================
 
-def _run_exploration(pl_column: str) -> Dict:
+def _run_exploration(pl_column: str, progress_container=None) -> Dict:
     results = {}
     queries = [
         ("by_mode", {"query_type": "aggregate", "group_by": ["MODE"], "metrics": ["count", f"sum:{pl_column}", f"mean:{pl_column}"]}),
@@ -205,25 +216,41 @@ def _run_exploration(pl_column: str) -> Dict:
         ("by_league", {"query_type": "aggregate", "group_by": ["LEAGUE"], "metrics": ["count", f"sum:{pl_column}", f"mean:{pl_column}"], "limit": 20}),
         ("by_mode_drift", {"query_type": "aggregate", "group_by": ["MODE", "DRIFT IN / OUT"], "metrics": ["count", f"sum:{pl_column}", f"mean:{pl_column}"]}),
     ]
-    for name, params in queries:
+    for idx, (name, params) in enumerate(queries):
         _log(f"Exploring {name}...")
+        if progress_container:
+            progress_container.text(f"🔍 Exploring {name}... ({idx+1}/{len(queries)})")
         job = _run_tool("query_data", params)
-        results[name] = _wait_for_job(job["job_id"], timeout=120) if job.get("job_id") else {"error": job.get("error", "Failed")}
+        if job.get("job_id"):
+            results[name] = _wait_for_job(job["job_id"], timeout=120)
+        else:
+            results[name] = {"error": job.get("error", "Failed to submit")}
+    if progress_container:
+        progress_container.text("✅ Exploration complete")
     return results
 
 # ============================================================
 # Phase 2: Sweeps
 # ============================================================
 
-def _run_sweeps(pl_column: str, bible: Dict) -> Dict:
+def _run_sweeps(pl_column: str, bible: Dict, progress_container=None) -> Dict:
     results = {}
     enforcement = bible.get("gates", {})
+    
+    if progress_container:
+        progress_container.text("🔬 Running bracket_sweep...")
     _log("Running bracket_sweep...")
     job = _run_tool("bracket_sweep", {"pl_column": pl_column, "sweep_cols": ["ACTUAL ODDS", "% DRIFT"], "n_bins": 8, "enforcement": enforcement})
     results["bracket_sweep"] = _wait_for_job(job["job_id"], timeout=180) if job.get("job_id") else {"error": job.get("error", "Failed")}
+    
+    if progress_container:
+        progress_container.text("🔬 Running subgroup_scan...")
     _log("Running subgroup_scan...")
     job = _run_tool("subgroup_scan", {"pl_column": pl_column, "group_cols": ["MODE", "MARKET", "DRIFT IN / OUT", "LEAGUE"], "enforcement": enforcement})
     results["subgroup_scan"] = _wait_for_job(job["job_id"], timeout=180) if job.get("job_id") else {"error": job.get("error", "Failed")}
+    
+    if progress_container:
+        progress_container.text("✅ Sweeps complete")
     return results
 
 # ============================================================
@@ -346,26 +373,38 @@ def run_agent():
     st.markdown(f"# 🤖 Research Agent v4: {pl_column}")
     
     # Bible
-    st.markdown("### 📖 Loading Bible...")
-    bible = _load_bible()
-    st.markdown(_format_bible(bible))
+    with st.status("📖 Loading Bible...", expanded=True) as status:
+        bible = _load_bible()
+        st.markdown(_format_bible(bible))
+        with st.expander("📚 Full Bible Context", expanded=False):
+            st.markdown("**Research Rules:**")
+            st.code(_safe_json(bible.get("research_rules", []), 1500), language="json")
+            st.markdown("**Column Definitions:**")
+            st.code(_safe_json(bible.get("column_definitions", []), 1500), language="json")
+            st.markdown("**Recent Notes:**")
+            st.code(_safe_json(bible.get("research_notes", [])[:10], 1500), language="json")
+        status.update(label="📖 Bible loaded", state="complete")
     _append("assistant", _format_bible(bible))
     
     # Exploration
-    st.markdown("### 🔍 Phase 1: Exploration")
-    exploration = _run_exploration(pl_column)
-    st.session_state.exploration_results = exploration
-    with st.expander("Exploration Results"):
-        st.code(_safe_json(exploration, 3000), language="json")
+    with st.status("🔍 Phase 1: Exploration...", expanded=True) as status:
+        progress = st.empty()
+        exploration = _run_exploration(pl_column, progress)
+        st.session_state.exploration_results = exploration
+        with st.expander("Exploration Results", expanded=False):
+            st.code(_safe_json(exploration, 3000), language="json")
+        status.update(label="🔍 Exploration complete", state="complete")
     
     # Sweeps
-    st.markdown("### 🔬 Phase 2: Segment Analysis")
-    sweeps = _run_sweeps(pl_column, bible)
-    st.session_state.sweep_results = sweeps
-    promising = len(sweeps.get("bracket_sweep", {}).get("promising", [])) + len(sweeps.get("subgroup_scan", {}).get("promising", []))
-    st.markdown(f"**Found {promising} promising segments**")
-    with st.expander("Sweep Results"):
-        st.code(_safe_json(sweeps, 3000), language="json")
+    with st.status("🔬 Phase 2: Segment Analysis...", expanded=True) as status:
+        progress = st.empty()
+        sweeps = _run_sweeps(pl_column, bible, progress)
+        st.session_state.sweep_results = sweeps
+        promising = len(sweeps.get("bracket_sweep", {}).get("promising", [])) + len(sweeps.get("subgroup_scan", {}).get("promising", []))
+        st.markdown(f"**Found {promising} promising segments**")
+        with st.expander("Sweep Results", expanded=False):
+            st.code(_safe_json(sweeps, 3000), language="json")
+        status.update(label=f"🔬 Sweeps complete ({promising} promising)", state="complete")
     
     st.session_state.agent_findings.append({"phase": "exploration", "promising": promising})
     
