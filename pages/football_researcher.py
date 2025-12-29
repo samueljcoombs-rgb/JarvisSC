@@ -1,11 +1,11 @@
 """
-Football Researcher v2 - Autonomous Agent Edition
+Football Researcher v2 - Autonomous Agent Edition (Fixed)
 
-A truly autonomous research agent that:
-1. Reads and internalizes the Bible before starting
-2. Forms and tests hypotheses
-3. Learns from failures
-4. Outputs explicit strategy criteria or explains why no edge exists
+Key fixes:
+- Proper session state management
+- Progressive display with st.empty() containers
+- Non-blocking job polling
+- Reliable button handling
 """
 
 from __future__ import annotations
@@ -19,34 +19,36 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import streamlit as st
-
-try:
-    from streamlit_autorefresh import st_autorefresh
-except Exception:
-    st_autorefresh = None
-
 from openai import OpenAI
 from modules import football_tools as tools
+
+# ============================================================
+# Page config MUST be first
+# ============================================================
+st.set_page_config(page_title="Football Research Agent v2", page_icon="⚽", layout="wide")
 
 # ============================================================
 # Configuration
 # ============================================================
 
-def _init_client() -> OpenAI:
+@st.cache_resource
+def _get_client() -> OpenAI:
     api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY")
     if not api_key:
         st.error("Missing OPENAI_API_KEY")
         st.stop()
     return OpenAI(api_key=api_key)
 
-client = _init_client()
-MODEL = os.getenv("PREFERRED_OPENAI_MODEL") or st.secrets.get("PREFERRED_OPENAI_MODEL", "gpt-4o")
+def _get_model() -> str:
+    return os.getenv("PREFERRED_OPENAI_MODEL") or st.secrets.get("PREFERRED_OPENAI_MODEL", "gpt-4o")
 
 MAX_ITERATIONS = 8
 MAX_MESSAGES = 150
+JOB_POLL_INTERVAL = 3  # seconds
+JOB_TIMEOUT = 180  # seconds
 
 # ============================================================
-# Session state
+# Session state initialization
 # ============================================================
 
 def _init_state():
@@ -54,11 +56,15 @@ def _init_state():
         "messages": [],
         "session_id": str(uuid.uuid4()),
         "bible": None,
-        "agent_active": False,
+        "agent_phase": "idle",  # idle, exploring, hypothesizing, testing, analyzing, complete
         "agent_iteration": 0,
         "agent_findings": [],
         "current_job_id": None,
         "target_pl_column": "BO 2.5 PL",
+        "exploration_results": {},
+        "past_failures": [],
+        "current_hypothesis": None,
+        "run_requested": False,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -67,13 +73,26 @@ def _init_state():
 _init_state()
 
 # ============================================================
-# Helpers
+# Message helpers
 # ============================================================
 
 def _append(role: str, content: str):
-    st.session_state.messages.append({"role": role, "content": content, "ts": datetime.utcnow().isoformat()})
+    st.session_state.messages.append({
+        "role": role, 
+        "content": content, 
+        "ts": datetime.utcnow().isoformat()
+    })
     if len(st.session_state.messages) > MAX_MESSAGES:
         st.session_state.messages = st.session_state.messages[-MAX_MESSAGES:]
+
+def _display_messages():
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+# ============================================================
+# Tool runner
+# ============================================================
 
 def _run_tool(name: str, args: Optional[Dict] = None) -> Any:
     args = args or {}
@@ -93,6 +112,31 @@ def _run_tool(name: str, args: Optional[Dict] = None) -> Any:
         return fn(**args)
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+def _poll_job(job_id: str, status_container, timeout: int = JOB_TIMEOUT) -> Dict:
+    """Poll job with visual progress updates."""
+    start = time.time()
+    dots = 0
+    
+    while time.time() - start < timeout:
+        job = _run_tool("get_job", {"job_id": job_id})
+        status = (job.get("status") or "").lower()
+        
+        dots = (dots + 1) % 4
+        status_container.text(f"⏳ Job {job_id[:8]}... {status} {'.' * dots}")
+        
+        if status == "done":
+            result_path = job.get("result_path")
+            if result_path:
+                result = _run_tool("download_result", {"result_path": result_path})
+                return result.get("result", job)
+            return job
+        elif status == "error":
+            return {"error": job.get("error_message", "Job failed"), "job": job}
+        
+        time.sleep(JOB_POLL_INTERVAL)
+    
+    return {"error": "Job timeout", "job_id": job_id}
 
 # ============================================================
 # Bible helpers
@@ -142,18 +186,34 @@ Find EXPLICIT filter criteria for profitable bets. Output like:
 4. Simple rules > complex rules
 5. Think WHY something works
 
+## Available Columns (use EXACTLY these names)
+- MODE: Type of prediction model used
+- LEAGUE: Football league name
+- MARKET: Bet type (e.g., 'BO 2.5', 'BTTS', 'SHG')
+- ACTUAL ODDS: Decimal odds offered
+- % DRIFT: Percentage odds movement
+- DRIFT IN / OUT: Direction of drift ('IN' or 'OUT')
+- XG DIFF, M-XG-DIFF, etc.: Expected goals differentials
+
 ## Process
-1. EXPLORE data baseline
-2. HYPOTHESIZE with specific filters
-3. TEST quickly
+1. EXPLORE data baseline by key dimensions
+2. HYPOTHESIZE with specific filters using EXACT column names
+3. TEST quickly with test_filter
 4. ITERATE or CONCLUDE
+
+When forming filters, use these operators:
+- "=" for exact match
+- "in" for list membership: {"col": "LEAGUE", "op": "in", "values": ["EPL", "La Liga"]}
+- "between" for ranges: {"col": "ACTUAL ODDS", "op": "between", "min": 1.5, "max": 2.5}
+- ">=", "<=", ">", "<" for comparisons
 
 Respond with JSON when asked for decisions."""
 
 def _agent_decide(context: str, question: str) -> str:
     try:
+        client = _get_client()
         resp = client.chat.completions.create(
-            model=MODEL,
+            model=_get_model(),
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": f"{context}\n\n---\n{question}"}
@@ -166,122 +226,204 @@ def _agent_decide(context: str, question: str) -> str:
         return f"[Error: {e}]"
 
 def _form_hypothesis(bible: Dict, exploration: Dict, failures: List) -> Dict:
+    # Include actual column values from exploration
     context = f"""
-Bible Gates: {bible.get('gates', {})}
-Exploration: {json.dumps(exploration, default=str)[:2000]}
-Past Failures: {json.dumps(failures[-3:], default=str) if failures else 'None'}
+## Bible Gates
+{json.dumps(bible.get('gates', {}), indent=2)}
+
+## Exploration Results (USE THESE EXACT VALUES)
+{json.dumps(exploration, default=str, indent=2)[:3000]}
+
+## Past Failures (DON'T REPEAT THESE)
+{json.dumps(failures[-5:], default=str, indent=2) if failures else 'None yet'}
+
+## Important
+- Use EXACT column names: MODE, LEAGUE, MARKET, "ACTUAL ODDS", "% DRIFT", "DRIFT IN / OUT"
+- Use EXACT values you see in exploration results
+- The target is BO 2.5 PL - only rows where MARKET relates to over 2.5 goals
 """
-    question = """Form a SPECIFIC hypothesis. Respond with JSON:
+    
+    question = """Form a SPECIFIC hypothesis to test. Use exact column names and values from exploration.
+
+Respond ONLY with JSON (no markdown):
 {
-    "hypothesis": "What you're testing",
-    "reasoning": "Why it might work", 
-    "filters": [{"col": "COL", "op": "OP", "value": VAL}],
+    "hypothesis": "Clear statement of what you're testing",
+    "reasoning": "Why this might be profitable based on the data",
+    "filters": [
+        {"col": "EXACT_COL_NAME", "op": "OPERATOR", "value": "OR_values_OR_min/max"}
+    ],
     "confidence": "low/medium/high"
-}"""
+}
+
+Example filters:
+- {"col": "MODE", "op": "=", "value": "XG"}
+- {"col": "LEAGUE", "op": "in", "values": ["EPL", "La Liga"]}
+- {"col": "ACTUAL ODDS", "op": "between", "min": 1.8, "max": 2.5}
+- {"col": "DRIFT IN / OUT", "op": "=", "value": "IN"}
+"""
     
     resp = _agent_decide(context, question)
     try:
-        match = re.search(r'\{[\s\S]*\}', resp)
+        # Try to extract JSON
+        resp_clean = resp.strip()
+        if resp_clean.startswith("```"):
+            resp_clean = re.sub(r'^```\w*\n?', '', resp_clean)
+            resp_clean = re.sub(r'\n?```$', '', resp_clean)
+        
+        match = re.search(r'\{[\s\S]*\}', resp_clean)
         if match:
             return json.loads(match.group())
-    except:
+    except Exception as e:
         pass
-    return {"hypothesis": resp, "filters": [], "confidence": "low"}
+    
+    return {"hypothesis": resp, "filters": [], "confidence": "low", "parse_error": True}
 
 def _analyze_result(bible: Dict, hypothesis: Dict, result: Dict, iteration: int) -> Dict:
+    gates = bible.get('gates', {})
+    
     context = f"""
-Gates: {bible.get('gates', {})}
-Hypothesis: {json.dumps(hypothesis, default=str)}
-Result: {json.dumps(result, default=str)[:3000]}
-Iteration: {iteration}/{MAX_ITERATIONS}
+## Enforcement Gates
+{json.dumps(gates, indent=2)}
+
+## Hypothesis Tested
+{json.dumps(hypothesis, default=str, indent=2)}
+
+## Test Result
+{json.dumps(result, default=str, indent=2)[:4000]}
+
+## Progress
+Iteration {iteration} of {MAX_ITERATIONS}
 """
-    question = """Analyze and decide next step. JSON:
-{
-    "analysis": "What result shows",
+    
+    question = """Analyze this result and decide next step.
+
+Check:
+1. Did we get enough rows in train/val/test? (gates: min_train={}, min_val={}, min_test={})
+2. Is ROI positive in all splits?
+3. Is train-val gap acceptable? (max gap: {})
+4. Is test drawdown acceptable? (max: {})
+
+Respond ONLY with JSON:
+{{
+    "analysis": "What the numbers tell us",
+    "metrics": {{"train_roi": X, "val_roi": Y, "test_roi": Z, "train_rows": N, "val_rows": N, "test_rows": N}},
     "passed_gates": true/false,
+    "gate_failures": ["list of failed gates if any"],
     "decision": "refine|new_hypothesis|success|conclude_no_edge",
-    "learning": "What to remember"
-}"""
+    "learning": "What to remember for next iteration",
+    "refinement_suggestion": "If refining, what to change"
+}}
+""".format(
+        gates.get('min_train_rows', 300),
+        gates.get('min_val_rows', 60),
+        gates.get('min_test_rows', 60),
+        gates.get('max_train_val_gap_roi', 0.4),
+        gates.get('max_test_drawdown', -50)
+    )
     
     resp = _agent_decide(context, question)
     try:
-        match = re.search(r'\{[\s\S]*\}', resp)
+        resp_clean = resp.strip()
+        if resp_clean.startswith("```"):
+            resp_clean = re.sub(r'^```\w*\n?', '', resp_clean)
+            resp_clean = re.sub(r'\n?```$', '', resp_clean)
+        
+        match = re.search(r'\{[\s\S]*\}', resp_clean)
         if match:
             return json.loads(match.group())
     except:
         pass
-    return {"analysis": resp, "decision": "new_hypothesis"}
+    
+    return {"analysis": resp, "decision": "new_hypothesis", "passed_gates": False}
 
 def _format_conclusion(bible: Dict, findings: List, success: bool) -> str:
-    context = f"Findings: {json.dumps(findings, default=str)[:4000]}"
+    context = f"""
+## All Research Findings
+{json.dumps(findings, default=str, indent=2)[:6000]}
+
+## Success: {success}
+"""
     
     if success:
-        question = """Format the winning strategy:
-═══════════════════════════════════════
-STRATEGY DISCOVERED: [Name]
-═══════════════════════════════════════
-EXPLICIT CRITERIA:
-[Each filter]
+        question = """Format the winning strategy clearly:
 
-PERFORMANCE:
-[ROI, samples, drawdown]
+═══════════════════════════════════════════════════════════════
+STRATEGY DISCOVERED
+═══════════════════════════════════════════════════════════════
+
+EXPLICIT CRITERIA:
+- [Each filter condition]
+
+PERFORMANCE (from test split):
+- ROI: X%
+- Sample size: N bets
+- Max drawdown: X points
+- Winning rate: X%
 
 STABILITY:
-[Monthly consistency]
-═══════════════════════════════════════"""
+- Train ROI: X% (N samples)
+- Val ROI: X% (N samples)  
+- Test ROI: X% (N samples)
+
+RECOMMENDATION:
+[How to use this strategy]
+
+═══════════════════════════════════════════════════════════════
+"""
     else:
-        question = """Explain why no edge found:
-- What was tried
-- Why each failed  
-- Learnings
-- Recommendations"""
+        question = """Summarize why no profitable strategy was found:
+
+1. What approaches were tried
+2. Why each failed (specific gate failures)
+3. Key learnings
+4. Recommendations for future research
+5. Whether the market appears efficient
+
+Be specific about numbers and failures.
+"""
     
     return _agent_decide(context, question)
 
 # ============================================================
-# Agent execution
+# Exploration phase
 # ============================================================
 
-def _explore(pl_column: str) -> Dict:
+def _run_exploration(pl_column: str, progress_container) -> Dict:
+    """Run exploration queries with progress updates."""
     results = {}
     
-    # By MODE
-    job = _run_tool("query_data", {
-        "query_type": "aggregate",
-        "group_by": ["MODE"],
-        "metrics": ["count", f"sum:{pl_column}", f"mean:{pl_column}"],
-    })
-    if job.get("job_id"):
-        res = _run_tool("wait_for_job", {"job_id": job["job_id"], "timeout_s": 120})
-        results["by_mode"] = res.get("result", {}).get("result", {})
+    queries = [
+        ("by_mode", {"query_type": "aggregate", "group_by": ["MODE"], "metrics": ["count", f"sum:{pl_column}", f"mean:{pl_column}"]}),
+        ("by_drift", {"query_type": "aggregate", "group_by": ["DRIFT IN / OUT"], "metrics": ["count", f"sum:{pl_column}", f"mean:{pl_column}"]}),
+        ("by_league", {"query_type": "aggregate", "group_by": ["LEAGUE"], "metrics": ["count", f"sum:{pl_column}", f"mean:{pl_column}"], "limit": 20}),
+        ("baseline", {"query_type": "describe", "pl_column": pl_column}),
+    ]
     
-    # By DRIFT
-    job = _run_tool("query_data", {
-        "query_type": "aggregate", 
-        "group_by": ["DRIFT IN / OUT"],
-        "metrics": ["count", f"sum:{pl_column}", f"mean:{pl_column}"],
-    })
-    if job.get("job_id"):
-        res = _run_tool("wait_for_job", {"job_id": job["job_id"], "timeout_s": 120})
-        results["by_drift"] = res.get("result", {}).get("result", {})
+    for name, params in queries:
+        progress_container.text(f"🔍 Exploring {name}...")
+        
+        job = _run_tool("query_data", params)
+        if job.get("job_id"):
+            result = _poll_job(job["job_id"], progress_container, timeout=120)
+            results[name] = result
+        else:
+            results[name] = {"error": job.get("error", "Failed to submit")}
     
-    # By LEAGUE
-    job = _run_tool("query_data", {
-        "query_type": "aggregate",
-        "group_by": ["LEAGUE"],
-        "metrics": ["count", f"sum:{pl_column}", f"mean:{pl_column}"],
-        "limit": 15,
-    })
-    if job.get("job_id"):
-        res = _run_tool("wait_for_job", {"job_id": job["job_id"], "timeout_s": 120})
-        results["by_league"] = res.get("result", {}).get("result", {})
-    
+    progress_container.text("✅ Exploration complete")
     return results
 
-def _test_hypothesis(hypothesis: Dict, pl_column: str, bible: Dict) -> Dict:
+# ============================================================
+# Test hypothesis
+# ============================================================
+
+def _test_hypothesis(hypothesis: Dict, pl_column: str, bible: Dict, status_container) -> Dict:
+    """Test a hypothesis with progress updates."""
     filters = hypothesis.get("filters", [])
+    
     if not filters:
-        return {"error": "No filters"}
+        return {"error": "No filters in hypothesis"}
+    
+    status_container.text("📤 Submitting test_filter job...")
     
     job = _run_tool("test_filter", {
         "filters": filters,
@@ -290,108 +432,189 @@ def _test_hypothesis(hypothesis: Dict, pl_column: str, bible: Dict) -> Dict:
     })
     
     if not job.get("job_id"):
-        return {"error": job.get("error", "Job failed")}
+        return {"error": f"Failed to submit: {job.get('error', 'Unknown')}"}
     
-    result = _run_tool("wait_for_job", {"job_id": job["job_id"], "timeout_s": 300})
-    return result.get("result", result)
-
-def run_agent_session(pl_column: str):
-    """Main agent session."""
-    st.session_state.agent_active = True
-    st.session_state.agent_iteration = 0
-    st.session_state.agent_findings = []
-    st.session_state.target_pl_column = pl_column
+    status_container.text(f"⏳ Testing hypothesis (job {job['job_id'][:8]})...")
+    result = _poll_job(job["job_id"], status_container, timeout=JOB_TIMEOUT)
     
-    _append("assistant", f"""
-# 🤖 Autonomous Research Session
-
-**Target:** {pl_column}
-**Max Iterations:** {MAX_ITERATIONS}
-
-Starting research...
-""")
-    
-    # Load Bible
-    bible = _load_bible()
-    _append("assistant", _format_bible(bible))
-    
-    # Explore
-    _append("assistant", "🔍 **Phase 1: Exploring data...**")
-    exploration = _explore(pl_column)
-    _append("assistant", f"**Exploration Results:**\n```json\n{json.dumps(exploration, indent=2, default=str)[:1500]}\n```")
-    st.session_state.agent_findings.append({"phase": "exploration", "results": exploration})
-    
-    # Iteration loop
-    failures = []
-    
-    for i in range(1, MAX_ITERATIONS + 1):
-        st.session_state.agent_iteration = i
-        _append("assistant", f"\n---\n### 🧪 Iteration {i}/{MAX_ITERATIONS}")
-        
-        # Form hypothesis
-        hypothesis = _form_hypothesis(bible, exploration, failures)
-        _append("assistant", f"""**Hypothesis:** {hypothesis.get('hypothesis', 'N/A')}
-**Filters:** `{hypothesis.get('filters', [])}`
-**Confidence:** {hypothesis.get('confidence', 'N/A')}""")
-        
-        if not hypothesis.get("filters"):
-            failures.append({"iteration": i, "error": "No filters"})
-            continue
-        
-        # Test
-        _append("assistant", "Testing...")
-        result = _test_hypothesis(hypothesis, pl_column, bible)
-        
-        st.session_state.agent_findings.append({
-            "iteration": i,
-            "hypothesis": hypothesis,
-            "result": result,
-        })
-        
-        # Analyze
-        analysis = _analyze_result(bible, hypothesis, result, i)
-        _append("assistant", f"""**Analysis:** {analysis.get('analysis', 'N/A')}
-**Gates Passed:** {analysis.get('passed_gates', 'Unknown')}
-**Decision:** {analysis.get('decision', 'Unknown')}""")
-        
-        decision = analysis.get("decision", "")
-        
-        if decision == "success":
-            _append("assistant", "# 🎉 Strategy Found!")
-            conclusion = _format_conclusion(bible, st.session_state.agent_findings, True)
-            _append("assistant", conclusion)
-            
-            _run_tool("append_research_note", {
-                "note": json.dumps({"type": "success", "pl_column": pl_column, "iterations": i}),
-                "tags": f"success,{pl_column.replace(' ', '_')}"
-            })
-            
-            st.session_state.agent_active = False
-            return
-        
-        elif decision == "conclude_no_edge":
-            break
-        
-        failures.append({
-            "iteration": i,
-            "hypothesis": hypothesis,
-            "reason": analysis.get("learning", ""),
-        })
-    
-    # No edge found
-    _append("assistant", "# 📋 Research Complete - No Edge Found")
-    conclusion = _format_conclusion(bible, st.session_state.agent_findings, False)
-    _append("assistant", conclusion)
-    
-    _run_tool("append_research_note", {
-        "note": json.dumps({"type": "no_edge", "pl_column": pl_column, "iterations": st.session_state.agent_iteration}),
-        "tags": f"no_edge,{pl_column.replace(' ', '_')}"
-    })
-    
-    st.session_state.agent_active = False
+    return result
 
 # ============================================================
-# Manual chat mode
+# Main agent runner
+# ============================================================
+
+def run_agent():
+    """Main agent execution with visual progress."""
+    pl_column = st.session_state.target_pl_column
+    
+    # Create containers for progressive display
+    main_container = st.container()
+    
+    with main_container:
+        st.markdown(f"""
+# 🤖 Autonomous Research Session
+
+**Target:** {pl_column}  
+**Max Iterations:** {MAX_ITERATIONS}
+""")
+        
+        # Phase 1: Load Bible
+        with st.status("📖 Loading Bible...", expanded=True) as status:
+            bible = _load_bible()
+            st.markdown(_format_bible(bible))
+            status.update(label="📖 Bible loaded", state="complete")
+        
+        _append("assistant", f"# 🤖 Research Session: {pl_column}\n\n" + _format_bible(bible))
+        
+        # Phase 2: Exploration
+        with st.status("🔍 Exploring data...", expanded=True) as status:
+            progress = st.empty()
+            exploration = _run_exploration(pl_column, progress)
+            st.session_state.exploration_results = exploration
+            
+            # Show results
+            st.markdown("### Exploration Results")
+            
+            for key, data in exploration.items():
+                with st.expander(f"📊 {key}", expanded=False):
+                    st.json(data)
+            
+            status.update(label="🔍 Exploration complete", state="complete")
+        
+        _append("assistant", f"**Exploration Results:**\n```json\n{json.dumps(exploration, indent=2, default=str)[:2000]}\n```")
+        st.session_state.agent_findings.append({"phase": "exploration", "results": exploration})
+        
+        # Phase 3: Iteration loop
+        st.markdown("---")
+        st.markdown("## 🧪 Hypothesis Testing")
+        
+        failures = st.session_state.past_failures
+        
+        for i in range(1, MAX_ITERATIONS + 1):
+            st.session_state.agent_iteration = i
+            
+            with st.status(f"Iteration {i}/{MAX_ITERATIONS}", expanded=True) as iter_status:
+                # Form hypothesis
+                st.markdown("**🧠 Forming hypothesis...**")
+                hypothesis = _form_hypothesis(bible, exploration, failures)
+                st.session_state.current_hypothesis = hypothesis
+                
+                st.markdown(f"""
+**Hypothesis:** {hypothesis.get('hypothesis', 'N/A')}
+
+**Reasoning:** {hypothesis.get('reasoning', 'N/A')}
+
+**Filters:** 
+```json
+{json.dumps(hypothesis.get('filters', []), indent=2)}
+```
+
+**Confidence:** {hypothesis.get('confidence', 'N/A')}
+""")
+                
+                if not hypothesis.get("filters") or hypothesis.get("parse_error"):
+                    st.warning("⚠️ Could not form valid filters, trying again...")
+                    failures.append({"iteration": i, "error": "Invalid filters", "raw": hypothesis})
+                    iter_status.update(label=f"Iteration {i} - No valid filters", state="error")
+                    continue
+                
+                # Test hypothesis
+                st.markdown("**🧪 Testing...**")
+                test_progress = st.empty()
+                result = _test_hypothesis(hypothesis, pl_column, bible, test_progress)
+                
+                st.markdown("**Result:**")
+                with st.expander("Full result", expanded=False):
+                    st.json(result)
+                
+                # Save finding
+                st.session_state.agent_findings.append({
+                    "iteration": i,
+                    "hypothesis": hypothesis,
+                    "result": result,
+                })
+                
+                # Analyze
+                st.markdown("**📊 Analyzing...**")
+                analysis = _analyze_result(bible, hypothesis, result, i)
+                
+                st.markdown(f"""
+**Analysis:** {analysis.get('analysis', 'N/A')}
+
+**Gates Passed:** {analysis.get('passed_gates', 'Unknown')}
+
+**Decision:** {analysis.get('decision', 'Unknown')}
+
+**Learning:** {analysis.get('learning', 'N/A')}
+""")
+                
+                _append("assistant", f"""
+### Iteration {i}
+**Hypothesis:** {hypothesis.get('hypothesis')}
+**Filters:** `{hypothesis.get('filters')}`
+**Result:** Gates passed: {analysis.get('passed_gates')}
+**Decision:** {analysis.get('decision')}
+""")
+                
+                decision = analysis.get("decision", "").lower()
+                
+                if decision == "success":
+                    iter_status.update(label=f"Iteration {i} - SUCCESS! 🎉", state="complete")
+                    
+                    st.markdown("# 🎉 Strategy Found!")
+                    conclusion = _format_conclusion(bible, st.session_state.agent_findings, True)
+                    st.markdown(conclusion)
+                    _append("assistant", f"# 🎉 Strategy Found!\n\n{conclusion}")
+                    
+                    # Log to Bible
+                    _run_tool("append_research_note", {
+                        "note": json.dumps({
+                            "type": "success",
+                            "pl_column": pl_column,
+                            "iterations": i,
+                            "filters": hypothesis.get("filters"),
+                        }),
+                        "tags": f"success,{pl_column.replace(' ', '_')}"
+                    })
+                    
+                    st.session_state.agent_phase = "complete"
+                    st.balloons()
+                    return
+                
+                elif decision == "conclude_no_edge":
+                    iter_status.update(label=f"Iteration {i} - Concluding", state="complete")
+                    break
+                
+                else:
+                    iter_status.update(label=f"Iteration {i} - {decision}", state="complete")
+                    failures.append({
+                        "iteration": i,
+                        "hypothesis": hypothesis,
+                        "reason": analysis.get("learning", ""),
+                        "gate_failures": analysis.get("gate_failures", []),
+                    })
+                    st.session_state.past_failures = failures
+        
+        # No edge found
+        st.markdown("---")
+        st.markdown("# 📋 Research Complete")
+        conclusion = _format_conclusion(bible, st.session_state.agent_findings, False)
+        st.markdown(conclusion)
+        _append("assistant", f"# 📋 No Edge Found\n\n{conclusion}")
+        
+        _run_tool("append_research_note", {
+            "note": json.dumps({
+                "type": "no_edge",
+                "pl_column": pl_column,
+                "iterations": st.session_state.agent_iteration,
+            }),
+            "tags": f"no_edge,{pl_column.replace(' ', '_')}"
+        })
+        
+        st.session_state.agent_phase = "complete"
+
+# ============================================================
+# Chat mode
 # ============================================================
 
 TOOLS_SCHEMA = [
@@ -404,11 +627,9 @@ TOOLS_SCHEMA = [
     {"type": "function", "function": {"name": "start_subgroup_scan", "description": "Find profitable groups", "parameters": {"type": "object", "properties": {"pl_column": {"type": "string"}}, "required": ["pl_column"]}}},
     {"type": "function", "function": {"name": "get_job", "description": "Check job status", "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]}}},
     {"type": "function", "function": {"name": "wait_for_job", "description": "Wait for job", "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]}}},
-    {"type": "function", "function": {"name": "append_research_note", "description": "Save note", "parameters": {"type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"]}}},
 ]
 
 def _chat_response(user_input: str):
-    """Handle chat mode with function calling."""
     _append("user", user_input)
     
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -416,8 +637,9 @@ def _chat_response(user_input: str):
         messages.append({"role": m["role"], "content": m["content"]})
     
     try:
+        client = _get_client()
         resp = client.chat.completions.create(
-            model=MODEL,
+            model=_get_model(),
             messages=messages,
             tools=TOOLS_SCHEMA,
             tool_choice="auto",
@@ -426,7 +648,6 @@ def _chat_response(user_input: str):
         
         msg = resp.choices[0].message
         
-        # Handle tool calls
         if msg.tool_calls:
             for tc in msg.tool_calls:
                 fn_name = tc.function.name
@@ -443,65 +664,95 @@ def _chat_response(user_input: str):
         _append("assistant", f"Error: {e}")
 
 # ============================================================
-# UI
+# UI Layout
 # ============================================================
 
-st.set_page_config(page_title="Football Research Agent v2", page_icon="⚽", layout="wide")
 st.title("⚽ Football Research Agent v2")
 
 # Sidebar
 with st.sidebar:
     st.header("🎛️ Controls")
     
-    mode = st.radio("Mode", ["💬 Chat", "🤖 Autonomous Agent"], index=1)
+    mode = st.radio("Mode", ["🤖 Autonomous Agent", "💬 Chat"], index=0)
+    
+    st.divider()
     
     if mode == "🤖 Autonomous Agent":
-        st.divider()
         pl_col = st.selectbox("Target Market", [
             "BO 2.5 PL", "BTTS PL", "SHG PL", "SHG 2+ PL", 
             "LU1.5 PL", "LFGHU0.5 PL", "BO1.5 FHG PL"
         ])
+        st.session_state.target_pl_column = pl_col
         
-        if st.button("🚀 Start Research", type="primary", disabled=st.session_state.agent_active):
-            run_agent_session(pl_col)
-            st.rerun()
+        # Use a form to prevent accidental re-runs
+        with st.form("start_form"):
+            start_clicked = st.form_submit_button("🚀 Start Research", type="primary")
+            
+            if start_clicked:
+                # Reset state for new run
+                st.session_state.agent_phase = "running"
+                st.session_state.agent_iteration = 0
+                st.session_state.agent_findings = []
+                st.session_state.past_failures = []
+                st.session_state.exploration_results = {}
+                st.session_state.current_hypothesis = None
+                st.session_state.bible = None
+                st.session_state.run_requested = True
         
-        if st.session_state.agent_active:
-            st.warning(f"🔄 Agent active: Iteration {st.session_state.agent_iteration}")
+        # Status display
+        phase = st.session_state.agent_phase
+        if phase == "running":
+            st.warning(f"🔄 Running: Iteration {st.session_state.agent_iteration}")
+        elif phase == "complete":
+            st.success("✅ Complete")
         
         if st.session_state.agent_findings:
-            st.success(f"📊 {len(st.session_state.agent_findings)} findings")
+            st.info(f"📊 {len(st.session_state.agent_findings)} findings")
     
     st.divider()
-    if st.button("🗑️ Clear Chat"):
-        st.session_state.messages = []
-        st.session_state.agent_findings = []
-        st.session_state.bible = None
+    
+    if st.button("🗑️ Clear All"):
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
         st.rerun()
     
     st.divider()
-    st.caption("v2 - Autonomous Agent Edition")
+    st.caption("v2.1 - Fixed Edition")
 
-# Main area
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+# Main content area
+if mode == "🤖 Autonomous Agent":
+    if st.session_state.run_requested:
+        st.session_state.run_requested = False
+        run_agent()
+    elif st.session_state.agent_phase == "idle":
+        st.info("👆 Select a market and click **Start Research** to begin.")
+        
+        # Show previous messages if any
+        if st.session_state.messages:
+            st.markdown("### Previous Session")
+            _display_messages()
+    elif st.session_state.agent_phase == "complete":
+        st.success("Research complete! See results above or start a new session.")
+        _display_messages()
+    else:
+        _display_messages()
 
-# Chat input
-if mode == "💬 Chat":
+else:  # Chat mode
+    _display_messages()
+    
     if prompt := st.chat_input("Ask me anything..."):
         _chat_response(prompt)
         st.rerun()
-else:
-    st.info("👆 Select a market and click **Start Research** to begin autonomous analysis.")
 
 # Debug panel
-with st.expander("🔍 Debug Info"):
+with st.expander("🔍 Debug Info", expanded=False):
     st.json({
         "session_id": st.session_state.session_id,
+        "phase": st.session_state.agent_phase,
+        "iteration": st.session_state.agent_iteration,
         "messages": len(st.session_state.messages),
-        "agent_active": st.session_state.agent_active,
-        "agent_iteration": st.session_state.agent_iteration,
         "findings": len(st.session_state.agent_findings),
+        "failures": len(st.session_state.past_failures),
         "bible_loaded": st.session_state.bible is not None,
+        "run_requested": st.session_state.run_requested,
     })
