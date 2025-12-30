@@ -210,12 +210,22 @@ def _parse_json(resp: str) -> Optional[Dict]:
 def _run_exploration(pl_column: str, progress_container=None) -> Dict:
     """
     Explore data systematically:
-    - MODE alone (see which prediction type works)
-    - MODE + MARKET (the key combination - which markets work for which modes)
-    - MODE + MARKET + DRIFT (full picture)
-    - LEAGUE (for geographic patterns)
+    1. Get data distribution (numeric ranges, categorical values)
+    2. MODE alone (see which prediction type works)
+    3. MODE + MARKET (the key combination)
+    4. MODE + MARKET + DRIFT (full picture)
+    5. LEAGUE patterns
     """
     results = {}
+    
+    # CRITICAL: First get data distribution so we know actual column ranges
+    if progress_container:
+        progress_container.text("🔍 Getting data distribution...")
+    _log("Getting data distribution...")
+    job = _run_tool("query_data", {"query_type": "describe"})
+    if job.get("job_id"):
+        results["data_distribution"] = _wait_for_job(job["job_id"], timeout=120)
+    
     queries = [
         # Core: MODE alone
         ("by_mode", {"query_type": "aggregate", "group_by": ["MODE"], "metrics": ["count", f"sum:{pl_column}", f"mean:{pl_column}"]}),
@@ -248,24 +258,87 @@ def _run_exploration(pl_column: str, progress_container=None) -> Dict:
         progress_container.text("✅ Exploration complete")
     return results
 
+
+def _analyze_exploration(bible: Dict, exploration: Dict, pl_column: str) -> Dict:
+    """
+    LLM analyzes exploration results and identifies promising avenues.
+    This is a THINKING phase, not hypothesis testing yet.
+    """
+    # Extract key findings
+    mode_market = exploration.get("by_mode_market", {}).get("result", {}).get("groups", [])
+    mode_market_drift = exploration.get("by_mode_market_drift", {}).get("result", {}).get("groups", [])
+    data_dist = exploration.get("data_distribution", {}).get("result", {})
+    
+    context = f"""You are analyzing exploration results for {pl_column}.
+
+## Data Distribution (IMPORTANT - use these actual ranges!)
+{_safe_json(data_dist, 2000)}
+
+## MODE + MARKET Results (sorted by mean PL)
+{_safe_json(sorted(mode_market, key=lambda x: x.get(f'mean_{pl_column}', 0), reverse=True)[:20], 2500)}
+
+## MODE + MARKET + DRIFT Results (top performers)
+{_safe_json(sorted(mode_market_drift, key=lambda x: x.get(f'mean_{pl_column}', 0), reverse=True)[:25], 2500)}
+
+## Gates to eventually pass
+{_safe_json(bible.get('gates', {}), 300)}
+"""
+    
+    question = """Analyze these exploration results. Your job is to:
+
+1. IDENTIFY which MODE + MARKET combinations show promise (positive mean PL, decent sample size)
+2. IDENTIFY which DRIFT direction helps for each promising combination
+3. NOTE the actual data ranges from the distribution (% DRIFT, ACTUAL ODDS, etc.)
+4. LIST 5-8 promising avenues to explore further
+
+DO NOT form testable hypotheses yet. This is pure analysis.
+
+Respond with JSON:
+{
+    "analysis_summary": "Key patterns observed",
+    "promising_combinations": [
+        {"mode": "XG", "market": "FHGO1.5 Back", "drift": "IN/OUT/any", "mean_pl": X, "count": N, "why_promising": "..."}
+    ],
+    "data_ranges": {
+        "percent_drift": {"min": X, "max": Y},
+        "actual_odds": {"min": X, "max": Y}
+    },
+    "avenues_to_explore": ["avenue 1", "avenue 2", ...],
+    "initial_observations": "What patterns stand out"
+}"""
+    
+    resp = _llm(context, question)
+    parsed = _parse_json(resp)
+    return parsed if parsed else {"analysis_summary": resp[:500], "promising_combinations": [], "avenues_to_explore": []}
+
+
 # ============================================================
-# Phase 2: Sweeps
+# Phase 2: Sweeps (with relaxed gates for exploration)
 # ============================================================
 
 def _run_sweeps(pl_column: str, bible: Dict, progress_container=None) -> Dict:
+    """Run sweeps with RELAXED gates - we want to find interesting segments, not passing ones yet."""
     results = {}
-    enforcement = bible.get("gates", {})
+    
+    # Use relaxed enforcement for exploration - we want to see what's interesting
+    relaxed_enforcement = {
+        "min_train_rows": 100,  # Lower than normal
+        "min_val_rows": 30,
+        "min_test_rows": 30,
+        "max_train_val_gap_roi": 1.0,  # Very relaxed
+        "max_test_drawdown": -100,  # Very relaxed
+    }
     
     if progress_container:
-        progress_container.text("🔬 Running bracket_sweep...")
+        progress_container.text("🔬 Running bracket_sweep (relaxed gates)...")
     _log("Running bracket_sweep...")
-    job = _run_tool("bracket_sweep", {"pl_column": pl_column, "sweep_cols": ["ACTUAL ODDS", "% DRIFT"], "n_bins": 8, "enforcement": enforcement})
+    job = _run_tool("bracket_sweep", {"pl_column": pl_column, "sweep_cols": ["ACTUAL ODDS", "% DRIFT"], "n_bins": 8, "enforcement": relaxed_enforcement})
     results["bracket_sweep"] = _wait_for_job(job["job_id"], timeout=180) if job.get("job_id") else {"error": job.get("error", "Failed")}
     
     if progress_container:
-        progress_container.text("🔬 Running subgroup_scan...")
+        progress_container.text("🔬 Running subgroup_scan (relaxed gates)...")
     _log("Running subgroup_scan...")
-    job = _run_tool("subgroup_scan", {"pl_column": pl_column, "group_cols": ["MODE", "MARKET", "DRIFT IN / OUT", "LEAGUE"], "enforcement": enforcement})
+    job = _run_tool("subgroup_scan", {"pl_column": pl_column, "group_cols": ["MODE", "MARKET", "DRIFT IN / OUT", "LEAGUE"], "enforcement": relaxed_enforcement})
     results["subgroup_scan"] = _wait_for_job(job["job_id"], timeout=180) if job.get("job_id") else {"error": job.get("error", "Failed")}
     
     if progress_container:
@@ -273,20 +346,70 @@ def _run_sweeps(pl_column: str, bible: Dict, progress_container=None) -> Dict:
     return results
 
 # ============================================================
-# Hypothesis Formation
+# Hypothesis Formation (Data-Aware)
 # ============================================================
 
-def _form_hypothesis(bible: Dict, exploration: Dict, sweeps: Dict, failures: List, near_misses: List, tested_hashes: Set) -> Dict:
-    promising_brackets = sweeps.get("bracket_sweep", {}).get("promising", [])[:5]
-    promising_subgroups = sweeps.get("subgroup_scan", {}).get("promising", [])[:5]
-    context = f"""Gates: {_safe_json(bible.get('gates', {}), 300)}
-Exploration: {_safe_json(exploration, 1500)}
-Promising brackets: {_safe_json(promising_brackets, 800)}
-Promising subgroups: {_safe_json(promising_subgroups, 800)}
-Failures: {_safe_json(failures[-3:], 600) if failures else 'None'}
-Near-misses: {_safe_json(near_misses[-2:], 500) if near_misses else 'None'}"""
-    question = """Form hypothesis based on promising segments. JSON only:
-{"hypothesis": "...", "market_inefficiency": "WHY this works", "filters": [...], "based_on": "sweep|near_miss|new", "confidence": "low/medium/high"}"""
+def _form_hypothesis(bible: Dict, exploration: Dict, exploration_analysis: Dict, sweeps: Dict, failures: List, near_misses: List, tested_hashes: Set) -> Dict:
+    """Form hypothesis using actual data ranges and exploration insights."""
+    
+    # Get actual data ranges from exploration
+    data_ranges = exploration_analysis.get("data_ranges", {})
+    promising = exploration_analysis.get("promising_combinations", [])[:5]
+    avenues = exploration_analysis.get("avenues_to_explore", [])
+    
+    # Get sweep results
+    top_brackets = sweeps.get("bracket_sweep", {}).get("top_brackets", [])[:5]
+    top_subgroups = sweeps.get("subgroup_scan", {}).get("top_groups", [])[:5]
+    
+    context = f"""## Task: Form a SPECIFIC, TESTABLE hypothesis
+
+## Data Ranges (USE THESE - don't guess!)
+{_safe_json(data_ranges, 500)}
+
+## Promising Combinations from Analysis
+{_safe_json(promising, 1000)}
+
+## Avenues to Explore
+{avenues}
+
+## Top Bracket Sweeps
+{_safe_json(top_brackets, 800)}
+
+## Top Subgroup Scans  
+{_safe_json(top_subgroups, 800)}
+
+## Past Failures (DON'T REPEAT)
+{_safe_json(failures[-5:], 800) if failures else 'None'}
+
+## Near-misses (consider refining)
+{_safe_json(near_misses[-2:], 500) if near_misses else 'None'}
+
+## Gates to pass
+{_safe_json(bible.get('gates', {}), 300)}
+"""
+    
+    question = """Form ONE specific hypothesis to test.
+
+CRITICAL RULES:
+1. Use EXACT column names: MODE, MARKET, "DRIFT IN / OUT", "ACTUAL ODDS", "% DRIFT"
+2. Use values that EXIST in the data (check exploration results)
+3. Start simple - maybe just MODE + MARKET + DRIFT direction
+4. Ensure filters will return enough rows (>300 for train)
+
+Respond with JSON ONLY:
+{
+    "hypothesis": "Clear statement",
+    "market_inefficiency": "WHY this specific combination might be profitable",
+    "filters": [
+        {"col": "MODE", "op": "=", "value": "XG"},
+        {"col": "MARKET", "op": "=", "value": "FHGO1.5 Back"},
+        {"col": "DRIFT IN / OUT", "op": "=", "value": "IN"}
+    ],
+    "expected_rows": "estimate based on exploration",
+    "based_on": "which exploration finding led to this",
+    "confidence": "low/medium/high"
+}"""
+    
     resp = _llm(context, question)
     parsed = _parse_json(resp)
     if parsed and parsed.get("filters"):
@@ -296,13 +419,25 @@ Near-misses: {_safe_json(near_misses[-2:], 500) if near_misses else 'None'}"""
         return parsed
     return {"hypothesis": resp[:300], "filters": [], "parse_error": True}
 
-def _refine_near_miss(bible: Dict, near_miss: Dict, exploration: Dict) -> Dict:
+
+def _refine_near_miss(bible: Dict, near_miss: Dict, exploration: Dict, exploration_analysis: Dict) -> Dict:
+    """Refine a near-miss using data insights."""
+    data_ranges = exploration_analysis.get("data_ranges", {})
+    
     context = f"""Near-miss to refine (positive ROI but failed gates):
 Filters: {near_miss.get('filters')}
 Result: {_safe_json(near_miss.get('result', {}), 1000)}
 Gate failures: {near_miss.get('gate_failures')}
-Exploration: {_safe_json(exploration, 1000)}"""
-    question = """Refine to reduce drawdown. JSON: {"refinement": "what changed", "filters": [...]}"""
+Data ranges: {_safe_json(data_ranges, 500)}
+Exploration insights: {_safe_json(exploration_analysis.get('promising_combinations', [])[:3], 500)}"""
+    
+    question = """Refine this near-miss to pass gates. Consider:
+1. Tightening numeric ranges to reduce drawdown
+2. Adding a filter to improve consistency
+3. Using actual data ranges provided
+
+JSON: {"refinement": "what changed and why", "filters": [...]}"""
+    
     resp = _llm(context, question)
     parsed = _parse_json(resp)
     if parsed and parsed.get("filters"):
@@ -429,21 +564,55 @@ def run_agent():
         status.update(label="🔍 Exploration complete", state="complete")
     
     with st.expander("Exploration Results", expanded=False):
-        st.code(_safe_json(exploration, 3000), language="json")
+        st.code(_safe_json(exploration, 4000), language="json")
     
-    # Sweeps
-    with st.status("🔬 Phase 2: Segment Analysis...", expanded=True) as status:
+    # NEW: Exploration Analysis Phase
+    st.markdown("### 🧠 Phase 1b: Analyzing Exploration")
+    with st.status("🧠 Analyzing exploration results...", expanded=True) as status:
+        exploration_analysis = _analyze_exploration(bible, exploration, pl_column)
+        st.session_state.exploration_analysis = exploration_analysis
+        status.update(label="🧠 Analysis complete", state="complete")
+    
+    # Display analysis
+    st.markdown(f"**Summary:** {exploration_analysis.get('analysis_summary', 'N/A')}")
+    st.markdown(f"**Initial Observations:** {exploration_analysis.get('initial_observations', 'N/A')}")
+    
+    promising_combos = exploration_analysis.get("promising_combinations", [])
+    if promising_combos:
+        st.markdown("**Promising Combinations Found:**")
+        for combo in promising_combos[:6]:
+            st.markdown(f"- **{combo.get('mode', '?')} + {combo.get('market', '?')}** (drift: {combo.get('drift', '?')}) - {combo.get('why_promising', '')}")
+    
+    avenues = exploration_analysis.get("avenues_to_explore", [])
+    if avenues:
+        st.markdown(f"**Avenues to explore:** {', '.join(avenues[:5])}")
+    
+    with st.expander("Full Analysis", expanded=False):
+        st.code(_safe_json(exploration_analysis, 2000), language="json")
+    
+    _append("assistant", f"Exploration Analysis: {exploration_analysis.get('analysis_summary', 'N/A')}")
+    
+    # Sweeps (with relaxed gates)
+    with st.status("🔬 Phase 2: Segment Analysis (relaxed gates)...", expanded=True) as status:
         progress = st.empty()
         sweeps = _run_sweeps(pl_column, bible, progress)
         st.session_state.sweep_results = sweeps
-        promising = len(sweeps.get("bracket_sweep", {}).get("promising", [])) + len(sweeps.get("subgroup_scan", {}).get("promising", []))
-        status.update(label=f"🔬 Sweeps complete ({promising} promising)", state="complete")
+        # Count top results, not just "promising" which has strict gates
+        top_brackets = len(sweeps.get("bracket_sweep", {}).get("top_brackets", []))
+        top_subgroups = len(sweeps.get("subgroup_scan", {}).get("top_groups", []))
+        status.update(label=f"🔬 Sweeps complete ({top_brackets} brackets, {top_subgroups} subgroups)", state="complete")
     
-    st.markdown(f"**Found {promising} promising segments**")
+    st.markdown(f"**Found {top_brackets} bracket patterns, {top_subgroups} subgroup patterns**")
     with st.expander("Sweep Results", expanded=False):
         st.code(_safe_json(sweeps, 3000), language="json")
     
-    st.session_state.agent_findings.append({"phase": "exploration", "promising": promising})
+    st.session_state.agent_findings.append({
+        "phase": "exploration", 
+        "promising_combinations": len(promising_combos),
+        "avenues": avenues[:5],
+        "top_brackets": top_brackets,
+        "top_subgroups": top_subgroups
+    })
     
     # Hypothesis loop
     st.markdown("---\n### 🧪 Phase 3: Hypothesis Testing")
@@ -456,9 +625,9 @@ def run_agent():
         # Near-miss refinement
         if st.session_state.near_misses and i > 3 and i % 2 == 0:
             st.markdown("**🔧 Refining near-miss...**")
-            hypothesis = _refine_near_miss(bible, st.session_state.near_misses[-1], exploration)
+            hypothesis = _refine_near_miss(bible, st.session_state.near_misses[-1], exploration, exploration_analysis)
         else:
-            hypothesis = _form_hypothesis(bible, exploration, sweeps, failures, st.session_state.near_misses, st.session_state.tested_filter_hashes)
+            hypothesis = _form_hypothesis(bible, exploration, exploration_analysis, sweeps, failures, st.session_state.near_misses, st.session_state.tested_filter_hashes)
         
         if hypothesis.get("duplicate") or not hypothesis.get("filters") or hypothesis.get("parse_error"):
             st.warning("⚠️ Invalid/duplicate hypothesis")
@@ -467,7 +636,9 @@ def run_agent():
         
         st.markdown(f"**Hypothesis:** {hypothesis.get('hypothesis', 'N/A')}")
         st.markdown(f"**Why:** {hypothesis.get('market_inefficiency', 'N/A')}")
+        st.markdown(f"**Based on:** {hypothesis.get('based_on', 'N/A')}")
         st.markdown(f"**Filters:** `{hypothesis.get('filters')}`")
+        st.markdown(f"**Expected rows:** {hypothesis.get('expected_rows', 'Unknown')}")
         
         result = _test_hypothesis(hypothesis, pl_column, bible)
         if result.get("skipped"):
