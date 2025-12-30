@@ -896,26 +896,76 @@ def run_agent():
             st.markdown("# 🎉 Strategy Found!")
             success_found = True
             
-            # Get passing filters
-            passing_filters = analysis.get("passing_filters", [[]])[0]
+            # Get passing filters - show them prominently!
+            passing_filters = analysis.get("passing_filters", [[]])
+            best_result = None
+            for r in analysis.get("all_results", []):
+                if r.get("gates_passed") and r.get("test_roi", 0) > 0:
+                    best_result = r
+                    break
             
-            # Run advanced validation
-            st.markdown("### Running Advanced Validation...")
+            # SHOW THE STRATEGY CLEARLY
+            st.markdown("## 📋 Winning Strategy")
+            st.markdown("### Filters:")
+            if passing_filters and passing_filters[0]:
+                for f in passing_filters[0]:
+                    if f.get("op") == "=":
+                        st.markdown(f"- **{f.get('col')}** = `{f.get('value')}`")
+                    elif f.get("op") == "between":
+                        st.markdown(f"- **{f.get('col')}** between `{f.get('min')}` and `{f.get('max')}`")
+                    else:
+                        st.markdown(f"- **{f.get('col')}** {f.get('op')} `{f.get('value')}`")
             
-            # Forward walk
-            job = _run_tool("forward_walk", {"filters": passing_filters, "pl_column": pl_column, "n_windows": 6})
-            if job.get("job_id"):
-                fw_result = _wait_for_job(job["job_id"], timeout=180)
-                st.markdown(f"**Forward Walk:** {fw_result.get('verdict', 'N/A')}")
+            # Show performance
+            if best_result:
+                st.markdown("### Performance:")
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Train ROI", f"{best_result.get('train_roi', 0):.2%}")
+                col2.metric("Val ROI", f"{best_result.get('val_roi', 0):.2%}")
+                col3.metric("Test ROI", f"{best_result.get('test_roi', 0):.2%}")
+                
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Train Rows", best_result.get('train_rows', 0))
+                col2.metric("Val Rows", best_result.get('val_rows', 0))
+                col3.metric("Test Rows", best_result.get('test_rows', 0))
             
-            # Monte Carlo
-            job = _run_tool("monte_carlo_sim", {"filters": passing_filters, "pl_column": pl_column, "n_simulations": 500})
-            if job.get("job_id"):
-                mc_result = _wait_for_job(job["job_id"], timeout=180)
-                prob = mc_result.get('probability', {}).get('positive_roi', 0)
-                st.markdown(f"**Monte Carlo:** {prob:.1%} probability positive")
+            # Copy-pasteable format
+            st.markdown("### Copy-Paste Format:")
+            filter_str = json.dumps(passing_filters[0] if passing_filters else [], indent=2)
+            st.code(filter_str, language="json")
             
             st.balloons()
+            
+            # Optional: Advanced validation (don't block on it)
+            with st.expander("🔬 Run Advanced Validation (optional)", expanded=False):
+                if st.button("Run Forward Walk & Monte Carlo"):
+                    with st.spinner("Running forward walk..."):
+                        job = _run_tool("forward_walk", {"filters": passing_filters[0] if passing_filters else [], "pl_column": pl_column, "n_windows": 6})
+                        if job.get("job_id"):
+                            fw_result = _wait_for_job(job["job_id"], timeout=180)
+                            st.markdown(f"**Forward Walk:** {fw_result.get('verdict', 'N/A')}")
+                            st.code(_safe_json(fw_result, 2000), language="json")
+                    
+                    with st.spinner("Running monte carlo..."):
+                        job = _run_tool("monte_carlo_sim", {"filters": passing_filters[0] if passing_filters else [], "pl_column": pl_column, "n_simulations": 500})
+                        if job.get("job_id"):
+                            mc_result = _wait_for_job(job["job_id"], timeout=180)
+                            prob = mc_result.get('probability', {}).get('positive_roi', 0)
+                            st.markdown(f"**Monte Carlo:** {prob:.1%} probability positive")
+                            st.code(_safe_json(mc_result, 2000), language="json")
+            
+            # Log to Bible
+            _run_tool("append_research_note", {
+                "note": json.dumps({
+                    "type": "SUCCESS",
+                    "pl_column": pl_column,
+                    "filters": passing_filters[0] if passing_filters else [],
+                    "test_roi": best_result.get("test_roi") if best_result else 0,
+                    "train_roi": best_result.get("train_roi") if best_result else 0,
+                }),
+                "tags": f"success,{pl_column.replace(' ', '_')}"
+            })
+            
             st.session_state.agent_phase = "complete"
             return
         
