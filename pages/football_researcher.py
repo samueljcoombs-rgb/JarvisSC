@@ -208,13 +208,32 @@ def _parse_json(resp: str) -> Optional[Dict]:
 # ============================================================
 
 def _run_exploration(pl_column: str, progress_container=None) -> Dict:
+    """
+    Explore data systematically:
+    - MODE alone (see which prediction type works)
+    - MODE + MARKET (the key combination - which markets work for which modes)
+    - MODE + MARKET + DRIFT (full picture)
+    - LEAGUE (for geographic patterns)
+    """
     results = {}
     queries = [
+        # Core: MODE alone
         ("by_mode", {"query_type": "aggregate", "group_by": ["MODE"], "metrics": ["count", f"sum:{pl_column}", f"mean:{pl_column}"]}),
-        ("by_market", {"query_type": "aggregate", "group_by": ["MARKET"], "metrics": ["count", f"sum:{pl_column}", f"mean:{pl_column}"]}),
+        
+        # KEY: MODE + MARKET together (this is what you want!)
+        ("by_mode_market", {"query_type": "aggregate", "group_by": ["MODE", "MARKET"], "metrics": ["count", f"sum:{pl_column}", f"mean:{pl_column}"]}),
+        
+        # Full picture: MODE + MARKET + DRIFT
+        ("by_mode_market_drift", {"query_type": "aggregate", "group_by": ["MODE", "MARKET", "DRIFT IN / OUT"], "metrics": ["count", f"sum:{pl_column}", f"mean:{pl_column}"]}),
+        
+        # Drift patterns
         ("by_drift", {"query_type": "aggregate", "group_by": ["DRIFT IN / OUT"], "metrics": ["count", f"sum:{pl_column}", f"mean:{pl_column}"]}),
+        
+        # Geographic patterns
         ("by_league", {"query_type": "aggregate", "group_by": ["LEAGUE"], "metrics": ["count", f"sum:{pl_column}", f"mean:{pl_column}"], "limit": 20}),
-        ("by_mode_drift", {"query_type": "aggregate", "group_by": ["MODE", "DRIFT IN / OUT"], "metrics": ["count", f"sum:{pl_column}", f"mean:{pl_column}"]}),
+        
+        # League + Mode (does XG work better in certain leagues?)
+        ("by_league_mode", {"query_type": "aggregate", "group_by": ["LEAGUE", "MODE"], "metrics": ["count", f"sum:{pl_column}", f"mean:{pl_column}"], "limit": 30}),
     ]
     for idx, (name, params) in enumerate(queries):
         _log(f"Exploring {name}...")
@@ -383,9 +402,19 @@ def run_agent():
         st.markdown("**Research Rules:**")
         rules = bible.get("research_rules", [])
         st.code(_safe_json(rules if rules else "No rules loaded", 1500), language="json")
+        
+        st.markdown("**Dataset Overview:**")
+        overview = bible.get("dataset_overview", {})
+        st.code(_safe_json(overview if overview else "No overview", 1500), language="json")
+        
         st.markdown("**Column Definitions:**")
         cols = bible.get("column_definitions", [])
-        st.code(_safe_json(cols if cols else "No column defs", 1500), language="json")
+        st.code(_safe_json(cols if cols else "No column defs", 2000), language="json")
+        
+        st.markdown("**Gates/Thresholds:**")
+        gates = bible.get("gates", {})
+        st.code(_safe_json(gates if gates else "No gates", 800), language="json")
+        
         st.markdown("**Recent Notes:**")
         notes = bible.get("research_notes", [])
         st.code(_safe_json(notes[:10] if notes else "No notes yet", 1500), language="json")
