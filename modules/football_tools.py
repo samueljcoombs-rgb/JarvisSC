@@ -1053,3 +1053,92 @@ def update_recent_actions(action: Dict[str, Any]) -> Dict[str, Any]:
     recent = recent[-50:]  # Keep last 50
     
     return set_research_state("recent_actions", json.dumps(recent))
+
+
+# =====================================================================
+# NEW: Feature Importance Starter
+# =====================================================================
+
+def start_feature_importance(
+    pl_column: str = "PL",
+    top_n: int = 20,
+    **kwargs
+) -> Dict[str, Any]:
+    """
+    Analyze which features correlate most with profitability.
+    
+    For each numeric column, computes:
+    - Correlation with PL column
+    - Mean PL for high/low halves
+    - Quartile analysis
+    
+    This helps identify which features are worth exploring for filter strategies.
+    
+    Args:
+        pl_column: Target profit/loss column
+        top_n: Number of top features to return
+    
+    Returns:
+        Job submission result with job_id
+    """
+    params = {
+        "pl_column": pl_column,
+        "top_n": top_n,
+        **kwargs,
+    }
+    return _submit_job("feature_importance", params)
+
+
+def feature_importance(pl_column: str = "PL", **kwargs) -> Dict[str, Any]:
+    """Convenience wrapper that starts job and waits for result."""
+    job = start_feature_importance(pl_column=pl_column, **kwargs)
+    if not job.get("job_id"):
+        return job
+    return _wait_for_job(job["job_id"])
+
+
+# =====================================================================
+# NEW: Univariate Scan Starter
+# =====================================================================
+
+def start_univariate_scan(
+    pl_column: str = "PL",
+    scan_cols: Optional[List[str]] = None,
+    min_rows: int = 200,
+    n_bins: int = 10,
+    **kwargs
+) -> Dict[str, Any]:
+    """
+    For each column, find the single best filter value/range.
+    
+    This is simpler than bracket_sweep - it tests each column independently
+    and finds what single filter works best for that column alone.
+    
+    Args:
+        pl_column: Target profit/loss column
+        scan_cols: Specific columns to scan (None = all non-outcome columns)
+        min_rows: Minimum rows required for a column to be analyzed
+        n_bins: Number of bins for numeric columns
+    
+    Returns:
+        Job submission result with job_id
+    """
+    params = {
+        "pl_column": pl_column,
+        "min_rows": min_rows,
+        "n_bins": n_bins,
+        **kwargs,
+    }
+    if scan_cols:
+        params["scan_cols"] = scan_cols
+    
+    return _submit_job("univariate_scan", params)
+
+
+def univariate_scan(pl_column: str = "PL", **kwargs) -> Dict[str, Any]:
+    """Convenience wrapper that starts job and waits for result."""
+    job = start_univariate_scan(pl_column=pl_column, **kwargs)
+    if not job.get("job_id"):
+        return job
+    return _wait_for_job(job["job_id"])
+
