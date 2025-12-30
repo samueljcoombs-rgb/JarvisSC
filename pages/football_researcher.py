@@ -397,9 +397,10 @@ def run_agent():
         progress = st.empty()
         exploration = _run_exploration(pl_column, progress)
         st.session_state.exploration_results = exploration
-        with st.expander("Exploration Results", expanded=False):
-            st.code(_safe_json(exploration, 3000), language="json")
         status.update(label="🔍 Exploration complete", state="complete")
+    
+    with st.expander("Exploration Results", expanded=False):
+        st.code(_safe_json(exploration, 3000), language="json")
     
     # Sweeps
     with st.status("🔬 Phase 2: Segment Analysis...", expanded=True) as status:
@@ -407,10 +408,11 @@ def run_agent():
         sweeps = _run_sweeps(pl_column, bible, progress)
         st.session_state.sweep_results = sweeps
         promising = len(sweeps.get("bracket_sweep", {}).get("promising", [])) + len(sweeps.get("subgroup_scan", {}).get("promising", []))
-        st.markdown(f"**Found {promising} promising segments**")
-        with st.expander("Sweep Results", expanded=False):
-            st.code(_safe_json(sweeps, 3000), language="json")
         status.update(label=f"🔬 Sweeps complete ({promising} promising)", state="complete")
+    
+    st.markdown(f"**Found {promising} promising segments**")
+    with st.expander("Sweep Results", expanded=False):
+        st.code(_safe_json(sweeps, 3000), language="json")
     
     st.session_state.agent_findings.append({"phase": "exploration", "promising": promising})
     
