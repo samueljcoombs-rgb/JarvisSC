@@ -268,32 +268,58 @@ def _load_bible() -> Dict:
             return st.session_state.bible
         
         _log("Loading Bible from Google Sheets...")
+        bible = None
+        bible_source = "unknown"
         
-        # Import and call the Google Sheets function DIRECTLY (not via job queue)
+        # METHOD 1: Try importing and calling Google Sheets function directly
         try:
-            from football_tools import get_bible_from_sheets
-            bible = get_bible_from_sheets(limit_notes=20)
+            import football_tools
+            _log(f"football_tools imported, checking for get_bible_from_sheets...")
             
-            if bible.get("ok"):
-                _log(f"Bible loaded: {len(bible.get('research_rules', []))} rules, {len(bible.get('column_definitions', []))} column defs")
-                st.session_state.bible = bible
-                return bible
+            if hasattr(football_tools, 'get_bible_from_sheets'):
+                _log("Calling get_bible_from_sheets...")
+                bible = football_tools.get_bible_from_sheets(limit_notes=20)
+                
+                if bible and bible.get("ok"):
+                    bible_source = "google_sheets_direct"
+                    _log(f"✅ Bible loaded from Google Sheets: {len(bible.get('research_rules', []))} rules, {len(bible.get('column_definitions', []))} column defs")
+                    st.success(f"✅ Bible loaded DIRECTLY from Google Sheets! ({len(bible.get('research_rules', []))} rules)")
+                else:
+                    _log(f"❌ get_bible_from_sheets returned: {bible}")
+                    st.warning(f"⚠️ Google Sheets returned error: {bible.get('error', 'unknown')}")
+                    bible = None
             else:
-                _log(f"Bible load returned not ok: {bible}")
+                _log("❌ get_bible_from_sheets not found in football_tools")
+                st.error("❌ get_bible_from_sheets function not found - using OLD football_tools.py!")
+                # List available functions
+                funcs = [f for f in dir(football_tools) if not f.startswith('_')]
+                _log(f"Available functions: {funcs[:20]}")
+                
         except ImportError as e:
-            _log(f"Could not import football_tools: {e}")
+            _log(f"❌ Could not import football_tools: {e}")
+            st.error(f"❌ Could not import football_tools: {e}")
         except Exception as e:
-            _log(f"Error calling get_research_context from sheets: {e}")
+            _log(f"❌ Error calling get_bible_from_sheets: {type(e).__name__}: {e}")
+            st.error(f"❌ Google Sheets error: {type(e).__name__}: {e}")
         
-        # Fallback: Try via job queue (local_compute)
-        _log("Falling back to job queue for Bible...")
-        bible = _run_tool("get_research_context", {"pl_column": st.session_state.target_pl_column})
+        # METHOD 2: Fallback to job queue (local_compute)
+        if not bible:
+            st.warning("⚠️ Falling back to job queue (NOT Google Sheets directly)")
+            _log("Falling back to job queue for Bible...")
+            bible = _run_tool("get_research_context", {"pl_column": st.session_state.get("target_pl_column", "BO 2.5 PL")})
+            bible_source = "job_queue"
+            
+            if bible and not bible.get("error"):
+                _log(f"Bible loaded from job queue: {len(bible.get('research_rules', []))} rules")
+            else:
+                _log(f"Job queue Bible failed: {bible}")
         
-        # If still no Bible, create minimal version
-        if bible.get("error") or not bible.get("research_rules"):
-            _log("Creating minimal Bible fallback")
+        # METHOD 3: Minimal fallback
+        if not bible or bible.get("error") or not bible.get("research_rules"):
+            _log("⚠️ Creating minimal Bible fallback - GOOGLE SHEETS NOT CONNECTED!")
+            bible_source = "fallback"
             bible = {
-                "dataset_overview": {"primary_goal": "Find profitable betting strategies"},
+                "dataset_overview": {"primary_goal": "Find profitable betting strategies", "note": "FALLBACK - Google Sheets not connected"},
                 "gates": DEFAULT_GATES,
                 "derived": {"outcome_columns": OUTCOME_COLUMNS},
                 "research_rules": [
@@ -304,13 +330,18 @@ def _load_bible() -> Dict:
                     {"rule": "Forward walk validation required: >60% windows positive"},
                     {"rule": "Statistical significance: p-value < 0.10"},
                 ],
+                "column_definitions": [],
+                "evaluation_framework": [],
             }
         
+        # Add source info
+        bible["_source"] = bible_source
         st.session_state.bible = bible
         return bible
+        
     except Exception as e:
-        _log(f"Error loading bible: {e}")
-        return {"gates": DEFAULT_GATES}
+        _log(f"❌ Critical error loading bible: {type(e).__name__}: {e}")
+        return {"gates": DEFAULT_GATES, "_source": "error", "_error": str(e)}
 
 def _format_bible(bible: Dict) -> str:
     overview = bible.get("dataset_overview") or {}
@@ -1599,6 +1630,18 @@ def run_agent():
     # ========== BIBLE ==========
     with st.status("📖 Loading Bible...", expanded=True) as status:
         bible = _load_bible()
+        bible_source = bible.get("_source", "unknown")
+        
+        # Show source warning
+        if bible_source == "google_sheets_direct":
+            st.success(f"✅ Bible loaded from Google Sheets ({len(bible.get('research_rules', []))} rules, {len(bible.get('column_definitions', []))} column defs)")
+        elif bible_source == "job_queue":
+            st.warning("⚠️ Bible loaded from job queue (local_compute) - NOT Google Sheets!")
+        elif bible_source == "fallback":
+            st.error("❌ Bible using FALLBACK - Google Sheets NOT connected! Check credentials.")
+        else:
+            st.warning(f"⚠️ Bible source: {bible_source}")
+        
         st.markdown(_format_bible(bible))
         status.update(label="📖 Bible loaded", state="complete")
     
