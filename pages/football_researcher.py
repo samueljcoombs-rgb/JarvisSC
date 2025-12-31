@@ -82,9 +82,14 @@ def _log(msg: str):
         pass  # Silently fail if session state not ready
 
 def _append(role: str, content: str):
-    st.session_state.messages.append({"role": role, "content": content, "ts": datetime.utcnow().isoformat()})
-    if len(st.session_state.messages) > MAX_MESSAGES:
-        st.session_state.messages = st.session_state.messages[-MAX_MESSAGES:]
+    try:
+        if "messages" not in st.session_state:
+            st.session_state.messages = []
+        st.session_state.messages.append({"role": role, "content": content, "ts": datetime.utcnow().isoformat()})
+        if len(st.session_state.messages) > MAX_MESSAGES:
+            st.session_state.messages = st.session_state.messages[-MAX_MESSAGES:]
+    except Exception:
+        pass  # Silently fail if session state not ready
 
 def _add_learning(learning: str):
     """Accumulate learnings across iterations."""
@@ -149,12 +154,18 @@ def _wait_for_job(job_id: str, timeout: int = JOB_TIMEOUT) -> Dict:
 # ============================================================
 
 def _load_bible() -> Dict:
-    if st.session_state.bible:
-        return st.session_state.bible
-    _log("Loading Bible...")
-    bible = _run_tool("get_research_context", {"limit_notes": 50})
-    st.session_state.bible = bible
-    return bible
+    try:
+        if "bible" not in st.session_state:
+            st.session_state.bible = None
+        if st.session_state.bible:
+            return st.session_state.bible
+        _log("Loading Bible...")
+        bible = _run_tool("get_research_context", {"limit_notes": 50})
+        st.session_state.bible = bible
+        return bible
+    except Exception as e:
+        _log(f"Error loading bible: {e}")
+        return {}
 
 def _format_bible(bible: Dict) -> str:
     overview = bible.get("dataset_overview") or {}
@@ -947,7 +958,26 @@ def _run_combination_scan_for_base(base_filters: List[Dict], pl_column: str) -> 
 # ============================================================
 
 def run_agent():
+    # Ensure session state is initialized
+    if "target_pl_column" not in st.session_state:
+        st.error("No target PL column selected. Please select a market first.")
+        return
+    
     pl_column = st.session_state.target_pl_column
+    
+    # Initialize session state variables
+    if "log" not in st.session_state:
+        st.session_state.log = []
+    if "tested_filter_hashes" not in st.session_state:
+        st.session_state.tested_filter_hashes = set()
+    if "near_misses" not in st.session_state:
+        st.session_state.near_misses = []
+    if "accumulated_learnings" not in st.session_state:
+        st.session_state.accumulated_learnings = []
+    if "avenues_explored" not in st.session_state:
+        st.session_state.avenues_explored = []
+    
+    # Reset for new run
     st.session_state.log = []
     st.session_state.tested_filter_hashes = set()
     st.session_state.near_misses = []
