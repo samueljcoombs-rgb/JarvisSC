@@ -479,7 +479,7 @@ def _test_filter_batch(base_filters: List[Dict], variations: List[Dict], pl_colu
     job = _run_tool("test_filter", {"filters": base_filters, "pl_column": pl_column, "enforcement": enforcement})
     if job.get("job_id"):
         base_result = _wait_for_job(job["job_id"], timeout=JOB_TIMEOUT)
-        base_result["variation"] = "BASE"
+        base_result["variation"] = "BASE (no additional filters)"
         base_result["filters_tested"] = base_filters
         results.append(base_result)
     
@@ -491,11 +491,19 @@ def _test_filter_batch(base_filters: List[Dict], variations: List[Dict], pl_colu
             continue
         st.session_state.tested_filter_hashes.add(fhash)
         
-        _log(f"Testing variation: {var}")
+        # Create descriptive variation name
+        if var.get("op") == "=":
+            var_name = f"{var.get('col')} = {var.get('value')}"
+        elif var.get("op") == "between":
+            var_name = f"{var.get('col')} {var.get('min')}-{var.get('max')}"
+        else:
+            var_name = f"{var.get('col')} {var.get('op')} {var.get('value')}"
+        
+        _log(f"Testing variation: {var_name}")
         job = _run_tool("test_filter", {"filters": combined, "pl_column": pl_column, "enforcement": enforcement})
         if job.get("job_id"):
             result = _wait_for_job(job["job_id"], timeout=JOB_TIMEOUT)
-            result["variation"] = var
+            result["variation"] = f"+ {var_name}"
             result["filters_tested"] = combined
             results.append(result)
     
@@ -578,7 +586,7 @@ def _analyze_avenue_results(avenue: Dict, results: List[Dict], bible: Dict) -> D
     if not results:
         return {"summary": "No results", "best_variation": None, "recommendation": "skip"}
     
-    # Collect all results
+    # Collect all results with quality metrics
     all_results = []
     for r in results:
         train = r.get("train", {})
@@ -586,24 +594,40 @@ def _analyze_avenue_results(avenue: Dict, results: List[Dict], bible: Dict) -> D
         test = r.get("test", {})
         gates_passed = r.get("gates_passed", False)
         
+        train_roi = train.get("roi", 0)
+        val_roi = val.get("roi", 0)
+        test_roi = test.get("roi", 0)
+        train_val_gap = abs(train_roi - val_roi)
+        
+        # Quality score: penalize high train/val gap, reward consistency
+        consistency_score = 1.0 - min(train_val_gap / 0.1, 1.0)  # Penalize gaps > 10%
+        quality_score = test_roi * consistency_score if test_roi > 0 else test_roi
+        
         all_results.append({
             "variation": r.get("variation", "unknown"),
             "filters": r.get("filters_tested", []),
-            "train_roi": train.get("roi", 0),
+            "train_roi": train_roi,
             "train_rows": train.get("rows", 0),
-            "val_roi": val.get("roi", 0),
+            "val_roi": val_roi,
             "val_rows": val.get("rows", 0),
-            "test_roi": test.get("roi", 0),
+            "test_roi": test_roi,
             "test_rows": test.get("rows", 0),
+            "train_val_gap": round(train_val_gap, 4),
+            "quality_score": round(quality_score, 4),
             "gates_passed": gates_passed,
             "gate_failures": r.get("gate_failures", []),
         })
     
-    # Find best and categorize
+    # Find best by QUALITY score (not just test ROI)
     passing = [r for r in all_results if r["gates_passed"] and r["test_roi"] > 0]
+    
+    # Sort passing by quality score
+    passing.sort(key=lambda x: x["quality_score"], reverse=True)
+    
     near_misses = [r for r in all_results if r["test_roi"] > 0 or r["train_roi"] > 0.02]
     
-    best = max(all_results, key=lambda x: x["test_roi"]) if all_results else None
+    best = max(all_results, key=lambda x: x["quality_score"]) if all_results else None
+    best_test = max(all_results, key=lambda x: x["test_roi"]) if all_results else None
     best_train = max(all_results, key=lambda x: x["train_roi"]) if all_results else None
     
     # Determine recommendation
@@ -618,8 +642,9 @@ def _analyze_avenue_results(avenue: Dict, results: List[Dict], bible: Dict) -> D
     
     return {
         "summary": f"Tested {len(results)} variations: {len(passing)} passing, {len(near_misses)} promising",
-        "best_test_roi": best["test_roi"] if best else 0,
+        "best_test_roi": best_test["test_roi"] if best_test else 0,
         "best_train_roi": best_train["train_roi"] if best_train else 0,
+        "best_quality_score": best["quality_score"] if best else 0,
         "best_variation": best["variation"] if best else None,
         "passing_count": len(passing),
         "near_miss_count": len(near_misses),
@@ -896,28 +921,33 @@ def run_agent():
             st.markdown("# 🎉 Strategy Found!")
             success_found = True
             
-            # Get passing filters - show them prominently!
-            passing_filters = analysis.get("passing_filters", [[]])
-            best_result = None
-            for r in analysis.get("all_results", []):
-                if r.get("gates_passed") and r.get("test_roi", 0) > 0:
-                    best_result = r
-                    break
+            # Get ALL passing strategies, sorted by test ROI
+            all_results = analysis.get("all_results", [])
+            passing_strategies = [r for r in all_results if r.get("gates_passed") and r.get("test_roi", 0) > 0]
+            passing_strategies.sort(key=lambda x: x.get("test_roi", 0), reverse=True)
             
-            # SHOW THE STRATEGY CLEARLY
-            st.markdown("## 📋 Winning Strategy")
-            st.markdown("### Filters:")
-            if passing_filters and passing_filters[0]:
-                for f in passing_filters[0]:
+            if not passing_strategies:
+                st.warning("Marked as SUCCESS but no passing strategies found in results. Check data.")
+                passing_filters = analysis.get("passing_filters", [[]])
+                best_result = None
+            else:
+                best_result = passing_strategies[0]
+                passing_filters = [best_result.get("filters", [])]
+            
+            # SHOW THE BEST STRATEGY CLEARLY
+            st.markdown("## 📋 Best Passing Strategy")
+            
+            if best_result and best_result.get("filters"):
+                st.markdown("### Filters:")
+                for f in best_result.get("filters", []):
                     if f.get("op") == "=":
                         st.markdown(f"- **{f.get('col')}** = `{f.get('value')}`")
                     elif f.get("op") == "between":
                         st.markdown(f"- **{f.get('col')}** between `{f.get('min')}` and `{f.get('max')}`")
                     else:
                         st.markdown(f"- **{f.get('col')}** {f.get('op')} `{f.get('value')}`")
-            
-            # Show performance
-            if best_result:
+                
+                # Show performance
                 st.markdown("### Performance:")
                 col1, col2, col3 = st.columns(3)
                 col1.metric("Train ROI", f"{best_result.get('train_roi', 0):.2%}")
@@ -928,26 +958,52 @@ def run_agent():
                 col1.metric("Train Rows", best_result.get('train_rows', 0))
                 col2.metric("Val Rows", best_result.get('val_rows', 0))
                 col3.metric("Test Rows", best_result.get('test_rows', 0))
+                
+                # Quality assessment
+                train_val_gap = abs(best_result.get('train_roi', 0) - best_result.get('val_roi', 0))
+                test_roi = best_result.get('test_roi', 0)
+                
+                st.markdown("### Quality Assessment:")
+                if train_val_gap > 0.05:
+                    st.warning(f"⚠️ Train/Val gap is {train_val_gap:.1%} - possible overfitting")
+                if test_roi < 0.02:
+                    st.warning(f"⚠️ Test ROI of {test_roi:.1%} is low - might be noise")
+                if best_result.get('test_rows', 0) < 200:
+                    st.warning(f"⚠️ Only {best_result.get('test_rows', 0)} test rows - small sample")
+                if train_val_gap < 0.03 and test_roi > 0.02 and best_result.get('test_rows', 0) >= 200:
+                    st.success("✅ Looks solid! Consistent across splits with good sample size.")
+                
+                # Copy-pasteable format
+                st.markdown("### Copy-Paste Format:")
+                filter_str = json.dumps(best_result.get("filters", []), indent=2)
+                st.code(filter_str, language="json")
             
-            # Copy-pasteable format
-            st.markdown("### Copy-Paste Format:")
-            filter_str = json.dumps(passing_filters[0] if passing_filters else [], indent=2)
-            st.code(filter_str, language="json")
+            # Show ALL passing strategies if more than one
+            if len(passing_strategies) > 1:
+                st.markdown(f"## 📊 All {len(passing_strategies)} Passing Strategies")
+                for i, strat in enumerate(passing_strategies, 1):
+                    with st.expander(f"Strategy {i}: Test ROI {strat.get('test_roi', 0):.2%} ({strat.get('variation', 'unknown')})"):
+                        st.markdown(f"**Variation:** {strat.get('variation', 'N/A')}")
+                        st.markdown(f"**Train ROI:** {strat.get('train_roi', 0):.2%} ({strat.get('train_rows', 0)} rows)")
+                        st.markdown(f"**Val ROI:** {strat.get('val_roi', 0):.2%} ({strat.get('val_rows', 0)} rows)")
+                        st.markdown(f"**Test ROI:** {strat.get('test_roi', 0):.2%} ({strat.get('test_rows', 0)} rows)")
+                        st.code(json.dumps(strat.get("filters", []), indent=2), language="json")
             
             st.balloons()
             
             # Optional: Advanced validation (don't block on it)
             with st.expander("🔬 Run Advanced Validation (optional)", expanded=False):
                 if st.button("Run Forward Walk & Monte Carlo"):
+                    filters_to_test = best_result.get("filters", []) if best_result else []
                     with st.spinner("Running forward walk..."):
-                        job = _run_tool("forward_walk", {"filters": passing_filters[0] if passing_filters else [], "pl_column": pl_column, "n_windows": 6})
+                        job = _run_tool("forward_walk", {"filters": filters_to_test, "pl_column": pl_column, "n_windows": 6})
                         if job.get("job_id"):
                             fw_result = _wait_for_job(job["job_id"], timeout=180)
                             st.markdown(f"**Forward Walk:** {fw_result.get('verdict', 'N/A')}")
                             st.code(_safe_json(fw_result, 2000), language="json")
                     
                     with st.spinner("Running monte carlo..."):
-                        job = _run_tool("monte_carlo_sim", {"filters": passing_filters[0] if passing_filters else [], "pl_column": pl_column, "n_simulations": 500})
+                        job = _run_tool("monte_carlo_sim", {"filters": filters_to_test, "pl_column": pl_column, "n_simulations": 500})
                         if job.get("job_id"):
                             mc_result = _wait_for_job(job["job_id"], timeout=180)
                             prob = mc_result.get('probability', {}).get('positive_roi', 0)
@@ -955,16 +1011,18 @@ def run_agent():
                             st.code(_safe_json(mc_result, 2000), language="json")
             
             # Log to Bible
-            _run_tool("append_research_note", {
-                "note": json.dumps({
-                    "type": "SUCCESS",
-                    "pl_column": pl_column,
-                    "filters": passing_filters[0] if passing_filters else [],
-                    "test_roi": best_result.get("test_roi") if best_result else 0,
-                    "train_roi": best_result.get("train_roi") if best_result else 0,
-                }),
-                "tags": f"success,{pl_column.replace(' ', '_')}"
-            })
+            if best_result:
+                _run_tool("append_research_note", {
+                    "note": json.dumps({
+                        "type": "SUCCESS",
+                        "pl_column": pl_column,
+                        "filters": best_result.get("filters", []),
+                        "test_roi": best_result.get("test_roi", 0),
+                        "train_roi": best_result.get("train_roi", 0),
+                        "variation": best_result.get("variation"),
+                    }),
+                    "tags": f"success,{pl_column.replace(' ', '_')}"
+                })
             
             st.session_state.agent_phase = "complete"
             return
