@@ -1142,3 +1142,304 @@ def univariate_scan(pl_column: str = "PL", **kwargs) -> Dict[str, Any]:
         return job
     return wait_for_job(job["job_id"])
 
+
+# =====================================================================
+# NEW v6: Session, Checkpoint, Strategy, Learning Tools
+# =====================================================================
+
+def start_create_session(pl_column: str = "", config: Optional[Dict] = None, **kwargs) -> Dict[str, Any]:
+    """Create a new research session."""
+    params = {"pl_column": pl_column, "config": config or {}, **kwargs}
+    return submit_job("create_session", params)
+
+
+def start_save_checkpoint(session_id: str, state: Dict, iteration: int = 0, **kwargs) -> Dict[str, Any]:
+    """Save checkpoint to Supabase."""
+    params = {"session_id": session_id, "state": state, "iteration": iteration, **kwargs}
+    return submit_job("save_checkpoint", params)
+
+
+def start_load_checkpoint(session_id: str, **kwargs) -> Dict[str, Any]:
+    """Load checkpoint from Supabase."""
+    params = {"session_id": session_id, **kwargs}
+    return submit_job("load_checkpoint", params)
+
+
+def start_save_strategy(
+    pl_column: str,
+    filters: List[Dict],
+    train: Optional[Dict] = None,
+    val: Optional[Dict] = None,
+    test: Optional[Dict] = None,
+    status: str = "draft",
+    **kwargs
+) -> Dict[str, Any]:
+    """Save strategy to Supabase."""
+    params = {
+        "pl_column": pl_column,
+        "filters": filters,
+        "train": train or {},
+        "val": val or {},
+        "test": test or {},
+        "status": status,
+        **kwargs
+    }
+    return submit_job("save_strategy", params)
+
+
+def start_query_strategies(
+    status: Optional[str] = None,
+    pl_column: Optional[str] = None,
+    min_test_roi: Optional[float] = None,
+    limit: int = 50,
+    **kwargs
+) -> Dict[str, Any]:
+    """Query strategies from Supabase."""
+    params = {"status": status, "pl_column": pl_column, "min_test_roi": min_test_roi, "limit": limit, **kwargs}
+    return submit_job("query_strategies", params)
+
+
+def start_promote_strategy(
+    strategy_id: Optional[str] = None,
+    filter_hash: Optional[str] = None,
+    new_status: str = "candidate",
+    **kwargs
+) -> Dict[str, Any]:
+    """Promote strategy to next lifecycle stage."""
+    params = {"strategy_id": strategy_id, "filter_hash": filter_hash, "new_status": new_status, **kwargs}
+    return submit_job("promote_strategy", params)
+
+
+def start_save_learning(
+    insight: str,
+    category: Optional[str] = None,
+    confidence: str = "low",
+    evidence: Optional[List] = None,
+    **kwargs
+) -> Dict[str, Any]:
+    """Save learning to Supabase."""
+    params = {
+        "insight": insight,
+        "category": category,
+        "confidence": confidence,
+        "evidence": evidence or [],
+        **kwargs
+    }
+    return submit_job("save_learning", params)
+
+
+def start_query_learnings(
+    category: Optional[str] = None,
+    search: Optional[str] = None,
+    limit: int = 50,
+    **kwargs
+) -> Dict[str, Any]:
+    """Query learnings from Supabase."""
+    params = {"category": category, "search": search, "limit": limit, **kwargs}
+    return submit_job("query_learnings", params)
+
+
+def start_get_research_context(pl_column: str = "BO 2.5 PL", **kwargs) -> Dict[str, Any]:
+    """Get research context (Bible)."""
+    params = {"pl_column": pl_column, **kwargs}
+    return submit_job("get_research_context", params)
+
+
+def start_statistical_significance(
+    pl_column: str,
+    filters: List[Dict],
+    **kwargs
+) -> Dict[str, Any]:
+    """Calculate statistical significance."""
+    cfg = _get_storage_config()
+    params = {
+        "storage_bucket": cfg["storage_bucket"],
+        "storage_path": cfg["storage_path"],
+        "_results_bucket": cfg["results_bucket"],
+        "pl_column": pl_column,
+        "filters": filters,
+        **kwargs
+    }
+    return submit_job("statistical_significance", params)
+
+
+def start_time_decay_analysis(
+    pl_column: str,
+    filters: List[Dict],
+    **kwargs
+) -> Dict[str, Any]:
+    """Analyze alpha decay over time."""
+    cfg = _get_storage_config()
+    params = {
+        "storage_bucket": cfg["storage_bucket"],
+        "storage_path": cfg["storage_path"],
+        "_results_bucket": cfg["results_bucket"],
+        "pl_column": pl_column,
+        "filters": filters,
+        **kwargs
+    }
+    return submit_job("time_decay_analysis", params)
+
+
+# Convenience aliases
+def create_session(**kwargs) -> Dict[str, Any]:
+    job = start_create_session(**kwargs)
+    return wait_for_job(job["job_id"]) if job.get("job_id") else job
+
+def save_checkpoint(**kwargs) -> Dict[str, Any]:
+    job = start_save_checkpoint(**kwargs)
+    return wait_for_job(job["job_id"]) if job.get("job_id") else job
+
+def load_checkpoint(**kwargs) -> Dict[str, Any]:
+    job = start_load_checkpoint(**kwargs)
+    return wait_for_job(job["job_id"]) if job.get("job_id") else job
+
+def save_strategy(**kwargs) -> Dict[str, Any]:
+    job = start_save_strategy(**kwargs)
+    return wait_for_job(job["job_id"]) if job.get("job_id") else job
+
+def query_strategies_sync(**kwargs) -> Dict[str, Any]:
+    job = start_query_strategies(**kwargs)
+    return wait_for_job(job["job_id"]) if job.get("job_id") else job
+
+def promote_strategy(**kwargs) -> Dict[str, Any]:
+    job = start_promote_strategy(**kwargs)
+    return wait_for_job(job["job_id"]) if job.get("job_id") else job
+
+def save_learning(**kwargs) -> Dict[str, Any]:
+    job = start_save_learning(**kwargs)
+    return wait_for_job(job["job_id"]) if job.get("job_id") else job
+
+def query_learnings_sync(**kwargs) -> Dict[str, Any]:
+    job = start_query_learnings(**kwargs)
+    return wait_for_job(job["job_id"]) if job.get("job_id") else job
+
+def get_research_context(**kwargs) -> Dict[str, Any]:
+    job = start_get_research_context(**kwargs)
+    return wait_for_job(job["job_id"]) if job.get("job_id") else job
+
+def statistical_significance(**kwargs) -> Dict[str, Any]:
+    job = start_statistical_significance(**kwargs)
+    return wait_for_job(job["job_id"]) if job.get("job_id") else job
+
+def time_decay_analysis(**kwargs) -> Dict[str, Any]:
+    job = start_time_decay_analysis(**kwargs)
+    return wait_for_job(job["job_id"]) if job.get("job_id") else job
+
+
+# =====================================================================
+# NEW v6: ML Training Tools (Dual-Track Research)
+# =====================================================================
+
+def start_train_catboost(
+    pl_column: str,
+    filters: Optional[List[Dict]] = None,
+    **kwargs
+) -> Dict[str, Any]:
+    """Train CatBoost model and get feature importance."""
+    cfg = _get_storage_config()
+    params = {
+        "storage_bucket": cfg["storage_bucket"],
+        "storage_path": cfg["storage_path"],
+        "_results_bucket": cfg["results_bucket"],
+        "pl_column": pl_column,
+        "filters": filters or [],
+        **kwargs
+    }
+    return submit_job("train_catboost", params)
+
+
+def start_train_xgboost(
+    pl_column: str,
+    filters: Optional[List[Dict]] = None,
+    **kwargs
+) -> Dict[str, Any]:
+    """Train XGBoost model and get feature importance."""
+    cfg = _get_storage_config()
+    params = {
+        "storage_bucket": cfg["storage_bucket"],
+        "storage_path": cfg["storage_path"],
+        "_results_bucket": cfg["results_bucket"],
+        "pl_column": pl_column,
+        "filters": filters or [],
+        **kwargs
+    }
+    return submit_job("train_xgboost", params)
+
+
+def start_train_lightgbm(
+    pl_column: str,
+    filters: Optional[List[Dict]] = None,
+    **kwargs
+) -> Dict[str, Any]:
+    """Train LightGBM model and get feature importance."""
+    cfg = _get_storage_config()
+    params = {
+        "storage_bucket": cfg["storage_bucket"],
+        "storage_path": cfg["storage_path"],
+        "_results_bucket": cfg["results_bucket"],
+        "pl_column": pl_column,
+        "filters": filters or [],
+        **kwargs
+    }
+    return submit_job("train_lightgbm", params)
+
+
+def start_shap_explain(
+    pl_column: str,
+    filters: Optional[List[Dict]] = None,
+    **kwargs
+) -> Dict[str, Any]:
+    """Generate SHAP explanations and filter suggestions."""
+    cfg = _get_storage_config()
+    params = {
+        "storage_bucket": cfg["storage_bucket"],
+        "storage_path": cfg["storage_path"],
+        "_results_bucket": cfg["results_bucket"],
+        "pl_column": pl_column,
+        "filters": filters or [],
+        **kwargs
+    }
+    return submit_job("shap_explain", params)
+
+
+# Convenience wrappers
+def train_catboost(pl_column: str, **kwargs) -> Dict[str, Any]:
+    job = start_train_catboost(pl_column=pl_column, **kwargs)
+    return wait_for_job(job["job_id"]) if job.get("job_id") else job
+
+def train_xgboost(pl_column: str, **kwargs) -> Dict[str, Any]:
+    job = start_train_xgboost(pl_column=pl_column, **kwargs)
+    return wait_for_job(job["job_id"]) if job.get("job_id") else job
+
+def train_lightgbm(pl_column: str, **kwargs) -> Dict[str, Any]:
+    job = start_train_lightgbm(pl_column=pl_column, **kwargs)
+    return wait_for_job(job["job_id"]) if job.get("job_id") else job
+
+def shap_explain(pl_column: str, **kwargs) -> Dict[str, Any]:
+    job = start_shap_explain(pl_column=pl_column, **kwargs)
+    return wait_for_job(job["job_id"]) if job.get("job_id") else job
+
+
+def start_train_logistic(
+    pl_column: str,
+    filters: Optional[List[Dict]] = None,
+    **kwargs
+) -> Dict[str, Any]:
+    """Train Logistic Regression model - interpretable with coefficients."""
+    cfg = _get_storage_config()
+    params = {
+        "storage_bucket": cfg["storage_bucket"],
+        "storage_path": cfg["storage_path"],
+        "_results_bucket": cfg["results_bucket"],
+        "pl_column": pl_column,
+        "filters": filters or [],
+        **kwargs
+    }
+    return submit_job("train_logistic", params)
+
+
+def train_logistic(pl_column: str, **kwargs) -> Dict[str, Any]:
+    """Train Logistic Regression and wait for result."""
+    job = start_train_logistic(pl_column=pl_column, **kwargs)
+    return wait_for_job(job["job_id"]) if job.get("job_id") else job
