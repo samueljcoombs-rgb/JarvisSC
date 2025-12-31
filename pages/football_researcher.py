@@ -271,40 +271,110 @@ def _load_bible() -> Dict:
         bible = None
         bible_source = "unknown"
         
-        # METHOD 1: Try importing and calling Google Sheets function directly
+        # METHOD 1: Try importing football_tools (multiple approaches for different folder structures)
+        football_tools = None
+        
+        # Approach 1a: Direct import (if in same folder or PYTHONPATH)
         try:
-            import football_tools
-            _log(f"football_tools imported, checking for get_bible_from_sheets...")
-            
+            import football_tools as ft
+            football_tools = ft
+            _log("✅ Imported football_tools directly")
+        except ImportError:
+            pass
+        
+        # Approach 1b: Import from modules folder (pages/researcher.py → modules/football_tools.py)
+        if not football_tools:
+            try:
+                from modules import football_tools as ft
+                football_tools = ft
+                _log("✅ Imported football_tools from modules/")
+            except ImportError:
+                pass
+        
+        # Approach 1c: Import from parent's modules folder
+        if not football_tools:
+            try:
+                import sys
+                from pathlib import Path
+                # If we're in pages/, add parent directory to find modules/
+                script_dir = Path(__file__).parent.resolve()
+                parent_dir = script_dir.parent
+                modules_dir = parent_dir / "modules"
+                
+                if modules_dir.exists():
+                    if str(parent_dir) not in sys.path:
+                        sys.path.insert(0, str(parent_dir))
+                    if str(modules_dir) not in sys.path:
+                        sys.path.insert(0, str(modules_dir))
+                    _log(f"Added {parent_dir} and {modules_dir} to Python path")
+                    
+                    import football_tools as ft
+                    football_tools = ft
+                    _log("✅ Imported football_tools after path fix")
+            except Exception as e:
+                _log(f"Path approach failed: {e}")
+        
+        # Approach 1d: Try explicit file import as last resort
+        if not football_tools:
+            try:
+                import importlib.util
+                from pathlib import Path
+                
+                # Try multiple possible locations
+                possible_paths = [
+                    Path(__file__).parent / "football_tools.py",  # Same folder
+                    Path(__file__).parent.parent / "modules" / "football_tools.py",  # pages/../modules/
+                    Path(__file__).parent.parent / "football_tools.py",  # pages/../
+                ]
+                
+                for ft_path in possible_paths:
+                    if ft_path.exists():
+                        spec = importlib.util.spec_from_file_location("football_tools", ft_path)
+                        football_tools = importlib.util.module_from_spec(spec)
+                        spec.loader.exec_module(football_tools)
+                        _log(f"✅ Imported football_tools from {ft_path}")
+                        break
+                
+                if not football_tools:
+                    _log(f"❌ football_tools.py not found in any expected location")
+                    _log(f"Searched: {[str(p) for p in possible_paths]}")
+            except Exception as e:
+                _log(f"Explicit import failed: {e}")
+        
+        # Now try to use the imported module
+        if football_tools:
             if hasattr(football_tools, 'get_bible_from_sheets'):
                 _log("Calling get_bible_from_sheets...")
-                bible = football_tools.get_bible_from_sheets(limit_notes=20)
-                
-                if bible and bible.get("ok"):
-                    bible_source = "google_sheets_direct"
-                    _log(f"✅ Bible loaded from Google Sheets: {len(bible.get('research_rules', []))} rules, {len(bible.get('column_definitions', []))} column defs")
-                    st.success(f"✅ Bible loaded DIRECTLY from Google Sheets! ({len(bible.get('research_rules', []))} rules)")
-                else:
-                    _log(f"❌ get_bible_from_sheets returned: {bible}")
-                    st.warning(f"⚠️ Google Sheets returned error: {bible.get('error', 'unknown')}")
-                    bible = None
+                try:
+                    bible = football_tools.get_bible_from_sheets(limit_notes=20)
+                    
+                    if bible and bible.get("ok"):
+                        bible_source = "google_sheets_direct"
+                        n_rules = len(bible.get('research_rules', []))
+                        n_cols = len(bible.get('column_definitions', []))
+                        _log(f"✅ Bible loaded from Google Sheets: {n_rules} rules, {n_cols} column defs")
+                        st.success(f"✅ Bible loaded from Google Sheets! ({n_rules} rules, {n_cols} columns)")
+                    else:
+                        error_msg = bible.get('error', 'Unknown error') if bible else 'No response'
+                        _log(f"❌ get_bible_from_sheets returned: {error_msg}")
+                        st.warning(f"⚠️ Google Sheets returned: {error_msg}")
+                        bible = None
+                except Exception as e:
+                    _log(f"❌ Error calling get_bible_from_sheets: {type(e).__name__}: {e}")
+                    st.error(f"❌ Google Sheets error: {type(e).__name__}: {e}")
             else:
-                _log("❌ get_bible_from_sheets not found in football_tools")
-                st.error("❌ get_bible_from_sheets function not found - using OLD football_tools.py!")
-                # List available functions
-                funcs = [f for f in dir(football_tools) if not f.startswith('_')]
-                _log(f"Available functions: {funcs[:20]}")
-                
-        except ImportError as e:
-            _log(f"❌ Could not import football_tools: {e}")
-            st.error(f"❌ Could not import football_tools: {e}")
-        except Exception as e:
-            _log(f"❌ Error calling get_bible_from_sheets: {type(e).__name__}: {e}")
-            st.error(f"❌ Google Sheets error: {type(e).__name__}: {e}")
+                _log("❌ get_bible_from_sheets not found - you may have OLD football_tools.py")
+                st.error("❌ get_bible_from_sheets not found - UPDATE football_tools.py!")
+                funcs = [f for f in dir(football_tools) if not f.startswith('_') and callable(getattr(football_tools, f, None))]
+                _log(f"Available functions: {funcs[:15]}")
+        else:
+            st.error("❌ Could not import football_tools.py - check folder structure!")
+            st.info("Expected: modules/football_tools.py OR same folder as this script")
         
-        # METHOD 2: Fallback to job queue (local_compute)
+        # METHOD 2: Fallback to job queue (local_compute) - THIS IS BAD, MEANS SHEETS NOT CONNECTED
         if not bible:
-            st.warning("⚠️ Falling back to job queue (NOT Google Sheets directly)")
+            st.warning("⚠️ Falling back to job queue - NOT connected to Google Sheets!")
+            st.info("The Bible will have LIMITED rules. Fix the import to get full Bible.")
             _log("Falling back to job queue for Bible...")
             bible = _run_tool("get_research_context", {"pl_column": st.session_state.get("target_pl_column", "BO 2.5 PL")})
             bible_source = "job_queue"
