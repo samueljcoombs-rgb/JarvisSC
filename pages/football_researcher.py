@@ -69,7 +69,7 @@ def _filter_hash(filters: List[Dict]) -> str:
     return hashlib.md5(json.dumps(filters, sort_keys=True, default=str).encode()).hexdigest()[:12]
 
 # ============================================================
-# OpenAI Client (GPT-5)
+# OpenAI Client (GPT-4o)
 # ============================================================
 
 try:
@@ -89,7 +89,8 @@ def _get_client() -> Optional[OpenAI]:
     return OpenAI(api_key=api_key)
 
 def _get_model() -> str:
-    return "gpt-5"  # ALWAYS GPT-5
+    """Get the OpenAI model to use - defaults to gpt-4o, can override with env var."""
+    return os.getenv("OPENAI_MODEL") or os.getenv("PREFERRED_OPENAI_MODEL") or "gpt-4o"
 
 # ============================================================
 # Session State
@@ -259,26 +260,49 @@ def _sb_cached():
 # ============================================================
 
 def _load_bible() -> Dict:
-    """Load research context from local compute."""
+    """Load research context from Google Sheets (Bible) directly."""
     try:
         if "bible" not in st.session_state:
             st.session_state.bible = None
         if st.session_state.bible:
             return st.session_state.bible
         
-        _log("Loading Bible...")
+        _log("Loading Bible from Google Sheets...")
+        
+        # Import and call the Google Sheets function DIRECTLY (not via job queue)
+        try:
+            from football_tools import get_research_context as get_bible_from_sheets
+            bible = get_bible_from_sheets(limit_notes=20)
+            
+            if bible.get("ok"):
+                _log(f"Bible loaded: {len(bible.get('research_rules', []))} rules, {len(bible.get('column_definitions', []))} column defs")
+                st.session_state.bible = bible
+                return bible
+            else:
+                _log(f"Bible load returned not ok: {bible}")
+        except ImportError as e:
+            _log(f"Could not import football_tools: {e}")
+        except Exception as e:
+            _log(f"Error calling get_research_context from sheets: {e}")
+        
+        # Fallback: Try via job queue (local_compute)
+        _log("Falling back to job queue for Bible...")
         bible = _run_tool("get_research_context", {"pl_column": st.session_state.target_pl_column})
         
-        # If no Supabase, create minimal bible
-        if bible.get("error"):
+        # If still no Bible, create minimal version
+        if bible.get("error") or not bible.get("research_rules"):
+            _log("Creating minimal Bible fallback")
             bible = {
                 "dataset_overview": {"primary_goal": "Find profitable betting strategies"},
                 "gates": DEFAULT_GATES,
                 "derived": {"outcome_columns": OUTCOME_COLUMNS},
                 "research_rules": [
-                    {"rule": "Never use PL columns as features"},
-                    {"rule": "Split by time: train older, test newer"},
-                    {"rule": "Minimum 300 train rows"},
+                    {"rule": "NEVER use PL columns as features - this is data leakage"},
+                    {"rule": "Split by TIME: train on older data, test on newer data"},
+                    {"rule": "Minimum 300 train rows for statistical significance"},
+                    {"rule": "Require positive test ROI for any strategy"},
+                    {"rule": "Forward walk validation required: >60% windows positive"},
+                    {"rule": "Statistical significance: p-value < 0.10"},
                 ],
             }
         
@@ -292,104 +316,182 @@ def _format_bible(bible: Dict) -> str:
     overview = bible.get("dataset_overview") or {}
     gates = bible.get("gates") or DEFAULT_GATES
     derived = bible.get("derived") or {}
+    rules = bible.get("research_rules") or []
     
     outcome_cols = derived.get('outcome_columns', OUTCOME_COLUMNS)
     outcome_str = ', '.join(str(c) for c in outcome_cols) if isinstance(outcome_cols, list) else str(outcome_cols)
     
+    # Format rules
+    rules_text = ""
+    if rules:
+        rules_list = []
+        for r in rules[:10]:  # Show first 10 rules
+            rule_text = r.get("rule") or r.get("Rule") or str(r)
+            if rule_text:
+                rules_list.append(f"- {rule_text}")
+        if rules_list:
+            rules_text = "\n**Key Rules:**\n" + "\n".join(rules_list)
+        if len(rules) > 10:
+            rules_text += f"\n*...and {len(rules) - 10} more rules*"
+    
     return f"""## 📖 Bible Loaded
 **Goal:** {overview.get('primary_goal', 'Find profitable strategies')}
-**Gates:** min_train={gates.get('min_train_rows', 300)}, min_val={gates.get('min_val_rows', 60)}, min_test={gates.get('min_test_rows', 60)}, max_gap={gates.get('max_train_val_gap_roi', 0.4)}, max_dd={gates.get('max_test_drawdown', -50)}
-**Outcome Columns (NEVER features):** {outcome_str}"""
+**Approach:** {overview.get('approach', 'ML for discovery, filter rules for output')}
+**Gates:** min_train={gates.get('min_train_rows', 300)}, min_val={gates.get('min_val_rows', 60)}, min_test={gates.get('min_test_rows', 60)}, max_gap={gates.get('max_train_val_gap_roi', 0.4)}
+**Outcome Columns (NEVER features):** {outcome_str}
+{rules_text}"""
 
 # ============================================================
-# LLM Functions (GPT-5)
+# LLM Functions (GPT-4o)
 # ============================================================
 
-SYSTEM_PROMPT = """You are an expert football betting research agent using a WORLD-CLASS quantitative approach. Your goal is to find PROFITABLE and STABLE strategies through systematic, thoughtful exploration.
+SYSTEM_PROMPT = """You are a SENIOR QUANTITATIVE RESEARCHER at a top hedge fund. 
+Your job is to find profitable, stable betting strategies through DEEP, METHODICAL analysis.
 
-## Your Mindset - SENIOR QUANT RESEARCHER
-- 70% thinking, 30% testing
-- Think like a quant researcher at a top hedge fund
-- ANALYZE DEEPLY before deciding next steps
-- Build a mental model of what's working and why
-- Never give up until you've truly explored all angles
-- Be SKEPTICAL of your own results - assume noise until proven
-- Apply domain knowledge about football and betting markets
+## YOUR CORE PHILOSOPHY
 
-## DUAL-TRACK RESEARCH APPROACH
+### 70% THINKING, 30% TESTING
+- Before EVERY action, think deeply about WHY
+- Never rush to test - understand the hypothesis first
+- Every action must be justified with expected value reasoning
+- Quality of thinking > quantity of tests
 
-You have TWO complementary research tracks, but the FINAL OUTPUT is ALWAYS filter rules.
+### CONNECT EVERYTHING
+- Every new finding must be connected to past learnings
+- Look for patterns across different tests
+- Build a mental model of what's working and WHY
+- Contradictions are valuable - they reveal deeper truths
 
-### TRACK A: Rule-Based Filters (PRIMARY - This is the output)
-- MODE/MARKET/DRIFT exploration
-- Bracket sweeps on numeric columns
-- Subgroup scans on categorical columns
-- Filter combinations
-- **THIS IS WHAT WE DEPLOY** - Simple, interpretable, executable rules
+### SKEPTICISM IS ESSENTIAL
+- Assume every positive result is noise until proven
+- Ask: "Would this have worked 2 years ago? Will it work next year?"
+- Overfitting is your enemy - simple rules beat complex ones
+- Statistical significance is necessary but not sufficient
 
-### TRACK B: ML Models (DISCOVERY HELPER - Finds what to test)
-- CatBoost, XGBoost, LightGBM, Logistic Regression
-- SHAP explanations to understand WHY
-- Feature importance to find what matters
-- **PURPOSE: Find patterns to convert into filter rules**
+## DEEP THINKING CYCLE (USE THIS FOR EVERY DECISION)
 
-### THE KEY INSIGHT:
+### 1. OBSERVE (What just happened?)
+- Summarize the results objectively
+- Note anything surprising or unexpected
+- Identify the key numbers: ROI, sample size, p-value
+- What worked? What didn't?
+
+### 2. CONNECT (How does this relate to past learnings?)
+- Query your accumulated learnings
+- Does this confirm or contradict previous findings?
+- Have you seen similar patterns before?
+- What strategies have worked in related markets?
+
+### 3. HYPOTHESIZE (Why might this work? What market inefficiency?)
+- Propose a SPECIFIC market inefficiency that explains the edge
+- Example: "DRIFT IN captures late informed money before odds shorten"
+- Example: "Low odds O2.5 bets are undervalued because public overestimates draws"
+- If you can't explain WHY, the edge probably isn't real
+
+### 4. PLAN (Generate candidate actions, score by expected value)
+Generate 5-8 candidate next actions. For EACH action:
+- What tool would you use?
+- What parameters?
+- What's the expected outcome?
+- What's the probability of success?
+- What will you learn even if it fails?
+- Expected Value Score (1-10)
+
+### 5. DECIDE (Pick the best action with full justification)
+- Choose the action with highest expected value
+- Explain your full reasoning
+- State what would change your mind
+- Plan your next 3-5 steps
+
+### 6. RECORD (Save insights for future reference)
+- What key insight should be remembered?
+- What hypothesis was confirmed/refuted?
+- What should be explored further?
+- What should be avoided?
+
+## WORLD-CLASS QUANT RESEARCH PROCESS
+
+### Phase 1: HYPOTHESIS GENERATION
+- Domain expertise: "Why might this market be inefficient?"
+- Let data suggest patterns (feature importance, subgroup scans)
+- ML discovery to find patterns humans miss
+
+### Phase 2: RIGOROUS TESTING
+- Train/Val/Test split (by TIME, not random)
+- Walk-forward analysis (simulate real trading)
+- Monte Carlo for confidence intervals
+- Check for data leakage
+
+### Phase 3: ALPHA DECAY ANALYSIS
+- Does edge decay over time?
+- Is it being arbitraged away?
+- What regime does it work in? Fail in?
+
+### Phase 4: VALIDATION GATES
+- p-value < 0.10 for statistical significance
+- Forward walk > 60% positive periods
+- Train/val gap < 0.4 (no overfitting)
+- Minimum sample sizes met
+
+## EXPLOITATION VS EXPLORATION
+
+At each decision point, consider:
+- **Exploit**: Refine a promising strategy that's close to validation
+- **Explore**: Try new territory to find different edges
+- Early in research: 70% explore, 30% exploit
+- Later in research: 30% explore, 70% exploit
+
+## WHEN THINGS DON'T WORK
+
+- Don't give up after one failure
+- Ask: "What did I learn? What hypothesis is now refuted?"
+- Try the OPPOSITE (if DRIFT IN failed, try DRIFT OUT)
+- Move to different market/mode combination
+- Use ML to suggest new directions
+
+## OUTPUT FORMAT FOR ANALYSIS
+
+When analyzing results, ALWAYS structure your thinking:
+
 ```
-ML is for DISCOVERY → Filter Rules are the OUTPUT
+### SITUATION ASSESSMENT
+[2-3 paragraphs on current state of research]
+[What have we tried? What's worked? What's failed?]
+[What patterns are emerging?]
 
-ML says "ODDS 1.8-2.2 important" 
-    → Create filter: ODDS between 1.8-2.2
-    → Validate with test_filter
-    → Deploy the FILTER (not the ML model)
+### KEY INSIGHTS FROM THIS TEST
+[What did we learn?]
+[Does this confirm or contradict previous findings?]
+[What market inefficiency might explain this?]
+
+### CONNECTING TO PAST LEARNINGS
+[Link to specific past learnings: "Learning #X showed that..."]
+[Identify patterns: "This is the 3rd time we've seen..."]
+[Note contradictions: "This contradicts learning #Y because..."]
+
+### CANDIDATE ACTIONS (ranked by expected value)
+
+1. **[Action Name]** (EV: 8/10)
+   - Tool: {tool_name}
+   - Reasoning: [Why this action?]
+   - Expected outcome: [What do I expect?]
+   - Learning value: [What will I learn?]
+
+2. **[Action Name]** (EV: 7/10)
+   ...
+
+### DECISION
+**Chosen Action:** [Action name]
+**Justification:** [Full reasoning]
+**What Would Change My Mind:** [If I see X, I'll pivot to Y]
+
+### NEXT 3-5 STEPS
+1. [Step 1]
+2. [Step 2]
+3. [Step 3]
 ```
 
-### WHY USE ML AT ALL?
-1. **Finds patterns humans miss** - ML might discover "% DRIFT > 5" matters
-2. **SHAP converts ML → Filters** - Explicit filter suggestions from black box
-3. **Confirms filter ideas** - If ML agrees with your filter, more confidence
-4. **Prioritizes exploration** - Feature importance tells you what to bracket_sweep
-
-### HYBRID WORKFLOW (ML Discovery → Filter Output)
-```
-Step 1: train_catboost or train_logistic
-        → Get feature_importance list
-        
-Step 2: shap_explain 
-        → Get suggested_filters from SHAP
-        
-Step 3: test_filter on each suggested filter
-        → Validate with train/val/test
-        
-Step 4: forward_walk on passing filters
-        → Ensure stability over time
-        
-Step 5: save_strategy 
-        → Save the FILTER RULES (not the ML model)
-```
-
-### EXAMPLE:
-```
-1. train_catboost returns: feature_importance = ["ACTUAL ODDS", "% DRIFT", "MODE"]
-2. shap_explain returns: suggested_filters = [
-     {"col": "ACTUAL ODDS", "op": "between", "min": 1.8, "max": 2.2},
-     {"col": "% DRIFT", "op": ">=", "value": 5}
-   ]
-3. test_filter on these → Train: +3%, Val: +2%, Test: +1.5%
-4. forward_walk → 5/6 windows positive
-5. FINAL OUTPUT: Filter rules that can be executed without ML
-```
-
-**Remember: The bettor will use FILTER RULES, not ML models. ML just helps us find good rules faster.**
-
-## Deep Thinking Cycle (USE THIS EVERY ITERATION)
-1. OBSERVE: What just happened? Note surprises.
-2. CONNECT: How does this relate to past learnings?
-3. HYPOTHESIZE: Why might this work? What market inefficiency?
-4. PLAN: Generate 3-5 candidate actions, score by expected value
-5. DECIDE: Pick best action with full justification
-6. RECORD: Save key insights
-
-## Critical Rules
+## CRITICAL RULES
 1. NEVER use PL columns as features (data leakage!)
 2. Split by TIME: train older, test newer (never random!)
 3. Explain WHY a filter exploits market inefficiency
@@ -398,158 +500,104 @@ Step 5: save_strategy
 6. p-value < 0.10 for statistical significance
 7. Forward walk must show >60% positive periods
 
-## COMPLETE TOOL ARSENAL (29 Tools)
+## AVAILABLE TOOLS
 
-### 🔍 EXPLORATION TOOLS (Understand the data)
-- **query_data**: Run aggregations (group_by, metrics). Start here!
-  - Use: `query_type="aggregate", group_by=["MODE"], metrics=["count", "mean:BO 2.5 PL"]`
-- **feature_importance**: Find which numeric columns correlate with profit
-- **univariate_scan**: For each column, find single best filter value
-- **correlation_check**: Check for feature leakage before using a column
+### Exploration
+- **query_data**: Aggregations, distributions
+- **feature_importance**: Find predictive columns
+- **univariate_scan**: Best single filters
+- **bracket_sweep**: Numeric range testing
+- **subgroup_scan**: Categorical combinations
 
-### 🎯 SWEEP TOOLS (Systematic search)
-- **bracket_sweep**: Test numeric ranges (ACTUAL ODDS, % DRIFT, etc.)
-  - Returns top brackets with train/val/test splits
-- **subgroup_scan**: Test categorical combos (MODE, MARKET, DRIFT IN/OUT)
-  - Returns top groups passing gates
-- **combination_scan**: Test multi-filter combinations
-  - Use when you have a promising base to build on
+### Testing
+- **test_filter**: Train/val/test validation
+- **forward_walk**: Walk-forward analysis
+- **monte_carlo_sim**: Confidence intervals
+- **statistical_significance**: P-value calculation
+- **time_decay_analysis**: Alpha decay check
 
-### ✅ TESTING & VALIDATION TOOLS
-- **test_filter**: Test specific filter combo with train/val/test splits
-  - The workhorse - use this to validate any hypothesis
-- **forward_walk**: Walk-forward validation (6 windows)
-  - REQUIRED for any strategy claiming to be "validated"
-- **monte_carlo_sim**: Bootstrap simulation for confidence intervals
-  - Answers: "What's the probability this is profitable?"
-- **regime_check**: Check stability across time periods (month/quarter)
-- **statistical_significance**: Calculate p-value
-  - p < 0.05 = significant, p < 0.01 = highly significant
-- **time_decay_analysis**: Check if edge decays over time (alpha decay)
-  - Critical! Edges can disappear
+### ML Discovery
+- **train_catboost**: Best for categoricals
+- **train_xgboost**: Robust general purpose
+- **train_logistic**: Interpretable coefficients
+- **shap_explain**: Convert ML to filter rules
 
-### 🤖 ML TOOLS (Pattern Discovery)
-- **train_catboost**: CatBoost model - BEST for categorical features
-  - Handles MODE, MARKET, LEAGUE natively
-  - Returns feature importance + suggested filters
-- **train_xgboost**: XGBoost model - robust general purpose
-  - Numeric features only, very reliable
-- **train_lightgbm**: LightGBM model - fast, handles categoricals
-  - Good for large datasets
-- **train_logistic**: Logistic Regression - INTERPRETABLE baseline
-  - Returns coefficients you can understand
-  - Great for "WHY does this work?"
-- **shap_explain**: SHAP explanations - convert ML to filters!
-  - THIS IS KEY for dual-track research
-  - Tells you exactly which features matter and how
-- **hyperopt_pl_lab**: Optuna hyperparameter tuning
-  - Use for final optimization
+### Memory
+- **save_learning**: Store insight
+- **query_learnings**: Search past insights
+- **save_strategy**: Store strategy
+- **query_strategies**: Find similar strategies
 
-### 💾 MEMORY TOOLS (Supabase Persistence)
-- **save_strategy**: Store strategy with full stats
-  - Save every promising strategy!
-- **query_strategies**: Find strategies by status/pl_column
-- **promote_strategy**: Move strategy through lifecycle
-  - draft → candidate → promising → validated
-- **save_learning**: Store insight/learning
-  - "DRIFT IN works better for Back bets"
-- **query_learnings**: Search past learnings
-  - "What do I know about DRIFT?"
-- **save_checkpoint**: Save current state (crash recovery)
-- **load_checkpoint**: Resume from checkpoint
-- **get_research_context**: Load Bible (rules, gates, learnings)
-
-### 🔧 SESSION TOOLS
-- **create_session**: Start new research session
-- **pl_lab**: Full ML pipeline with distillation
-
-## STRATEGY LIFECYCLE (Auto-Promotion)
-
-DRAFT → test_roi > 0 + gates_passed
-CANDIDATE → forward_walk > 60% + monte_carlo > 65%
-PROMISING → no alpha decay + p-value < 0.10 + sharpe > 0.5
-VALIDATED → Ready for live trading
-
-## WHEN TO USE WHICH TOOL
-
-| Situation | Best Tool |
-|-----------|-----------|
-| "What does the data look like?" | query_data |
-| "Which columns matter?" | feature_importance, train_logistic |
-| "Find me good categorical combos" | subgroup_scan |
-| "Find me good numeric ranges" | bracket_sweep |
-| "Test this specific filter" | test_filter |
-| "Is this statistically significant?" | statistical_significance |
-| "Will this work going forward?" | forward_walk |
-| "Find complex patterns" | train_catboost, shap_explain |
-| "Why does the ML model predict?" | shap_explain |
-| "Is the edge decaying?" | time_decay_analysis |
-| "What's the confidence interval?" | monte_carlo_sim |
-| "Save this finding" | save_learning, save_strategy |
-
-## EXAMPLE HYBRID WORKFLOW
-
-1. Start with subgroup_scan → Find MODE=Quick League looks good
-2. Run train_catboost → Confirms MODE important, also finds DRIFT IN
-3. Run shap_explain → Shows ACTUAL ODDS 1.8-2.2 matters
-4. Create combined filter: MODE=QL + DRIFT=IN + ODDS 1.8-2.2
-5. test_filter → Train: +4%, Val: +3%, Test: +2%
-6. forward_walk → 5/6 windows positive
-7. statistical_significance → p-value = 0.03
-8. save_strategy with status="validated"
-
-This is a VALIDATED strategy because:
-- Rule-based filter (interpretable) ✓
-- ML confirmation (pattern real) ✓
-- Statistical significance (not noise) ✓
-- Forward walk (works over time) ✓
+Remember: You are a SENIOR QUANT. Think deeply. Connect dots. Be skeptical. Find real edges.
 """
 
 def _llm(context: str, question: str, max_tokens: int = 3000) -> str:
-    """Call GPT-5 for analysis."""
+    """Call LLM for analysis with proper error handling."""
     client = _get_client()
     if not client:
-        return '{"error": "OpenAI client not available"}'
+        _log("ERROR: OpenAI client not available - check OPENAI_API_KEY")
+        return '{"error": "OpenAI client not available - check OPENAI_API_KEY"}'
     
     try:
         model = _get_model()
+        _log(f"Calling LLM: model={model}, context_len={len(context)}, question_len={len(question)}")
         
-        # GPT-5 and o1 models use max_completion_tokens, older models use max_tokens
-        if model.startswith("gpt-5") or model.startswith("o1"):
-            response = client.chat.completions.create(
-                model=model,
-                max_completion_tokens=max_tokens,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": f"{context}\n\n{question}"}
-                ]
-            )
+        # Build request params
+        params = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": f"{context}\n\n---\n{question}"}
+            ],
+            "temperature": 0.7,
+        }
+        
+        # Different models use different token params
+        if model.startswith("o1"):
+            params["max_completion_tokens"] = max_tokens
         else:
-            response = client.chat.completions.create(
-                model=model,
-                max_tokens=max_tokens,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": f"{context}\n\n{question}"}
-                ]
-            )
-        return response.choices[0].message.content
+            params["max_tokens"] = max_tokens
+        
+        response = client.chat.completions.create(**params)
+        content = response.choices[0].message.content
+        _log(f"LLM response received: {len(content) if content else 0} chars")
+        return content or ""
+        
     except Exception as e:
-        return f'{{"error": "{str(e)}"}}'
+        error_msg = str(e)
+        _log(f"LLM ERROR: {error_msg}")
+        return f'{{"error": "{error_msg}"}}'
 
 def _parse_json(resp: str) -> Optional[Dict]:
-    """Parse JSON from LLM response."""
+    """Parse JSON from LLM response, handling markdown code blocks."""
+    if not resp:
+        return None
+    
+    # First, try direct parse
     try:
         return json.loads(resp)
     except:
         pass
+    
+    # Strip markdown code blocks
+    cleaned = resp.strip()
+    cleaned = re.sub(r'^```json\s*', '', cleaned)
+    cleaned = re.sub(r'^```\s*', '', cleaned)
+    cleaned = re.sub(r'\s*```$', '', cleaned)
+    
     try:
-        start = resp.find('{')
-        end = resp.rfind('}') + 1
-        if start >= 0 and end > start:
-            return json.loads(resp[start:end])
+        return json.loads(cleaned)
     except:
         pass
+    
+    # Find JSON object in response
+    try:
+        match = re.search(r'\{[\s\S]*\}', cleaned)
+        if match:
+            return json.loads(match.group())
+    except:
+        pass
+    
     return None
 
 # ============================================================
@@ -609,79 +657,159 @@ def _run_exploration(pl_column: str, progress_container=None) -> Dict:
     return results
 
 def _analyze_exploration(bible: Dict, exploration: Dict, pl_column: str) -> Dict:
-    """Deep LLM analysis of exploration results."""
-    context = f"""## Bible Context
-{_safe_json(bible.get('dataset_overview', {}), 1000)}
+    """Deep LLM analysis of exploration results using WORLD-CLASS QUANT thinking."""
+    
+    # Build rich context
+    context = f"""## RESEARCH CONTEXT
 
-## Exploration Results for {pl_column}
+### Target: {pl_column}
 
-### Data Overview
-{_safe_json(exploration.get('describe', {}), 1500)}
+### Bible Rules (THE LAW)
+{_safe_json(bible.get('research_rules', [])[:10], 1500)}
 
-### MODE Distribution
+### Dataset Overview
+{_safe_json(bible.get('dataset_overview', {}), 500)}
+
+### Past Learnings (What We Already Know)
+{_safe_json(bible.get('recent_learnings', []), 1000)}
+
+### Strategy Repository Status
+{_safe_json(bible.get('strategy_counts', {}), 200)}
+
+---
+
+## EXPLORATION RESULTS
+
+### Data Summary
+- Total rows: {exploration.get('describe', {}).get('total_rows', 'Unknown')}
+- Columns: {len(exploration.get('describe', {}).get('columns', []))} features
+
+### MODE Distribution (First Split)
 {_safe_json(exploration.get('mode_distribution', {}), 1500)}
 
 ### MARKET Distribution  
-{_safe_json(exploration.get('market_distribution', {}), 1500)}
+{_safe_json(exploration.get('market_distribution', {}), 2000)}
 
 ### DRIFT Distribution
-{_safe_json(exploration.get('drift_distribution', {}), 1000)}
+{_safe_json(exploration.get('drift_distribution', {}), 800)}
 
-### MODE x MARKET x DRIFT Combinations
+### MODE x MARKET x DRIFT Combinations (Key Patterns)
 {_safe_json(exploration.get('mode_market_drift', {}), 3000)}
 """
 
-    question = """Analyze this exploration data DEEPLY. Think step by step:
+    question = """## YOUR TASK: DEEP ANALYSIS
 
-1. Which MODEs have positive mean PL? Why might that be?
-2. Which MARKETs show promise? What market inefficiency could explain it?
-3. How does DRIFT (IN/OUT/SAME) affect profitability? Why?
-4. What MODE + MARKET + DRIFT combinations look most promising?
-5. Any patterns that surprise you? Red flags?
+You are a SENIOR QUANT RESEARCHER. Analyze this data using the DEEP THINKING CYCLE.
 
-Then generate prioritized research avenues.
+### 1. OBSERVE (What do you see in the data?)
+- Which MODEs have the best/worst mean PL?
+- Which MARKETs show promise (positive mean PL)?
+- How does DRIFT affect results?
+- What combinations stand out?
+- Note sample sizes - are they sufficient?
+
+### 2. CONNECT (Link to what we know)
+- How does this relate to any past learnings shown above?
+- Are there patterns consistent with betting market theory?
+- Any contradictions with previous findings?
+
+### 3. HYPOTHESIZE (WHY might patterns exist?)
+For each promising pattern, propose a SPECIFIC market inefficiency:
+- Example: "DRIFT IN + Back bets might capture informed money entering late"
+- Example: "FHGO0.5 might be underpriced because market underestimates first-half goals"
+- If you can't explain WHY, be skeptical of the pattern
+
+### 4. PLAN (Candidate research avenues, scored by expected value)
+Generate 8-10 research avenues. For EACH:
+- What filters define it?
+- What's your hypothesis for WHY it might work?
+- Expected rows (is sample size sufficient?)
+- Confidence level (high/medium/low)
+- What DRIFT direction seems best for this combination?
+
+### 5. DECIDE (Rank and prioritize)
+- Rank avenues by expected value
+- Consider: probability of success × magnitude of edge × learning value
+- Balance exploitation (refine promising) vs exploration (try new)
 
 Respond with JSON:
 {
-    "detailed_analysis": "Your deep thinking about the data (2-3 paragraphs)",
-    "key_observations": ["observation 1", "observation 2", ...],
-    "mode_summary": {
+    "situation_assessment": "2-3 paragraphs: What's the current state? What patterns emerge? What's surprising?",
+    
+    "key_observations": [
+        "Observation 1 with specific numbers",
+        "Observation 2 with specific numbers",
+        "..."
+    ],
+    
+    "mode_analysis": {
         "best_mode": "MODE name",
-        "best_mode_reason": "why it's best",
-        "worst_mode": "MODE name", 
-        "worst_mode_reason": "why it's worst"
+        "best_mode_pl": 0.00,
+        "best_mode_hypothesis": "Why this MODE might have edge",
+        "worst_mode": "MODE name",
+        "worst_mode_pl": 0.00,
+        "worst_mode_reason": "Why this MODE underperforms"
     },
-    "drift_summary": {
+    
+    "market_analysis": {
+        "promising_markets": [
+            {"market": "X", "mean_pl": 0.00, "count": 1000, "hypothesis": "Why this might work"}
+        ],
+        "avoid_markets": [
+            {"market": "Y", "mean_pl": -0.05, "count": 500, "reason": "Why to avoid"}
+        ]
+    },
+    
+    "drift_analysis": {
         "best_drift": "IN/OUT/SAME",
-        "best_drift_reason": "why",
-        "drift_depends_on": "what drift effectiveness depends on"
+        "drift_impact": "How drift affects profitability",
+        "drift_hypothesis": "Why drift might matter (informed money, etc.)"
     },
-    "all_positive_combinations": [
-        {"mode": "X", "market": "Y", "best_drift": "Z", "mean_pl": 0.05, "count": 100}
+    
+    "connections_to_past": [
+        "Connection to learning #X: ...",
+        "This confirms/contradicts previous finding that..."
     ],
-    "sample_size_concerns": [
-        {"combination": "X+Y", "count": 50, "concern": "too small"}
+    
+    "market_inefficiency_hypotheses": [
+        {
+            "pattern": "MODE=X + MARKET=Y",
+            "hypothesis": "Specific market inefficiency explanation",
+            "testable_prediction": "If true, we should see..."
+        }
     ],
+    
     "prioritized_avenues": [
         {
             "rank": 1,
-            "avenue": "MODE=X, MARKET=Y",
-            "base_filters": [{"col": "MODE", "op": "=", "value": "X"}, {"col": "MARKET", "op": "=", "value": "Y"}],
-            "promising_drift": "IN",
-            "market_inefficiency_hypothesis": "Why this might be profitable",
+            "avenue": "MODE=X, MARKET=Y, DRIFT=Z",
+            "base_filters": [
+                {"col": "MODE", "op": "=", "value": "X"},
+                {"col": "MARKET", "op": "=", "value": "Y"}
+            ],
+            "promising_drift": "IN or OUT or SAME",
+            "market_inefficiency_hypothesis": "Specific explanation of WHY this edge exists",
             "expected_rows": "~500",
-            "confidence": "high/medium/low"
+            "expected_value_score": 8,
+            "confidence": "high/medium/low",
+            "what_we_learn_if_fails": "Even if this fails, we learn..."
         }
+    ],
+    
+    "next_steps_reasoning": "After testing these avenues, the logical next steps would be...",
+    
+    "red_flags": [
+        "Concern 1: Small sample size for X",
+        "Concern 2: Pattern might be noise because..."
     ]
 }"""
 
-    resp = _llm(context, question)
+    resp = _llm(context, question, max_tokens=4000)  # More tokens for deep thinking
     _log(f"LLM analysis response length: {len(resp) if resp else 0}")
     
     # Check for errors
     if not resp or resp.startswith('{"error"'):
         _log(f"LLM error: {resp}")
-        # Generate basic avenues from exploration data without LLM
         return _generate_fallback_avenues(exploration, pl_column)
     
     parsed = _parse_json(resp)
@@ -694,6 +822,10 @@ Respond with JSON:
     if not parsed.get("prioritized_avenues"):
         fallback = _generate_fallback_avenues(exploration, pl_column)
         parsed["prioritized_avenues"] = fallback.get("prioritized_avenues", [])
+    
+    # Add situation_assessment as detailed_analysis for backward compatibility
+    if parsed.get("situation_assessment") and not parsed.get("detailed_analysis"):
+        parsed["detailed_analysis"] = parsed["situation_assessment"]
     
     return parsed
 
@@ -982,46 +1114,299 @@ def _analyze_avenue_results(avenue: Dict, results: List[Dict], bible: Dict) -> D
 # ============================================================
 
 def _deep_analyze_iteration(avenue: Dict, avenue_results: Dict, accumulated_learnings: List, avenues_remaining: int) -> Dict:
-    """LLM deep analysis of iteration results."""
-    context = f"""## Avenue Explored
-{_safe_json(avenue, 500)}
+    """LLM deep analysis of iteration results using WORLD-CLASS QUANT thinking."""
+    
+    # Build rich context with ALL accumulated knowledge
+    learnings_summary = "\n".join([f"- Learning #{i+1}: {l.get('learning', '')}" for i, l in enumerate(accumulated_learnings[-10:])])
+    
+    context = f"""## ITERATION ANALYSIS
 
-## Results Summary
-{_safe_json(avenue_results.get('analysis', {}), 2000)}
+### Avenue Explored
+{_safe_json(avenue, 600)}
 
-## Best Results
+### Results Summary
+{_safe_json(avenue_results.get('analysis', {}), 2500)}
+
+### Detailed Results (Top 5)
 {_safe_json(avenue_results.get('analysis', {}).get('all_results_sorted', [])[:5], 2000)}
 
-## Accumulated Learnings
-{_safe_json(accumulated_learnings[-5:], 1000)}
+---
 
-## Avenues Remaining: {avenues_remaining}
+## ACCUMULATED KNOWLEDGE (CONNECT TO THIS)
+
+### Past Learnings ({len(accumulated_learnings)} total)
+{learnings_summary}
+
+### Avenues Remaining: {avenues_remaining}
+
+---
+
+## PATTERNS TO LOOK FOR
+- Did DRIFT direction matter?
+- Did sample size affect reliability?
+- Is there a sweet spot for ODDS ranges?
+- Do certain MODE/MARKET combos consistently work?
 """
 
-    question = """Analyze these results DEEPLY using the thinking cycle:
+    question = """## YOUR TASK: DEEP ITERATION ANALYSIS
 
-1. OBSERVE: What happened? Any surprises?
-2. CONNECT: How does this relate to past learnings?
-3. HYPOTHESIZE: What market inefficiency might explain any positive results?
-4. Should we continue with this avenue or move on?
+You are a SENIOR QUANT. Use the DEEP THINKING CYCLE to analyze these results.
+
+### 1. OBSERVE (What happened in this test?)
+- What were the key metrics (train/val/test ROI, sample sizes)?
+- Did the strategy pass gates? Which ones failed?
+- Any surprising results (positive or negative)?
+- How does test ROI compare to train ROI (overfitting check)?
+
+### 2. CONNECT (Link to accumulated learnings)
+- Does this confirm any of the past learnings listed above?
+- Does this contradict anything we thought we knew?
+- Have we seen similar patterns in other tests?
+- Is there a meta-pattern emerging?
+
+### 3. HYPOTHESIZE (Why did we get these results?)
+- If positive: What market inefficiency might explain this edge?
+- If negative: Why might this hypothesis have been wrong?
+- Is this result likely real or noise (consider sample size, p-value)?
+
+### 4. PLAN (What should we do next?)
+- Should we continue refining this avenue or move on?
+- If continue: What specific refinements would help?
+- If move on: What did we learn to apply elsewhere?
+- Generate 3-5 specific next actions with expected value scores
+
+### 5. DECIDE (Best next step)
+- What's the single best action after this result?
+- Full justification for the decision
+- What would change your mind?
+
+### 6. RECORD (Key insight to remember)
+- What's the ONE key learning from this iteration?
+- Should this be saved as a permanent learning?
 
 Respond with JSON:
 {
-    "detailed_reasoning": "Your step-by-step thinking (2-3 paragraphs)",
-    "hypothesis_verdict": "supported/refuted/inconclusive",
-    "key_learning": "One key insight to remember",
-    "patterns_noticed": ["pattern 1", "pattern 2"],
-    "refinement_ideas": [
-        {"filter_to_add": {"col": "X", "op": "=", "value": "Y"}, "reasoning": "why"}
+    "situation_assessment": "2 paragraphs: What happened? What does it mean?",
+    
+    "observation": {
+        "key_metrics": {
+            "train_roi": 0.00,
+            "val_roi": 0.00,
+            "test_roi": 0.00,
+            "gates_passed": true,
+            "sample_sufficient": true
+        },
+        "surprises": ["Surprise 1", "Surprise 2"],
+        "overfitting_risk": "low/medium/high"
+    },
+    
+    "connections": [
+        {"learning_ref": "Learning #X", "connection": "This confirms/contradicts because..."},
+        {"pattern": "Emerging pattern", "evidence": "This is the Nth time we've seen..."}
     ],
-    "should_continue_avenue": true/false,
+    
+    "hypothesis_verdict": "supported/refuted/inconclusive",
+    "hypothesis_reasoning": "Why the original hypothesis was right/wrong",
+    "market_inefficiency_explanation": "If positive, what inefficiency explains this?",
+    
+    "refinement_ideas": [
+        {
+            "filter_to_add": {"col": "X", "op": "=", "value": "Y"},
+            "reasoning": "Why this refinement might help",
+            "expected_improvement": "What we expect to see"
+        }
+    ],
+    
+    "candidate_next_actions": [
+        {
+            "action": "Action description",
+            "tool": "tool_name",
+            "expected_value_score": 8,
+            "reasoning": "Why this action"
+        }
+    ],
+    
+    "decision": {
+        "should_continue_avenue": true,
+        "next_action": "Specific action to take",
+        "justification": "Full reasoning for this decision",
+        "what_would_change_mind": "If we see X, we'd pivot to Y"
+    },
+    
+    "key_learning": "One sentence: the key insight to remember",
+    "save_as_permanent_learning": true,
+    "learning_category": "drift_patterns/odds_patterns/mode_patterns/market_patterns",
+    
     "confidence_in_direction": "high/medium/low",
-    "next_recommendation": "what to do next"
+    "next_recommendation": "Specific recommendation for next step"
 }"""
 
-    resp = _llm(context, question)
+    resp = _llm(context, question, max_tokens=3000)
     parsed = _parse_json(resp)
-    return parsed if parsed else {"detailed_reasoning": resp[:500], "key_learning": "", "should_continue_avenue": False}
+    
+    if not parsed:
+        return {
+            "situation_assessment": resp[:500] if resp else "Analysis failed",
+            "key_learning": "",
+            "decision": {"should_continue_avenue": False, "next_action": "move to next avenue"}
+        }
+    
+    # Backward compatibility
+    if not parsed.get("detailed_reasoning"):
+        parsed["detailed_reasoning"] = parsed.get("situation_assessment", "")
+    if not parsed.get("should_continue_avenue"):
+        parsed["should_continue_avenue"] = parsed.get("decision", {}).get("should_continue_avenue", False)
+    
+    return parsed
+
+
+def _ai_decide_next_action(accumulated_learnings: List, strategies_found: List, 
+                           avenues_explored: List, avenues_remaining: List,
+                           near_misses: List, pl_column: str, iteration: int) -> Dict:
+    """AI DECIDES what to do next - the core of the autonomous loop."""
+    
+    # Build comprehensive context
+    learnings_summary = "\n".join([f"- #{i+1}: {l.get('learning', '')}" for i, l in enumerate(accumulated_learnings[-15:])])
+    strategies_summary = "\n".join([f"- {s.get('result', {}).get('test_roi', 0):.2%} ROI: {s.get('filters', [])}" for s in strategies_found[-5:]])
+    explored_summary = "\n".join([f"- {a.get('avenue', '')}: {a.get('result_summary', 'tested')}" for a in avenues_explored[-10:]])
+    remaining_summary = "\n".join([f"- {a.get('avenue', '')}: {a.get('market_inefficiency_hypothesis', '')[:50]}" for a in avenues_remaining[:8]])
+    near_miss_summary = "\n".join([f"- {nm.get('avenue', '')}: {nm.get('test_roi', 0):.2%} (gate failures: {nm.get('gate_failures', [])})" for nm in near_misses[-5:]])
+    
+    context = f"""## AUTONOMOUS RESEARCH STATE
+
+### Current Position
+- Iteration: {iteration}
+- Target: {pl_column}
+- Strategies found: {len(strategies_found)}
+- Avenues explored: {len(avenues_explored)}
+- Avenues remaining: {len(avenues_remaining)}
+- Near misses: {len(near_misses)}
+
+### Accumulated Learnings ({len(accumulated_learnings)} total)
+{learnings_summary if learnings_summary else "No learnings yet"}
+
+### Strategies Found
+{strategies_summary if strategies_summary else "No strategies found yet"}
+
+### Recently Explored
+{explored_summary if explored_summary else "Nothing explored yet"}
+
+### Remaining Avenues
+{remaining_summary if remaining_summary else "No avenues queued"}
+
+### Near Misses (worth refining)
+{near_miss_summary if near_miss_summary else "No near misses"}
+
+---
+
+## AVAILABLE TOOLS
+- **query_data**: Explore data distributions
+- **bracket_sweep**: Test numeric ranges
+- **subgroup_scan**: Test categorical combinations
+- **test_filter**: Validate specific filter
+- **forward_walk**: Walk-forward validation
+- **monte_carlo_sim**: Confidence intervals
+- **train_catboost**: ML feature discovery
+- **train_logistic**: Interpretable ML
+- **shap_explain**: Convert ML to filters
+- **statistical_significance**: P-value calculation
+- **time_decay_analysis**: Check alpha decay
+"""
+
+    question = """## YOUR TASK: DECIDE WHAT TO DO NEXT
+
+You are a SENIOR QUANT RESEARCHER. Think deeply about the optimal next action.
+
+### DECISION FRAMEWORK
+
+**1. ASSESS CURRENT STATE**
+- What have we learned so far?
+- What's working? What's not?
+- Are we exploiting (refining promising) or exploring (trying new)?
+
+**2. CONSIDER OPTIONS**
+Generate 5-8 candidate actions. For EACH:
+- What tool/action?
+- What's the expected outcome?
+- What's the probability of finding an edge?
+- What will we learn even if it fails?
+- Expected Value Score (1-10)
+
+**3. BALANCE PRIORITIES**
+- Exploit near-misses (high probability, incremental gain)
+- Explore new territory (lower probability, potentially bigger edge)
+- Fill knowledge gaps (what don't we know yet?)
+- Avoid what's been tried and failed
+
+**4. MAKE THE DECISION**
+- Choose the single best action
+- Provide FULL justification
+- State what would change your mind
+
+Respond with JSON:
+{
+    "current_state_assessment": "2 paragraphs on where we are in the research",
+    
+    "what_we_know": [
+        "Key learning 1",
+        "Key learning 2"
+    ],
+    
+    "knowledge_gaps": [
+        "What we don't know yet 1",
+        "What we should explore 2"
+    ],
+    
+    "candidate_actions": [
+        {
+            "rank": 1,
+            "action": "Specific action description",
+            "tool": "tool_name",
+            "params": {"key": "value"},
+            "expected_outcome": "What we expect to find",
+            "probability_of_success": 0.6,
+            "potential_edge": "high/medium/low",
+            "learning_value": "What we learn if it fails",
+            "expected_value_score": 8,
+            "reasoning": "Full reasoning for this action"
+        }
+    ],
+    
+    "exploit_vs_explore": {
+        "recommendation": "exploit/explore/balanced",
+        "reasoning": "Why this balance is right now"
+    },
+    
+    "decision": {
+        "chosen_action": "The action to take",
+        "tool": "tool_name",
+        "params": {"detailed": "parameters"},
+        "justification": "3-4 sentences on why this is the best choice",
+        "expected_outcome": "What we expect",
+        "what_would_change_mind": "If we see X, we'd pivot to Y",
+        "next_3_steps": ["Step 1", "Step 2", "Step 3"]
+    },
+    
+    "if_this_fails": {
+        "fallback_action": "What to do if chosen action doesn't work",
+        "reasoning": "Why this is the right fallback"
+    }
+}"""
+
+    resp = _llm(context, question, max_tokens=3500)
+    parsed = _parse_json(resp)
+    
+    if not parsed:
+        # Fallback: continue with remaining avenues or generate new ones
+        return {
+            "decision": {
+                "chosen_action": "continue_exploration",
+                "tool": "test_filter" if avenues_remaining else "subgroup_scan",
+                "justification": "Fallback: LLM decision failed, continuing with default exploration"
+            }
+        }
+    
+    return parsed
 
 def _deep_reflect(phase: str, findings: Dict, accumulated_learnings: List, avenues_remaining: List) -> Dict:
     """Deep reflection on overall progress."""
@@ -1538,6 +1923,47 @@ def run_agent():
         st.markdown(f"*Key learning: {iteration_analysis.get('key_learning', 'N/A')}*")
         _add_learning(iteration_analysis.get("key_learning", f"Iteration {iteration} complete"))
         
+        # ====== AI DECIDES NEXT STEPS ======
+        # Use AI's recommendations to adjust strategy
+        
+        # 1. If AI suggests refinements, add them as new avenues
+        refinement_ideas = iteration_analysis.get("refinement_ideas", [])
+        if refinement_ideas and iteration_analysis.get("should_continue_avenue", False):
+            st.markdown("**🔧 AI suggests refinements:**")
+            for idea in refinement_ideas[:3]:
+                filter_to_add = idea.get("filter_to_add", {})
+                reasoning = idea.get("reasoning", "")
+                if filter_to_add:
+                    new_avenue = {
+                        "avenue": f"Refinement: {current_avenue.get('avenue', '')} + {filter_to_add.get('col')}={filter_to_add.get('value')}",
+                        "base_filters": current_avenue.get("base_filters", []) + [filter_to_add],
+                        "market_inefficiency_hypothesis": reasoning,
+                        "source": "ai_refinement",
+                    }
+                    avenues_remaining.insert(0, new_avenue)  # Add to front of queue
+                    st.markdown(f"- Added: {filter_to_add.get('col')}={filter_to_add.get('value')} ({reasoning[:50]}...)")
+        
+        # 2. Check AI's confidence and adjust
+        confidence = iteration_analysis.get("confidence_in_direction", "medium")
+        next_rec = iteration_analysis.get("next_recommendation", "")
+        if next_rec:
+            st.markdown(f"*AI recommends: {next_rec}*")
+        
+        # 3. If AI says don't continue with this avenue, remove similar ones
+        if not iteration_analysis.get("should_continue_avenue", True):
+            current_base = current_avenue.get("avenue", "").split(",")[0] if current_avenue.get("avenue") else ""
+            if current_base:
+                removed = 0
+                new_remaining = []
+                for av in avenues_remaining:
+                    if current_base in av.get("avenue", ""):
+                        removed += 1
+                    else:
+                        new_remaining.append(av)
+                if removed > 0:
+                    avenues_remaining[:] = new_remaining
+                    st.markdown(f"*AI: Skipping {removed} similar avenues - this direction isn't promising*")
+        
         # Handle results
         recommendation = analysis.get("recommendation", "").upper()
         truly_passing = analysis.get("truly_passing", [])
@@ -1639,7 +2065,7 @@ def run_agent():
             "analysis": iteration_analysis
         })
         
-        # Deep reflection every 3 iterations
+        # Deep reflection every 3 iterations - AI reassesses strategy
         if iteration % 3 == 0 and avenues_remaining:
             st.markdown("**🤔 Mid-point Reflection...**")
             reflection = _deep_reflect(
@@ -1649,6 +2075,61 @@ def run_agent():
                 avenues_remaining
             )
             st.markdown(f"*{reflection.get('reflection', '')[:300]}*")
+            
+            # ====== AI DECIDES OVERALL DIRECTION ======
+            
+            # 1. Handle avenues to skip
+            avenues_to_skip = reflection.get("avenues_to_skip", [])
+            if avenues_to_skip:
+                st.markdown("**AI decides to skip:**")
+                for skip_reason in avenues_to_skip[:3]:
+                    st.markdown(f"- {skip_reason}")
+                # Remove skipped avenues
+                skip_keywords = [s.split()[0].lower() for s in avenues_to_skip if isinstance(s, str)]
+                if skip_keywords:
+                    new_remaining = [av for av in avenues_remaining 
+                                    if not any(kw in av.get("avenue", "").lower() for kw in skip_keywords)]
+                    skipped = len(avenues_remaining) - len(new_remaining)
+                    if skipped > 0:
+                        avenues_remaining[:] = new_remaining
+                        st.markdown(f"*Removed {skipped} avenues*")
+            
+            # 2. Prioritize recommended avenue
+            priority_avenue = reflection.get("priority_avenue", "")
+            if priority_avenue and avenues_remaining:
+                # Try to find and move to front
+                priority_lower = priority_avenue.lower()
+                for i, av in enumerate(avenues_remaining):
+                    if priority_lower in av.get("avenue", "").lower():
+                        if i > 0:
+                            avenues_remaining.insert(0, avenues_remaining.pop(i))
+                            st.markdown(f"*AI prioritized: {av.get('avenue', '')[:50]}*")
+                        break
+            
+            # 3. Handle next_action recommendation
+            next_action = reflection.get("next_action", "continue")
+            if next_action == "pivot":
+                st.warning("🔄 AI recommends pivoting to new approach")
+                # Generate new avenues with ML tools
+                ml_result = _run_tool("train_catboost", {"pl_column": pl_column})
+                if ml_result and not ml_result.get("error"):
+                    for sf in ml_result.get("suggested_filters", [])[:2]:
+                        new_avenue = {
+                            "avenue": f"ML Pivot: {sf.get('col')} {sf.get('op')} {sf.get('value')}",
+                            "base_filters": [sf],
+                            "market_inefficiency_hypothesis": "ML-driven pivot based on feature importance",
+                            "source": "ai_pivot",
+                        }
+                        avenues_remaining.insert(0, new_avenue)
+            elif next_action == "refine_promising":
+                st.info("🎯 AI recommends refining promising strategies")
+            elif next_action == "try_combinations":
+                st.info("🔗 AI recommends testing filter combinations")
+            
+            # 4. Key learnings from reflection
+            key_learnings = reflection.get("key_learnings", [])
+            for kl in key_learnings[:3]:
+                _add_learning(kl)
         
         _save_checkpoint()
         st.markdown("---")
@@ -1709,7 +2190,7 @@ If the user gives a direction (e.g., "try BTTS more"), acknowledge and incorpora
 # ============================================================
 
 st.title("⚽ Football Research Agent v6")
-st.caption("Deep Analysis Edition + Local Compute + 38 Tools + Persistence + GPT-5")
+st.caption("Deep Analysis Edition + Local Compute + 38 Tools + Persistence + GPT-4o")
 
 # Check server
 server_status = _check_server()
@@ -1836,7 +2317,7 @@ with st.sidebar:
             for line in st.session_state.log[-30:]:
                 st.text(line)
     
-    st.caption("v6.0 - GPT-5 + Local Compute")
+    st.caption("v6.0 - GPT-4o + Local Compute")
 
 # Main content
 if st.session_state.agent_phase == "paused":
@@ -1883,7 +2364,7 @@ elif st.session_state.agent_phase == "idle":
 
 **From v5:**
 1. **BATCH TESTING**: Each avenue tested with 8-10 variations
-2. **DEEP ANALYSIS**: GPT-5 analyzes after EVERY phase
+2. **DEEP ANALYSIS**: GPT-4o analyzes after EVERY phase
 3. **NO PREMATURE CONCLUSIONS**: Explores ALL avenues
 4. **COMBINATION SCANNING**: Auto-scans when base shows promise
 5. **LEARNING ACCUMULATION**: Tracks insights across iterations
@@ -1897,7 +2378,7 @@ elif st.session_state.agent_phase == "idle":
 11. **PAUSE/RESUME**: Control research flow
 12. **ASK AGENT**: Query when paused
 13. **CRASH RECOVERY**: Checkpoint restore
-14. **GPT-5**: Latest model for analysis
+14. **GPT-4o**: Latest model for analysis
 """)
 
 elif st.session_state.agent_phase == "complete":
