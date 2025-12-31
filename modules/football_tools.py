@@ -293,9 +293,11 @@ def _parse_csv_list(v) -> List[str]:
     return [p for p in parts if p]
 
 
-def get_research_context(limit_notes: int = 20) -> Dict[str, Any]:
+def get_bible_from_sheets(limit_notes: int = 20) -> Dict[str, Any]:
     """
-    Get the FULL Bible context - everything the agent needs to make decisions.
+    Get the FULL Bible context from Google Sheets - everything the agent needs to make decisions.
+    
+    This is the DIRECT Google Sheets version - use this, not the job-queue version.
     
     Returns:
         - dataset_overview: Goal, output format, key advice
