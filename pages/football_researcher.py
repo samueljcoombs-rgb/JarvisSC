@@ -1084,14 +1084,47 @@ def run_agent():
             test_roi = sg.get("test", {}).get("roi", 0)
             test_rows = sg.get("test", {}).get("rows", 0)
             train_roi = sg.get("train", {}).get("roi", 0)
-            group_key = sg.get("group_key", {})
-            key_str = ", ".join([f"{k}={v}" for k, v in group_key.items() if k not in ["count", "mean", "sum"]])
-            st.markdown(f"  {i}. `{key_str}` → Train: {train_roi:.2%}, Test: {test_roi:.2%} ({test_rows} rows)")
+            # Try both "group_key" and "group" as the data structure varies
+            group_key = sg.get("group_key", sg.get("group", {}))
+            if isinstance(group_key, dict):
+                key_str = ", ".join([f"{k}={v}" for k, v in group_key.items() if k not in ["count", "mean", "sum"]])
+            else:
+                key_str = str(group_key)
+            if key_str:
+                st.markdown(f"  {i}. `{key_str}` → Train: {train_roi:.2%}, Test: {test_roi:.2%} ({test_rows} rows)")
     
     with st.expander("📄 Full Sweep Results", expanded=False):
         st.code(_safe_json(sweeps, 4000), language="json")
     
     _add_learning(f"Sweeps found {top_brackets} bracket patterns and {top_subgroups} subgroup patterns")
+    
+    # ========== ENSURE WE HAVE ENOUGH AVENUES ==========
+    # If LLM only returned 1 avenue but we have more positive combinations, auto-generate avenues
+    if len(avenues) < 3 and all_positive:
+        st.markdown("#### 🔧 Auto-generating additional avenues from positive combinations...")
+        for i, combo in enumerate(all_positive):
+            # Skip if already in avenues
+            existing_avenues = [a.get("avenue", "") for a in avenues]
+            avenue_name = f"MODE={combo.get('mode')}, MARKET={combo.get('market')}"
+            if avenue_name in existing_avenues:
+                continue
+            
+            avenues.append({
+                "rank": len(avenues) + 1,
+                "avenue": avenue_name,
+                "base_filters": [
+                    {"col": "MODE", "op": "=", "value": combo.get("mode")},
+                    {"col": "MARKET", "op": "=", "value": combo.get("market")}
+                ],
+                "promising_drift": combo.get("best_drift", "?"),
+                "market_inefficiency_hypothesis": f"Positive mean PL ({combo.get('mean_pl', 0):.4f}) suggests potential edge",
+                "expected_rows": f"~{combo.get('count', 0) * 10} based on exploration",
+                "confidence": "medium",
+                "reasoning": "Auto-generated from positive exploration results"
+            })
+        
+        st.session_state.avenues_to_explore = avenues
+        st.markdown(f"Now have **{len(avenues)}** avenues to explore")
     
     # ========== AVENUE EXPLORATION ==========
     st.markdown("---")
@@ -1363,18 +1396,41 @@ def run_agent():
             if best_result:
                 _run_tool("append_research_note", {
                     "note": json.dumps({
-                        "type": "SUCCESS",
+                        "type": "SUCCESS" if is_truly_passing else "WEAK_SUCCESS",
                         "pl_column": pl_column,
                         "filters": best_result.get("filters", []),
                         "test_roi": best_result.get("test_roi", 0),
                         "train_roi": best_result.get("train_roi", 0),
                         "variation": best_result.get("variation"),
+                        "quality_issues": len(issues) if 'issues' in dir() else 0,
                     }),
                     "tags": f"success,{pl_column.replace(' ', '_')}"
                 })
             
-            st.session_state.agent_phase = "complete"
-            return
+            # ONLY stop if we found a STRONG strategy
+            # If weak, continue exploring other avenues
+            if is_truly_passing and best_result:
+                train_roi = best_result.get('train_roi', 0)
+                val_roi = best_result.get('val_roi', 0)
+                test_roi = best_result.get('test_roi', 0)
+                
+                # Check if it's actually strong
+                is_strong = (
+                    train_roi > 0.01 and  # Meaningful train
+                    val_roi > -0.01 and   # Val not negative
+                    test_roi > 0.01 and   # Meaningful test
+                    abs(train_roi - val_roi) < 0.03  # Consistent
+                )
+                
+                if is_strong:
+                    st.success("🎯 Found STRONG strategy - stopping search!")
+                    st.session_state.agent_phase = "complete"
+                    return
+                else:
+                    st.warning("📊 Strategy found but weak - continuing to explore other avenues...")
+                    # Don't return - continue the loop
+            else:
+                st.info("🔍 Only near-misses found - continuing exploration...")
         
         elif "PROMISING" in recommendation or "INVESTIGATE" in recommendation:
             # Add near-misses for potential refinement
