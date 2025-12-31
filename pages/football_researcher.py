@@ -348,6 +348,48 @@ def _analyze_exploration(bible: Dict, exploration: Dict, pl_column: str) -> Dict
         if col.get("dtype") in ["float64", "int64"] and "min" in col:
             numeric_ranges[col["name"]] = {"min": col["min"], "max": col["max"], "mean": col.get("mean")}
     
+    # PRE-PROCESS: For each MODE+MARKET, find the best DRIFT
+    # This helps the LLM and ensures we don't lose this info
+    best_drift_by_mode_market = {}
+    for item in mode_market_drift:
+        mode = item.get("MODE", "")
+        market = item.get("MARKET", "")
+        drift = item.get("DRIFT IN / OUT", "")
+        mean_pl = item.get(f"mean_{pl_column}", 0)
+        count = item.get("count", 0)
+        
+        key = f"{mode}|{market}"
+        if key not in best_drift_by_mode_market or mean_pl > best_drift_by_mode_market[key]["mean_pl"]:
+            best_drift_by_mode_market[key] = {
+                "drift": drift,
+                "mean_pl": mean_pl,
+                "count": count
+            }
+    
+    # Create enriched MODE+MARKET data with best drift info
+    enriched_mode_market = []
+    for item in mode_market:
+        mode = item.get("MODE", "")
+        market = item.get("MARKET", "")
+        mean_pl = item.get(f"mean_{pl_column}", 0)
+        count = item.get("count", 0)
+        
+        key = f"{mode}|{market}"
+        best_drift_info = best_drift_by_mode_market.get(key, {})
+        
+        enriched_mode_market.append({
+            "MODE": mode,
+            "MARKET": market,
+            "mean_pl": mean_pl,
+            "count": count,
+            "best_drift": best_drift_info.get("drift", "unknown"),
+            "best_drift_mean_pl": best_drift_info.get("mean_pl", 0),
+            "best_drift_count": best_drift_info.get("count", 0)
+        })
+    
+    # Sort by mean PL
+    enriched_mode_market.sort(key=lambda x: x["mean_pl"], reverse=True)
+    
     context = f"""## Deep Exploration Analysis for {pl_column}
 
 You have exploration results from a football betting dataset. Your task is to DEEPLY ANALYZE these results and identify promising strategies.
@@ -355,17 +397,18 @@ You have exploration results from a football betting dataset. Your task is to DE
 ## Numeric Column Ranges (CRITICAL - use these actual values!)
 {_safe_json(numeric_ranges, 1500)}
 
-## Overall by MODE
-{_safe_json(by_mode, 500)}
+## Overall by MODE (how each mode performs across all markets)
+{_safe_json(by_mode, 600)}
 
-## Overall by DRIFT
-{_safe_json(by_drift, 500)}
+## Overall by DRIFT (how each drift direction performs)
+{_safe_json(by_drift, 600)}
 
-## MODE + MARKET Results (sorted by mean PL, showing top 35)
-{_safe_json(sorted(mode_market, key=lambda x: x.get(f'mean_{pl_column}', 0), reverse=True)[:35], 4000)}
+## MODE + MARKET Results WITH BEST DRIFT (sorted by mean PL, top 40)
+This shows each MODE+MARKET combination with its best performing DRIFT direction:
+{_safe_json(enriched_mode_market[:40], 5000)}
 
-## MODE + MARKET + DRIFT Results (sorted by mean PL, showing top 50)
-{_safe_json(sorted(mode_market_drift, key=lambda x: x.get(f'mean_{pl_column}', 0), reverse=True)[:50], 5000)}
+## Detailed MODE + MARKET + DRIFT breakdown (top 60 combinations)
+{_safe_json(sorted(mode_market_drift, key=lambda x: x.get(f'mean_{pl_column}', 0), reverse=True)[:60], 6000)}
 
 ## Gates to eventually pass
 {_safe_json(bible.get('gates', {}), 300)}
@@ -373,30 +416,54 @@ You have exploration results from a football betting dataset. Your task is to DE
     
     question = """Perform DEEP, THOUGHTFUL analysis of these exploration results.
 
-THINK CAREFULLY about:
-1. Which MODE performs best overall? Why might that be?
-2. Which MARKET types are profitable? What does this tell us about market inefficiency?
-3. How does DRIFT direction affect profitability? Is there a pattern?
-4. Which specific MODE + MARKET + DRIFT combinations look most promising?
-5. Are there any SURPRISING findings? Things that don't fit the pattern?
-6. What's the sample size for each? (Don't trust small samples)
+## YOUR ANALYSIS MUST INCLUDE:
 
-WRITE YOUR ANALYSIS IN DETAIL - explain your reasoning, not just list numbers.
+### 1. MODE Analysis (2-3 sentences each)
+- Which MODE performs best overall and WHY might that be?
+- Are there MODEs to avoid? Why?
 
-Then identify 8-12 PRIORITIZED avenues to explore, with:
-- Clear base filters
-- Why you think it's promising (market inefficiency hypothesis)
-- What additional filters might help
-- Expected row count
+### 2. MARKET Analysis (2-3 sentences each)
+- Which MARKET types show profit potential?
+- What might this tell us about bookmaker pricing inefficiencies?
+
+### 3. DRIFT Analysis (2-3 sentences each)  
+- How does DRIFT direction (IN/OUT/SAME) affect profitability?
+- Is there a consistent pattern or does it depend on MODE/MARKET?
+
+### 4. Top Combinations (be specific!)
+- List the top 5-8 MODE+MARKET+DRIFT combinations with their exact numbers
+- For each, explain WHY it might be profitable (market inefficiency hypothesis)
+
+### 5. Sample Size Concerns
+- Which combinations have good sample sizes (>500)?
+- Which are promising but need more data (<200)?
+
+### 6. Surprises or Anomalies
+- Anything unexpected in the data?
+- Any contradictions to investigate?
 
 Respond with JSON:
 {
-    "detailed_analysis": "Write 300-500 words analyzing the patterns you see, what they might mean, and your hypotheses about WHY certain combinations are profitable...",
+    "detailed_analysis": "Write 400-600 words with your full analysis covering all 6 points above. Be specific with numbers and reasoning...",
     
     "key_observations": [
-        "Observation 1 with reasoning",
-        "Observation 2 with reasoning"
+        "Observation 1 with specific numbers and reasoning",
+        "Observation 2 with specific numbers and reasoning",
+        "Observation 3 with specific numbers and reasoning"
     ],
+    
+    "mode_summary": {
+        "best_mode": "...",
+        "best_mode_reason": "...",
+        "worst_mode": "...",
+        "worst_mode_reason": "..."
+    },
+    
+    "drift_summary": {
+        "best_drift": "IN/OUT/SAME",
+        "best_drift_reason": "...",
+        "drift_depends_on": "explanation of when different drifts work"
+    },
     
     "numeric_ranges": {
         "% DRIFT": {"min": X, "max": Y, "typical_range": "..."},
@@ -404,21 +471,25 @@ Respond with JSON:
     },
     
     "all_positive_combinations": [
-        {"mode": "...", "market": "...", "drift": "...", "mean_pl": X, "count": N}
+        {"mode": "Quick League", "market": "O2.5 Back", "best_drift": "SAME", "mean_pl": 0.101, "count": 235}
     ],
     
     "prioritized_avenues": [
         {
             "rank": 1,
-            "avenue": "MODE=XG, MARKET=FHGO1.5 Back",
-            "base_filters": [{"col": "MODE", "op": "=", "value": "XG"}, {"col": "MARKET", "op": "=", "value": "FHGO1.5 Back"}],
+            "avenue": "MODE=Quick League, MARKET=O2.5 Back",
+            "base_filters": [{"col": "MODE", "op": "=", "value": "Quick League"}, {"col": "MARKET", "op": "=", "value": "O2.5 Back"}],
             "promising_drift": "SAME",
-            "market_inefficiency_hypothesis": "WHY this might be profitable - what market inefficiency does it exploit?",
+            "market_inefficiency_hypothesis": "WHY this might be profitable - be specific about the market inefficiency",
             "suggested_refinements": ["Try adding ACTUAL ODDS 1.5-2.5", "Try filtering by % DRIFT > 0"],
             "expected_rows": "~2000 based on count",
             "confidence": "high/medium/low",
             "reasoning": "Detailed reasoning for why this is worth exploring"
         }
+    ],
+    
+    "sample_size_concerns": [
+        {"combination": "...", "count": N, "concern": "..."}
     ],
     
     "recommended_next_tools": [
@@ -427,10 +498,21 @@ Respond with JSON:
     ]
 }"""
     
-    resp = _llm(context, question, max_tokens=4000)
+    resp = _llm(context, question, max_tokens=5000)
     parsed = _parse_json(resp)
+    
+    # If LLM didn't extract best_drift properly, fill it in from our pre-processing
+    if parsed and "all_positive_combinations" in parsed:
+        for combo in parsed["all_positive_combinations"]:
+            if combo.get("best_drift") in [None, "?", "", "unknown"]:
+                key = f"{combo.get('mode', '')}|{combo.get('market', '')}"
+                if key in best_drift_by_mode_market:
+                    combo["best_drift"] = best_drift_by_mode_market[key]["drift"]
+    
     if parsed:
         parsed["raw_analysis"] = resp  # Keep the raw response for display
+        parsed["_enriched_mode_market"] = enriched_mode_market[:20]  # Store for reference
+    
     return parsed if parsed else {"detailed_analysis": resp[:1000], "prioritized_avenues": [], "all_positive_combinations": []}
 
 
@@ -604,70 +686,143 @@ def _analyze_avenue_results(avenue: Dict, results: List[Dict], bible: Dict) -> D
     
     # Collect all results with quality metrics
     all_results = []
+    high_roi_insufficient_sample = []  # Track high ROI but failed sample gates
+    
     for r in results:
         train = r.get("train", {})
         val = r.get("val", {})
         test = r.get("test", {})
         gates_passed = r.get("gates_passed", False)
+        gate_failures = r.get("gate_failures", [])
         
         train_roi = train.get("roi", 0)
         val_roi = val.get("roi", 0)
         test_roi = test.get("roi", 0)
+        train_rows = train.get("rows", 0)
+        val_rows = val.get("rows", 0)
+        test_rows = test.get("rows", 0)
+        
         train_val_gap = abs(train_roi - val_roi)
         
-        # Quality score: penalize high train/val gap, reward consistency
-        consistency_score = 1.0 - min(train_val_gap / 0.1, 1.0)  # Penalize gaps > 10%
-        quality_score = test_roi * consistency_score if test_roi > 0 else test_roi
+        # CRITICAL: A good strategy needs positive train AND val
+        # Test positive with negative train/val is likely NOISE
+        train_positive = train_roi > 0
+        val_positive = val_roi > -0.01  # Allow slightly negative val
+        test_positive = test_roi > 0
+        
+        # Check if this is a high ROI strategy that failed due to sample size
+        sample_size_failure = any("rows" in str(f).lower() or "sample" in str(f).lower() for f in gate_failures)
+        if not sample_size_failure:
+            # Check if rows are below thresholds
+            sample_size_failure = train_rows < 300 or val_rows < 60 or test_rows < 60
+        
+        if test_roi > 0.05 and not gates_passed and sample_size_failure:
+            high_roi_insufficient_sample.append({
+                "variation": r.get("variation", "unknown"),
+                "filters": r.get("filters_tested", []),
+                "train_roi": train_roi,
+                "train_rows": train_rows,
+                "val_roi": val_roi,
+                "val_rows": val_rows,
+                "test_roi": test_roi,
+                "test_rows": test_rows,
+                "gate_failures": gate_failures,
+                "note": "High ROI but insufficient sample size - needs more data"
+            })
+        
+        # Quality score considers ALL splits, not just test
+        if train_positive and val_positive and test_positive:
+            # Best case: all positive
+            consistency_bonus = 1.0
+        elif train_positive and test_positive:
+            # Train and test positive, val weak
+            consistency_bonus = 0.6
+        elif train_positive:
+            # Only train positive - might be overfitting
+            consistency_bonus = 0.3
+        else:
+            # Train negative - this is noise, not signal
+            consistency_bonus = 0.0
+        
+        # Penalize large train/val gaps (overfitting signal)
+        gap_penalty = max(0, 1.0 - train_val_gap / 0.05)  # Penalize gaps > 5%
+        
+        # Quality score
+        quality_score = test_roi * consistency_bonus * gap_penalty
+        
+        # Determine if truly passing (stricter than just gates)
+        truly_passing = (
+            gates_passed and 
+            train_roi > 0 and  # Train MUST be positive
+            val_roi > -0.02 and  # Val can't be too negative
+            test_roi > 0 and  # Test must be positive
+            train_val_gap < 0.06  # Gap must be reasonable
+        )
         
         all_results.append({
             "variation": r.get("variation", "unknown"),
             "filters": r.get("filters_tested", []),
             "train_roi": train_roi,
-            "train_rows": train.get("rows", 0),
+            "train_rows": train_rows,
             "val_roi": val_roi,
-            "val_rows": val.get("rows", 0),
+            "val_rows": val_rows,
             "test_roi": test_roi,
-            "test_rows": test.get("rows", 0),
+            "test_rows": test_rows,
             "train_val_gap": round(train_val_gap, 4),
-            "quality_score": round(quality_score, 4),
+            "quality_score": round(quality_score, 6),
             "gates_passed": gates_passed,
-            "gate_failures": r.get("gate_failures", []),
+            "truly_passing": truly_passing,
+            "gate_failures": gate_failures,
+            "train_positive": train_positive,
+            "val_positive": val_positive,
+            "test_positive": test_positive,
         })
     
-    # Find best by QUALITY score (not just test ROI)
-    passing = [r for r in all_results if r["gates_passed"] and r["test_roi"] > 0]
+    # Find TRULY passing strategies (not just technically passing gates)
+    truly_passing = [r for r in all_results if r["truly_passing"]]
     
-    # Sort passing by quality score
-    passing.sort(key=lambda x: x["quality_score"], reverse=True)
+    # Near misses: positive train, positive test, but something off
+    near_misses = [r for r in all_results if 
+                   r["train_roi"] > 0.01 and r["test_roi"] > 0 and not r["truly_passing"]]
     
-    near_misses = [r for r in all_results if r["test_roi"] > 0 or r["train_roi"] > 0.02]
+    # Interesting: positive train even if test failed
+    interesting = [r for r in all_results if r["train_roi"] > 0.02]
     
-    best = max(all_results, key=lambda x: x["quality_score"]) if all_results else None
+    # Sort by quality score
+    truly_passing.sort(key=lambda x: x["quality_score"], reverse=True)
+    near_misses.sort(key=lambda x: x["quality_score"], reverse=True)
+    high_roi_insufficient_sample.sort(key=lambda x: x["test_roi"], reverse=True)
+    
+    best_quality = max(all_results, key=lambda x: x["quality_score"]) if all_results else None
     best_test = max(all_results, key=lambda x: x["test_roi"]) if all_results else None
     best_train = max(all_results, key=lambda x: x["train_roi"]) if all_results else None
     
-    # Determine recommendation
-    if passing:
-        recommendation = "SUCCESS - found passing strategy!"
-    elif near_misses and any(r["train_roi"] > 0.03 for r in near_misses):
-        recommendation = "PROMISING - refine further"
-    elif best and best["train_roi"] > 0:
-        recommendation = "INVESTIGATE - shows potential"
+    # Determine recommendation based on STRICT criteria
+    if truly_passing:
+        recommendation = "SUCCESS - found strategy with positive train/val/test!"
+    elif near_misses:
+        recommendation = "PROMISING - positive train+test but needs refinement"
+    elif high_roi_insufficient_sample:
+        recommendation = "INVESTIGATE - high ROI found but needs more data"
+    elif interesting:
+        recommendation = "INVESTIGATE - positive train, explore further"
     else:
-        recommendation = "MOVE_ON - limited promise"
+        recommendation = "MOVE_ON - no consistent signal found"
     
     return {
-        "summary": f"Tested {len(results)} variations: {len(passing)} passing, {len(near_misses)} promising",
+        "summary": f"Tested {len(all_results)} variations: {len(truly_passing)} truly passing, {len(near_misses)} near-misses, {len(interesting)} interesting",
         "best_test_roi": best_test["test_roi"] if best_test else 0,
         "best_train_roi": best_train["train_roi"] if best_train else 0,
-        "best_quality_score": best["quality_score"] if best else 0,
-        "best_variation": best["variation"] if best else None,
-        "passing_count": len(passing),
+        "best_quality_score": best_quality["quality_score"] if best_quality else 0,
+        "best_variation": best_quality["variation"] if best_quality else None,
+        "passing_count": len(truly_passing),
         "near_miss_count": len(near_misses),
+        "interesting_count": len(interesting),
+        "high_roi_insufficient_sample": high_roi_insufficient_sample,  # NEW: Track these!
         "recommendation": recommendation,
         "all_results": all_results,
-        "passing_filters": [p["filters"] for p in passing],
-        "near_miss_filters": [n["filters"] for n in near_misses[:3]],
+        "passing_filters": [p["filters"] for p in truly_passing],
+        "near_miss_filters": [n["filters"] for n in near_misses[:5]],
     }
 
 
@@ -835,27 +990,65 @@ def run_agent():
         st.session_state.exploration_analysis = exploration_analysis
         status.update(label="🧠 Analysis complete", state="complete")
     
-    # Display analysis
-    st.markdown(f"**Deep Analysis:** {exploration_analysis.get('deep_analysis', 'N/A')[:500]}")
+    # Display DETAILED analysis - not just a snippet
+    detailed_analysis = exploration_analysis.get('detailed_analysis', '')
+    if detailed_analysis:
+        st.markdown("#### 📝 Analysis Summary")
+        st.markdown(detailed_analysis)
     
-    # Show all positive combinations
+    # Show key observations
+    key_obs = exploration_analysis.get("key_observations", [])
+    if key_obs:
+        st.markdown("#### 🔍 Key Observations")
+        for i, obs in enumerate(key_obs, 1):
+            st.markdown(f"{i}. {obs}")
+    
+    # Show mode summary
+    mode_summary = exploration_analysis.get("mode_summary", {})
+    if mode_summary:
+        st.markdown("#### 📊 MODE Summary")
+        st.markdown(f"- **Best MODE:** {mode_summary.get('best_mode', 'N/A')} - {mode_summary.get('best_mode_reason', '')}")
+        st.markdown(f"- **Worst MODE:** {mode_summary.get('worst_mode', 'N/A')} - {mode_summary.get('worst_mode_reason', '')}")
+    
+    # Show drift summary
+    drift_summary = exploration_analysis.get("drift_summary", {})
+    if drift_summary:
+        st.markdown("#### 📈 DRIFT Summary")
+        st.markdown(f"- **Best DRIFT:** {drift_summary.get('best_drift', 'N/A')} - {drift_summary.get('best_drift_reason', '')}")
+        st.markdown(f"- **Pattern:** {drift_summary.get('drift_depends_on', 'N/A')}")
+    
+    # Show all positive combinations with BEST DRIFT
     all_positive = exploration_analysis.get("all_positive_combinations", [])
     if all_positive:
-        st.markdown(f"**Found {len(all_positive)} positive MODE+MARKET combinations:**")
+        st.markdown(f"#### ✅ Found {len(all_positive)} Positive MODE+MARKET Combinations")
         for combo in all_positive[:10]:
-            st.markdown(f"- {combo.get('mode')} + {combo.get('market')} (mean PL: {combo.get('mean_pl', 0):.4f}, count: {combo.get('count', 0)}, best drift: {combo.get('best_drift', '?')})")
+            drift_text = combo.get('best_drift', '?')
+            st.markdown(f"- **{combo.get('mode')} + {combo.get('market')}** → mean PL: `{combo.get('mean_pl', 0):.4f}`, count: `{combo.get('count', 0)}`, best drift: **{drift_text}**")
+    
+    # Show sample size concerns
+    sample_concerns = exploration_analysis.get("sample_size_concerns", [])
+    if sample_concerns:
+        st.markdown("#### ⚠️ Sample Size Concerns")
+        for concern in sample_concerns[:5]:
+            st.markdown(f"- {concern.get('combination', 'N/A')}: {concern.get('count', 0)} rows - {concern.get('concern', '')}")
     
     # Show prioritized avenues
     avenues = exploration_analysis.get("prioritized_avenues", [])
     st.session_state.avenues_to_explore = avenues
     
     if avenues:
-        st.markdown(f"**{len(avenues)} Prioritized Avenues to Explore:**")
+        st.markdown(f"#### 🎯 {len(avenues)} Prioritized Avenues to Explore")
         for av in avenues[:8]:
-            st.markdown(f"- **#{av.get('rank', '?')}**: {av.get('avenue')} - {av.get('why_promising', '')[:80]}")
+            rank = av.get('rank', '?')
+            avenue = av.get('avenue', '')
+            drift = av.get('promising_drift', '?')
+            hypothesis = av.get('market_inefficiency_hypothesis', av.get('why_promising', ''))[:100]
+            confidence = av.get('confidence', '?')
+            st.markdown(f"**#{rank}: {avenue}** (drift: {drift}, confidence: {confidence})")
+            st.markdown(f"   *{hypothesis}...*")
     
-    with st.expander("Full Analysis", expanded=False):
-        st.code(_safe_json(exploration_analysis, 4000), language="json")
+    with st.expander("📄 Full Analysis JSON", expanded=False):
+        st.code(_safe_json(exploration_analysis, 6000), language="json")
     
     _add_learning(f"Exploration found {len(all_positive)} positive combinations, {len(avenues)} avenues to explore")
     
@@ -868,9 +1061,37 @@ def run_agent():
         top_subgroups = len(sweeps.get("subgroup_scan", {}).get("top_groups", []))
         status.update(label=f"🔬 Sweeps complete ({top_brackets}b, {top_subgroups}s)", state="complete")
     
-    st.markdown(f"**Found {top_brackets} bracket patterns, {top_subgroups} subgroup patterns**")
-    with st.expander("Sweep Results", expanded=False):
-        st.code(_safe_json(sweeps, 3000), language="json")
+    st.markdown("#### 📊 Sweep Results")
+    st.markdown(f"Found **{top_brackets}** bracket patterns and **{top_subgroups}** subgroup patterns")
+    
+    # Show top bracket findings
+    top_bracket_results = sweeps.get("bracket_sweep", {}).get("top_brackets", [])
+    if top_bracket_results:
+        st.markdown("**Top Bracket Patterns:**")
+        for i, br in enumerate(top_bracket_results[:3], 1):
+            rule = br.get("rule", [])
+            test_roi = br.get("test", {}).get("roi", 0)
+            test_rows = br.get("test", {}).get("rows", 0)
+            train_roi = br.get("train", {}).get("roi", 0)
+            rule_str = ", ".join([f"{r.get('col')} {r.get('op')} {r.get('min', r.get('value', ''))}-{r.get('max', '')}" for r in rule])
+            st.markdown(f"  {i}. `{rule_str}` → Train: {train_roi:.2%}, Test: {test_roi:.2%} ({test_rows} rows)")
+    
+    # Show top subgroup findings
+    top_subgroup_results = sweeps.get("subgroup_scan", {}).get("top_groups", [])
+    if top_subgroup_results:
+        st.markdown("**Top Subgroup Patterns:**")
+        for i, sg in enumerate(top_subgroup_results[:3], 1):
+            test_roi = sg.get("test", {}).get("roi", 0)
+            test_rows = sg.get("test", {}).get("rows", 0)
+            train_roi = sg.get("train", {}).get("roi", 0)
+            group_key = sg.get("group_key", {})
+            key_str = ", ".join([f"{k}={v}" for k, v in group_key.items() if k not in ["count", "mean", "sum"]])
+            st.markdown(f"  {i}. `{key_str}` → Train: {train_roi:.2%}, Test: {test_roi:.2%} ({test_rows} rows)")
+    
+    with st.expander("📄 Full Sweep Results", expanded=False):
+        st.code(_safe_json(sweeps, 4000), language="json")
+    
+    _add_learning(f"Sweeps found {top_brackets} bracket patterns and {top_subgroups} subgroup patterns")
     
     # ========== AVENUE EXPLORATION ==========
     st.markdown("---")
@@ -937,21 +1158,34 @@ def run_agent():
             st.markdown("# 🎉 Strategy Found!")
             success_found = True
             
-            # Get ALL passing strategies, sorted by test ROI
+            # Get TRULY passing strategies (stricter than just gates_passed)
             all_results = analysis.get("all_results", [])
-            passing_strategies = [r for r in all_results if r.get("gates_passed") and r.get("test_roi", 0) > 0]
-            passing_strategies.sort(key=lambda x: x.get("test_roi", 0), reverse=True)
+            truly_passing_strategies = [r for r in all_results if r.get("truly_passing", False)]
+            truly_passing_strategies.sort(key=lambda x: x.get("quality_score", 0), reverse=True)
             
-            if not passing_strategies:
-                st.warning("Marked as SUCCESS but no passing strategies found in results. Check data.")
-                passing_filters = analysis.get("passing_filters", [[]])
-                best_result = None
+            # Also get "near miss" strategies for display
+            near_miss_strategies = [r for r in all_results 
+                                    if r.get("train_roi", 0) > 0 
+                                    and r.get("test_roi", 0) > 0 
+                                    and not r.get("truly_passing", False)]
+            near_miss_strategies.sort(key=lambda x: x.get("quality_score", 0), reverse=True)
+            
+            if not truly_passing_strategies:
+                st.warning("⚠️ No strategies passed strict quality checks (positive train + val + test with consistency).")
+                st.markdown("However, found some **near-miss** strategies:")
+                best_result = near_miss_strategies[0] if near_miss_strategies else None
+                passing_strategies = near_miss_strategies
+                is_truly_passing = False
             else:
-                best_result = passing_strategies[0]
-                passing_filters = [best_result.get("filters", [])]
+                best_result = truly_passing_strategies[0]
+                passing_strategies = truly_passing_strategies
+                is_truly_passing = True
             
             # SHOW THE BEST STRATEGY CLEARLY
-            st.markdown("## 📋 Best Passing Strategy")
+            if is_truly_passing:
+                st.markdown("## 📋 Best Validated Strategy")
+            else:
+                st.markdown("## 📋 Best Near-Miss Strategy (needs refinement)")
             
             if best_result and best_result.get("filters"):
                 st.markdown("### Filters:")
@@ -975,34 +1209,133 @@ def run_agent():
                 col2.metric("Val Rows", best_result.get('val_rows', 0))
                 col3.metric("Test Rows", best_result.get('test_rows', 0))
                 
-                # Quality assessment
-                train_val_gap = abs(best_result.get('train_roi', 0) - best_result.get('val_roi', 0))
+                # Quality assessment - BE HONEST
+                train_roi = best_result.get('train_roi', 0)
+                val_roi = best_result.get('val_roi', 0)
                 test_roi = best_result.get('test_roi', 0)
+                train_val_gap = abs(train_roi - val_roi)
+                test_rows = best_result.get('test_rows', 0)
                 
                 st.markdown("### Quality Assessment:")
+                
+                issues = []
+                goods = []
+                
+                # Check train
+                if train_roi < 0:
+                    issues.append(f"⚠️ **Train ROI is NEGATIVE** ({train_roi:.2%}) - strategy may be noise")
+                elif train_roi < 0.01:
+                    issues.append(f"⚠️ Train ROI is weak ({train_roi:.2%})")
+                else:
+                    goods.append(f"✅ Train ROI positive ({train_roi:.2%})")
+                
+                # Check val
+                if val_roi < -0.02:
+                    issues.append(f"⚠️ **Val ROI is negative** ({val_roi:.2%}) - overfitting risk")
+                elif val_roi < 0:
+                    issues.append(f"⚠️ Val ROI slightly negative ({val_roi:.2%})")
+                else:
+                    goods.append(f"✅ Val ROI acceptable ({val_roi:.2%})")
+                
+                # Check train/val gap
                 if train_val_gap > 0.05:
-                    st.warning(f"⚠️ Train/Val gap is {train_val_gap:.1%} - possible overfitting")
-                if test_roi < 0.02:
-                    st.warning(f"⚠️ Test ROI of {test_roi:.1%} is low - might be noise")
-                if best_result.get('test_rows', 0) < 200:
-                    st.warning(f"⚠️ Only {best_result.get('test_rows', 0)} test rows - small sample")
-                if train_val_gap < 0.03 and test_roi > 0.02 and best_result.get('test_rows', 0) >= 200:
-                    st.success("✅ Looks solid! Consistent across splits with good sample size.")
+                    issues.append(f"⚠️ Train/Val gap is {train_val_gap:.1%} - possible overfitting")
+                else:
+                    goods.append(f"✅ Train/Val gap reasonable ({train_val_gap:.1%})")
+                
+                # Check test
+                if test_roi < 0.01:
+                    issues.append(f"⚠️ Test ROI is low ({test_roi:.2%}) - might be noise")
+                else:
+                    goods.append(f"✅ Test ROI positive ({test_roi:.2%})")
+                
+                # Check sample size
+                if test_rows < 200:
+                    issues.append(f"⚠️ Only {test_rows} test rows - small sample")
+                else:
+                    goods.append(f"✅ Decent sample size ({test_rows} test rows)")
+                
+                # Display assessment
+                for good in goods:
+                    st.markdown(good)
+                for issue in issues:
+                    st.markdown(issue)
+                
+                # Overall verdict
+                if len(issues) == 0:
+                    st.success("🎯 **STRONG STRATEGY** - Consistent across all splits!")
+                elif len(issues) <= 2 and train_roi > 0:
+                    st.info("📊 **MODERATE STRATEGY** - Some concerns but worth monitoring")
+                else:
+                    st.warning("⚠️ **WEAK STRATEGY** - Multiple red flags, likely noise")
                 
                 # Copy-pasteable format
                 st.markdown("### Copy-Paste Format:")
                 filter_str = json.dumps(best_result.get("filters", []), indent=2)
                 st.code(filter_str, language="json")
             
-            # Show ALL passing strategies if more than one
+            # Show ALL strategies with quality indicators
             if len(passing_strategies) > 1:
-                st.markdown(f"## 📊 All {len(passing_strategies)} Passing Strategies")
+                title = f"## 📊 All {len(passing_strategies)} Strategies"
+                if not is_truly_passing:
+                    title += " (Near-Misses)"
+                st.markdown(title)
+                
                 for i, strat in enumerate(passing_strategies, 1):
-                    with st.expander(f"Strategy {i}: Test ROI {strat.get('test_roi', 0):.2%} ({strat.get('variation', 'unknown')})"):
+                    train_roi = strat.get('train_roi', 0)
+                    val_roi = strat.get('val_roi', 0)
+                    test_roi = strat.get('test_roi', 0)
+                    
+                    # Quality indicator
+                    if train_roi > 0 and val_roi > -0.01 and test_roi > 0:
+                        quality_icon = "🟢"  # Good
+                    elif train_roi > 0 and test_roi > 0:
+                        quality_icon = "🟡"  # Okay
+                    else:
+                        quality_icon = "🔴"  # Weak
+                    
+                    with st.expander(f"{quality_icon} Strategy {i}: Test {test_roi:.2%} | Train {train_roi:.2%} ({strat.get('variation', 'unknown')})"):
                         st.markdown(f"**Variation:** {strat.get('variation', 'N/A')}")
-                        st.markdown(f"**Train ROI:** {strat.get('train_roi', 0):.2%} ({strat.get('train_rows', 0)} rows)")
+                        
+                        # Show with color coding
+                        train_color = "green" if train_roi > 0 else "red"
+                        val_color = "green" if val_roi > -0.01 else "red"
+                        test_color = "green" if test_roi > 0 else "red"
+                        
+                        col1, col2, col3 = st.columns(3)
+                        col1.metric("Train ROI", f"{train_roi:.2%}", delta=f"{strat.get('train_rows', 0)} rows")
+                        col2.metric("Val ROI", f"{val_roi:.2%}", delta=f"{strat.get('val_rows', 0)} rows")
+                        col3.metric("Test ROI", f"{test_roi:.2%}", delta=f"{strat.get('test_rows', 0)} rows")
+                        
+                        # Quality notes
+                        if train_roi < 0:
+                            st.error("❌ Train ROI negative - likely noise")
+                        if val_roi < -0.02:
+                            st.warning("⚠️ Val ROI significantly negative")
+                        
+                        st.code(json.dumps(strat.get("filters", []), indent=2), language="json")
+            
+            # Show HIGH ROI strategies that failed due to sample size
+            high_roi_insufficient = analysis.get("high_roi_insufficient_sample", [])
+            if high_roi_insufficient:
+                st.markdown("---")
+                st.markdown("## 🔬 High ROI But Insufficient Sample Size")
+                st.info("These strategies showed high ROI but failed sample size gates. They might be worth exploring with more data or in combination with other filters.")
+                
+                for i, strat in enumerate(high_roi_insufficient, 1):
+                    test_roi = strat.get('test_roi', 0)
+                    train_roi = strat.get('train_roi', 0)
+                    test_rows = strat.get('test_rows', 0)
+                    
+                    with st.expander(f"⚡ High ROI #{i}: Test {test_roi:.2%} | {test_rows} rows ({strat.get('variation', 'unknown')})"):
+                        st.markdown(f"**Variation:** {strat.get('variation', 'N/A')}")
+                        st.markdown(f"**Test ROI:** {test_roi:.2%} ({test_rows} rows) - **HIGH but small sample!**")
+                        st.markdown(f"**Train ROI:** {train_roi:.2%} ({strat.get('train_rows', 0)} rows)")
                         st.markdown(f"**Val ROI:** {strat.get('val_roi', 0):.2%} ({strat.get('val_rows', 0)} rows)")
-                        st.markdown(f"**Test ROI:** {strat.get('test_roi', 0):.2%} ({strat.get('test_rows', 0)} rows)")
+                        
+                        st.warning(f"⚠️ Gate failures: {strat.get('gate_failures', ['Sample size too small'])}")
+                        st.markdown("**Consider:** Can you get more data for this filter combination? Or combine with other filters to increase sample size?")
+                        
                         st.code(json.dumps(strat.get("filters", []), indent=2), language="json")
             
             st.balloons()
