@@ -74,7 +74,12 @@ def _init_state():
 _init_state()
 
 def _log(msg: str):
-    st.session_state.log.append(f"[{datetime.utcnow().strftime('%H:%M:%S')}] {msg}")
+    try:
+        if "log" not in st.session_state:
+            st.session_state.log = []
+        st.session_state.log.append(f"[{datetime.utcnow().strftime('%H:%M:%S')}] {msg}")
+    except Exception:
+        pass  # Silently fail if session state not ready
 
 def _append(role: str, content: str):
     st.session_state.messages.append({"role": role, "content": content, "ts": datetime.utcnow().isoformat()})
@@ -83,11 +88,18 @@ def _append(role: str, content: str):
 
 def _add_learning(learning: str):
     """Accumulate learnings across iterations."""
-    st.session_state.accumulated_learnings.append({
-        "iteration": st.session_state.agent_iteration,
-        "learning": learning,
-        "ts": datetime.utcnow().isoformat()
-    })
+    try:
+        if "accumulated_learnings" not in st.session_state:
+            st.session_state.accumulated_learnings = []
+        if "agent_iteration" not in st.session_state:
+            st.session_state.agent_iteration = 0
+        st.session_state.accumulated_learnings.append({
+            "iteration": st.session_state.agent_iteration,
+            "learning": learning,
+            "ts": datetime.utcnow().isoformat()
+        })
+    except Exception:
+        pass  # Silently fail if session state not ready
 
 # ============================================================
 # Tool Runner
@@ -487,6 +499,10 @@ def _test_filter_batch(base_filters: List[Dict], variations: List[Dict], pl_colu
     for var in variations:
         combined = base_filters + [var]
         fhash = _filter_hash(combined)
+        
+        # Safe access to tested_filter_hashes
+        if "tested_filter_hashes" not in st.session_state:
+            st.session_state.tested_filter_hashes = set()
         if fhash in st.session_state.tested_filter_hashes:
             continue
         st.session_state.tested_filter_hashes.add(fhash)
