@@ -271,7 +271,7 @@ def _load_bible() -> Dict:
         
         # Import and call the Google Sheets function DIRECTLY (not via job queue)
         try:
-            from football_tools import get_research_context as get_bible_from_sheets
+            from football_tools import get_bible_from_sheets
             bible = get_bible_from_sheets(limit_notes=20)
             
             if bible.get("ok"):
