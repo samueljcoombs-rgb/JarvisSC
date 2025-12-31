@@ -766,8 +766,8 @@ def start_combination_scan(
     """
     cfg = _get_storage_config()
     params = {
-        "storage_bucket": kwargs.get("storage_bucket") or cfg["bucket"],
-        "storage_path": kwargs.get("storage_path") or cfg["path"],
+        "storage_bucket": kwargs.get("storage_bucket") or cfg["storage_bucket"],
+        "storage_path": kwargs.get("storage_path") or cfg["storage_path"],
         "_results_bucket": kwargs.get("results_bucket") or cfg["results_bucket"],
         "pl_column": pl_column,
         "base_filters": base_filters or [],
@@ -798,8 +798,8 @@ def start_forward_walk(
     """
     cfg = _get_storage_config()
     params = {
-        "storage_bucket": kwargs.get("storage_bucket") or cfg["bucket"],
-        "storage_path": kwargs.get("storage_path") or cfg["path"],
+        "storage_bucket": kwargs.get("storage_bucket") or cfg["storage_bucket"],
+        "storage_path": kwargs.get("storage_path") or cfg["storage_path"],
         "_results_bucket": kwargs.get("results_bucket") or cfg["results_bucket"],
         "pl_column": pl_column,
         "filters": filters or [],
@@ -828,8 +828,8 @@ def start_monte_carlo_sim(
     """
     cfg = _get_storage_config()
     params = {
-        "storage_bucket": kwargs.get("storage_bucket") or cfg["bucket"],
-        "storage_path": kwargs.get("storage_path") or cfg["path"],
+        "storage_bucket": kwargs.get("storage_bucket") or cfg["storage_bucket"],
+        "storage_path": kwargs.get("storage_path") or cfg["storage_path"],
         "_results_bucket": kwargs.get("results_bucket") or cfg["results_bucket"],
         "pl_column": pl_column,
         "filters": filters or [],
@@ -853,8 +853,8 @@ def start_correlation_check(
     """
     cfg = _get_storage_config()
     params = {
-        "storage_bucket": kwargs.get("storage_bucket") or cfg["bucket"],
-        "storage_path": kwargs.get("storage_path") or cfg["path"],
+        "storage_bucket": kwargs.get("storage_bucket") or cfg["storage_bucket"],
+        "storage_path": kwargs.get("storage_path") or cfg["storage_path"],
         "_results_bucket": kwargs.get("results_bucket") or cfg["results_bucket"],
         "filters": filters or [],
         "outcome_columns": outcome_columns or [],
@@ -1086,7 +1086,7 @@ def start_feature_importance(
         "top_n": top_n,
         **kwargs,
     }
-    return _submit_job("feature_importance", params)
+    return submit_job("feature_importance", params)
 
 
 def feature_importance(pl_column: str = "PL", **kwargs) -> Dict[str, Any]:
@@ -1094,7 +1094,7 @@ def feature_importance(pl_column: str = "PL", **kwargs) -> Dict[str, Any]:
     job = start_feature_importance(pl_column=pl_column, **kwargs)
     if not job.get("job_id"):
         return job
-    return _wait_for_job(job["job_id"])
+    return wait_for_job(job["job_id"])
 
 
 # =====================================================================
@@ -1132,7 +1132,7 @@ def start_univariate_scan(
     if scan_cols:
         params["scan_cols"] = scan_cols
     
-    return _submit_job("univariate_scan", params)
+    return submit_job("univariate_scan", params)
 
 
 def univariate_scan(pl_column: str = "PL", **kwargs) -> Dict[str, Any]:
@@ -1140,5 +1140,5 @@ def univariate_scan(pl_column: str = "PL", **kwargs) -> Dict[str, Any]:
     job = start_univariate_scan(pl_column=pl_column, **kwargs)
     if not job.get("job_id"):
         return job
-    return _wait_for_job(job["job_id"])
+    return wait_for_job(job["job_id"])
 
