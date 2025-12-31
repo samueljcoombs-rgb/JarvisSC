@@ -36,7 +36,6 @@ st.set_page_config(page_title="Football Research Agent v6", page_icon="⚽", lay
 # Configuration
 # ============================================================
 
-LOCAL_COMPUTE_URL = "http://localhost:8000"
 MAX_ITERATIONS = 15
 MAX_MESSAGES = 200
 JOB_TIMEOUT = 300
@@ -164,48 +163,96 @@ def _add_learning(learning: str):
         pass
 
 # ============================================================
-# Local Compute Client
+# Local Compute Client - Submit jobs to Supabase
 # ============================================================
 
 def _check_server() -> Dict:
-    """Check if local compute server is running."""
+    """Check if we can connect to Supabase (jobs table)."""
     try:
-        response = requests.get(f"{LOCAL_COMPUTE_URL}/health", timeout=5)
-        return response.json()
-    except Exception:
-        return {"status": "offline"}
+        sb = _sb_cached()
+        sb.table("jobs").select("job_id").limit(1).execute()
+        return {"status": "healthy", "data_rows": 0}  # Can't easily get row count
+    except Exception as e:
+        return {"status": "offline", "error": str(e)}
 
 def _run_tool(name: str, args: Optional[Dict] = None, timeout: int = JOB_TIMEOUT) -> Any:
-    """Call local compute server."""
+    """Submit job to Supabase and wait for result."""
     args = args or {}
-    url = f"{LOCAL_COMPUTE_URL}/run_task"
-    payload = {
-        "task_type": name,
-        "params": args,
-        "job_id": str(uuid.uuid4())
+    
+    # Get storage config
+    storage_bucket = os.getenv("DATA_STORAGE_BUCKET") or st.secrets.get("DATA_STORAGE_BUCKET", "football-data")
+    storage_path = os.getenv("DATA_STORAGE_PATH") or st.secrets.get("DATA_STORAGE_PATH", "football_ai_NNIA.csv")
+    results_bucket = os.getenv("RESULTS_BUCKET") or st.secrets.get("RESULTS_BUCKET", "football-results")
+    
+    # Add storage config to params
+    params = {
+        "storage_bucket": storage_bucket,
+        "storage_path": storage_path,
+        "_results_bucket": results_bucket,
+        **args
     }
     
     try:
-        _log(f"Calling {name}...")
-        response = requests.post(url, json=payload, timeout=timeout)
-        response.raise_for_status()
-        data = response.json()
+        sb = _sb_cached()
         
-        if data.get("status") == "error":
-            _log(f"Error in {name}: {data.get('error')}")
-            return {"error": data.get("error")}
+        # Submit job
+        _log(f"Submitting {name}...")
+        row = {
+            "status": "queued",
+            "task_type": name,
+            "params": params,
+            "created_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat(),
+        }
         
-        return data.get("result", data)
-    
-    except requests.exceptions.ConnectionError:
-        _log(f"Connection error - is local_compute.py running?")
-        return {"error": "Cannot connect to local compute server. Run: python3 local_compute.py"}
-    except requests.exceptions.Timeout:
-        _log(f"Timeout calling {name}")
+        res = sb.table("jobs").insert(row).execute()
+        if not res.data:
+            return {"error": "Failed to submit job"}
+        
+        job_id = res.data[0]["job_id"]
+        _log(f"Job {job_id[:8]}... queued")
+        
+        # Wait for completion
+        start = time.time()
+        while time.time() - start < timeout:
+            job = sb.table("jobs").select("*").eq("job_id", job_id).limit(1).execute().data
+            if not job:
+                return {"error": "Job not found"}
+            
+            job = job[0]
+            status = (job.get("status") or "").lower()
+            
+            if status == "done":
+                result_path = job.get("result_path")
+                if result_path:
+                    # Download result from storage
+                    try:
+                        raw = sb.storage.from_(results_bucket).download(result_path)
+                        return json.loads(raw.decode("utf-8"))
+                    except Exception as e:
+                        return {"error": f"Failed to download result: {e}"}
+                return job
+            
+            elif status == "error":
+                return {"error": job.get("error", "Job failed")}
+            
+            time.sleep(3)
+        
         return {"error": f"Timeout after {timeout}s"}
+        
     except Exception as e:
-        _log(f"Error calling {name}: {e}")
+        _log(f"Error in {name}: {e}")
         return {"error": str(e)}
+
+@st.cache_resource
+def _sb_cached():
+    """Get cached Supabase client."""
+    url = os.getenv("SUPABASE_URL") or st.secrets.get("SUPABASE_URL")
+    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or st.secrets.get("SUPABASE_SERVICE_ROLE_KEY")
+    if not url or not key:
+        raise RuntimeError("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY")
+    from supabase import create_client
+    return create_client(url, key)
 
 # ============================================================
 # Bible (Research Context)
@@ -1341,9 +1388,17 @@ st.caption("Deep Analysis Edition + Local Compute + 38 Tools + Persistence + GPT
 # Check server
 server_status = _check_server()
 if server_status.get("status") != "healthy":
-    st.error("⚠️ Local compute server is not running!")
+    st.error("⚠️ Cannot connect to Supabase!")
     st.markdown("""
-    Start the server:
+    Check your Streamlit secrets have:
+    ```
+    SUPABASE_URL = "https://xxx.supabase.co"
+    SUPABASE_SERVICE_ROLE_KEY = "xxx"
+    DATA_STORAGE_BUCKET = "football-data"
+    DATA_STORAGE_PATH = "football_ai_NNIA.csv"
+    ```
+    
+    And run local_compute.py on your Mac:
     ```bash
     cd ~/football-agent-v6
     export $(grep -v '^#' .env | xargs)
@@ -1356,9 +1411,9 @@ if server_status.get("status") != "healthy":
 with st.sidebar:
     st.header("🎛️ Controls")
     
-    # Server status
-    st.success(f"🟢 Server Online ({server_status.get('data_rows', 0):,} rows)")
-    st.caption(f"Tools: {server_status.get('total_tools', 38)}")
+    # Server status (Supabase + local worker)
+    st.success(f"🟢 Supabase Connected")
+    st.caption("Jobs queued to Supabase, run local_compute.py to process")
     
     st.divider()
     
