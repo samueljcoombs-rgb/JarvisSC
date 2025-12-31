@@ -54,6 +54,13 @@ DEFAULT_GATES = {
 # Outcome columns (NEVER use as features)
 OUTCOME_COLUMNS = ["BO 2.5 PL", "BTTS PL", "SHG PL", "SHG 2+ PL", "LU1.5 PL", "LFGHU0.5 PL", "BO1.5 FHG PL", "PL"]
 
+# Banned columns (NEVER use as features - data leakage or irrelevant)
+BANNED_COLUMNS = [
+    "HT Score", "FT Score", "Result",  # Match outcomes - data leakage!
+    "Home", "Away", "Date", "Time",     # Identifiers - not predictive
+    "HOME FORM", "AWAY FORM",           # As per Bible rules
+]
+
 # ============================================================
 # Helpers
 # ============================================================
@@ -421,6 +428,7 @@ def _format_bible(bible: Dict) -> str:
     
     outcome_cols = derived.get('outcome_columns', OUTCOME_COLUMNS)
     outcome_str = ', '.join(str(c) for c in outcome_cols) if isinstance(outcome_cols, list) else str(outcome_cols)
+    banned_str = ', '.join(BANNED_COLUMNS)
     
     # Format rules
     rules_text = ""
@@ -440,6 +448,7 @@ def _format_bible(bible: Dict) -> str:
 **Approach:** {overview.get('approach', 'ML for discovery, filter rules for output')}
 **Gates:** min_train={gates.get('min_train_rows', 300)}, min_val={gates.get('min_val_rows', 60)}, min_test={gates.get('min_test_rows', 60)}, max_gap={gates.get('max_train_val_gap_roi', 0.4)}
 **Outcome Columns (NEVER features):** {outcome_str}
+**Banned Columns (NEVER use):** {banned_str}
 {rules_text}"""
 
 # ============================================================
@@ -594,12 +603,14 @@ When analyzing results, ALWAYS structure your thinking:
 
 ## CRITICAL RULES
 1. NEVER use PL columns as features (data leakage!)
-2. Split by TIME: train older, test newer (never random!)
-3. Explain WHY a filter exploits market inefficiency
-4. Simple > complex - prefer fewer filters
-5. Sample size matters - need 300+ train rows, 60+ test rows
-6. p-value < 0.10 for statistical significance
-7. Forward walk must show >60% positive periods
+2. NEVER use BANNED columns: HT Score, FT Score, Result, Home, Away, Date, Time, HOME FORM, AWAY FORM
+3. Split by TIME: train older, test newer (never random!)
+4. Explain WHY a filter exploits market inefficiency
+5. Simple > complex - prefer fewer filters
+6. Sample size matters - need 300+ train rows, 60+ test rows
+7. p-value < 0.10 for statistical significance
+8. Forward walk must show >60% positive periods
+9. When you find a strategy, KEEP SEARCHING for more!
 
 ## AVAILABLE TOOLS
 
@@ -2138,7 +2149,7 @@ def run_agent():
                     else:
                         st.warning("⚠️ Did not pass full validation")
             
-            # Check if strong enough to stop
+            # Check if strong enough - but KEEP SEARCHING for more!
             is_strong = (
                 best_result.get("train_roi", 0) > 0.01 and
                 best_result.get("val_roi", 0) > -0.01 and
@@ -2147,9 +2158,9 @@ def run_agent():
             )
             
             if is_strong:
-                st.success("🎯 Found STRONG strategy - stopping search!")
-                st.session_state.agent_phase = "complete"
-                return
+                st.success(f"🎯 Found STRONG strategy #{len(st.session_state.strategies_found)}!")
+                st.info("💪 Continuing to search for MORE strategies...")
+                # DON'T STOP - keep searching for more strategies!
             else:
                 st.warning("📊 Strategy found but weak - continuing to explore...")
         
