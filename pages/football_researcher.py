@@ -378,14 +378,27 @@ def _llm(context: str, question: str, max_tokens: int = 3000) -> str:
         return '{"error": "OpenAI client not available"}'
     
     try:
-        response = client.chat.completions.create(
-            model=_get_model(),
-            max_tokens=max_tokens,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": f"{context}\n\n{question}"}
-            ]
-        )
+        model = _get_model()
+        
+        # GPT-5 and o1 models use max_completion_tokens, older models use max_tokens
+        if model.startswith("gpt-5") or model.startswith("o1"):
+            response = client.chat.completions.create(
+                model=model,
+                max_completion_tokens=max_tokens,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": f"{context}\n\n{question}"}
+                ]
+            )
+        else:
+            response = client.chat.completions.create(
+                model=model,
+                max_tokens=max_tokens,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": f"{context}\n\n{question}"}
+                ]
+            )
         return response.choices[0].message.content
     except Exception as e:
         return f'{{"error": "{str(e)}"}}'
@@ -1120,7 +1133,11 @@ def run_agent():
             group = sg.get("group", {})
             test_roi = sg.get("test", {}).get("roi", 0)
             test_rows = sg.get("test", {}).get("rows", 0)
-            group_str = ", ".join([f"{k}={v}" for k, v in group.items() if v])
+            # Handle case where group might be string or dict
+            if isinstance(group, dict):
+                group_str = ", ".join([f"{k}={v}" for k, v in group.items() if v])
+            else:
+                group_str = str(group)
             st.markdown(f"  {i}. `{group_str}` → Test: {test_roi:.2%} ({test_rows} rows)")
     
     with st.expander("📄 Full Sweep Results", expanded=False):
