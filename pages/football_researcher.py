@@ -676,12 +676,65 @@ Respond with JSON:
 }"""
 
     resp = _llm(context, question)
+    _log(f"LLM analysis response length: {len(resp) if resp else 0}")
+    
+    # Check for errors
+    if not resp or resp.startswith('{"error"'):
+        _log(f"LLM error: {resp}")
+        # Generate basic avenues from exploration data without LLM
+        return _generate_fallback_avenues(exploration, pl_column)
+    
     parsed = _parse_json(resp)
     
     if not parsed:
-        return {"detailed_analysis": resp[:1000], "prioritized_avenues": []}
+        _log("Failed to parse LLM response, using fallback")
+        return {"detailed_analysis": resp[:1000] if resp else "Analysis failed", "prioritized_avenues": _generate_fallback_avenues(exploration, pl_column).get("prioritized_avenues", [])}
+    
+    # Ensure we have avenues
+    if not parsed.get("prioritized_avenues"):
+        fallback = _generate_fallback_avenues(exploration, pl_column)
+        parsed["prioritized_avenues"] = fallback.get("prioritized_avenues", [])
     
     return parsed
+
+
+def _generate_fallback_avenues(exploration: Dict, pl_column: str) -> Dict:
+    """Generate avenues from exploration data without LLM."""
+    avenues = []
+    
+    # Extract from mode distribution
+    mode_dist = exploration.get("mode_distribution", {}).get("result", [])
+    for m in mode_dist:
+        mode = m.get("MODE")
+        mean_pl = m.get(f"mean_{pl_column}", m.get("mean_BO 2.5 PL", 0))
+        if mode and mean_pl and mean_pl > -0.01:  # Not too negative
+            avenues.append({
+                "rank": len(avenues) + 1,
+                "avenue": f"MODE={mode}",
+                "base_filters": [{"col": "MODE", "op": "=", "value": mode}],
+                "market_inefficiency_hypothesis": f"MODE {mode} shows {mean_pl:.4f} mean PL - worth exploring",
+                "confidence": "medium" if mean_pl > 0 else "low",
+            })
+    
+    # Extract from market distribution
+    market_dist = exploration.get("market_distribution", {}).get("result", [])
+    for m in sorted(market_dist, key=lambda x: x.get(f"mean_{pl_column}", x.get("mean_BO 2.5 PL", 0)) or 0, reverse=True)[:5]:
+        market = m.get("MARKET")
+        mean_pl = m.get(f"mean_{pl_column}", m.get("mean_BO 2.5 PL", 0))
+        count = m.get("_count", 0)
+        if market and mean_pl and mean_pl > 0 and count >= 300:
+            avenues.append({
+                "rank": len(avenues) + 1,
+                "avenue": f"MARKET={market}",
+                "base_filters": [{"col": "MARKET", "op": "=", "value": market}],
+                "market_inefficiency_hypothesis": f"MARKET {market} shows {mean_pl:.4f} mean PL with {count} rows",
+                "confidence": "medium",
+            })
+    
+    return {
+        "detailed_analysis": "Fallback analysis: Generated avenues from exploration data distribution. LLM analysis was not available.",
+        "prioritized_avenues": avenues[:8],
+    }
 
 # ============================================================
 # Sweeps Phase (from v5)
@@ -1322,9 +1375,131 @@ def run_agent():
         
         st.session_state.agent_iteration = iteration
         
+        # NEVER GIVE UP - Generate new avenues if exhausted
         if not avenues_remaining:
-            st.warning("All avenues explored!")
-            break
+            st.markdown("#### 🔄 Generating New Research Directions...")
+            
+            # Strategy 1: Generate avenues from sweep results (subgroup patterns)
+            if sweeps.get("subgroup_scan", {}).get("top_groups"):
+                st.markdown("*Converting top subgroup patterns to avenues...*")
+                for sg in sweeps.get("subgroup_scan", {}).get("top_groups", [])[:5]:
+                    group = sg.get("group", [])
+                    test_roi = sg.get("test", {}).get("roi", 0)
+                    if test_roi > 0:
+                        filters_desc = ", ".join([f"{g.get('col')}={g.get('value')}" for g in group if g.get('value')])
+                        new_avenue = {
+                            "avenue": f"Subgroup: {filters_desc}",
+                            "base_filters": [{"col": g.get("col"), "op": "=", "value": g.get("value")} for g in group if g.get("value")],
+                            "market_inefficiency_hypothesis": f"Subgroup scan found {test_roi:.2%} test ROI - exploring variations",
+                            "source": "subgroup_scan",
+                        }
+                        if new_avenue not in st.session_state.avenues_explored:
+                            avenues_remaining.append(new_avenue)
+            
+            # Strategy 2: Use ML tools to discover new patterns
+            if not avenues_remaining:
+                st.markdown("*Running ML discovery (CatBoost/SHAP)...*")
+                ml_result = _run_tool("train_catboost", {"pl_column": pl_column})
+                
+                if ml_result and not ml_result.get("error"):
+                    suggested = ml_result.get("suggested_filters", [])
+                    feature_imp = ml_result.get("feature_importance", [])[:5]
+                    
+                    for sf in suggested[:3]:
+                        new_avenue = {
+                            "avenue": f"ML Discovery: {sf.get('col')} {sf.get('op')} {sf.get('value', sf.get('values', ''))}",
+                            "base_filters": [sf],
+                            "market_inefficiency_hypothesis": sf.get("reasoning", "ML model identified this pattern"),
+                            "source": "ml_catboost",
+                        }
+                        if new_avenue not in st.session_state.avenues_explored:
+                            avenues_remaining.append(new_avenue)
+                    
+                    # Also create avenues from top features
+                    for fi in feature_imp:
+                        feat = fi.get("feature")
+                        if feat and not any(pl in feat.lower() for pl in ["pl", "profit", "result"]):
+                            new_avenue = {
+                                "avenue": f"Feature Exploration: {feat}",
+                                "base_filters": [],
+                                "explore_column": feat,
+                                "market_inefficiency_hypothesis": f"ML ranked {feat} as important (score: {fi.get('importance', 0):.3f})",
+                                "source": "ml_feature_importance",
+                            }
+                            if new_avenue not in st.session_state.avenues_explored:
+                                avenues_remaining.append(new_avenue)
+            
+            # Strategy 3: Try SHAP explanations
+            if not avenues_remaining:
+                st.markdown("*Running SHAP analysis...*")
+                shap_result = _run_tool("shap_explain", {"pl_column": pl_column})
+                
+                if shap_result and not shap_result.get("error"):
+                    for sf in shap_result.get("suggested_filters", [])[:3]:
+                        new_avenue = {
+                            "avenue": f"SHAP: {sf.get('col')} {sf.get('op')} {sf.get('value')}",
+                            "base_filters": [sf],
+                            "market_inefficiency_hypothesis": sf.get("reasoning", "SHAP identified this pattern"),
+                            "source": "shap_explain",
+                        }
+                        if new_avenue not in st.session_state.avenues_explored:
+                            avenues_remaining.append(new_avenue)
+            
+            # Strategy 4: Refine near-misses
+            if not avenues_remaining and st.session_state.near_misses:
+                st.markdown("*Refining near-miss strategies...*")
+                for nm in st.session_state.near_misses[:3]:
+                    new_avenue = {
+                        "avenue": f"Near-Miss Refinement: {nm.get('avenue', 'Unknown')}",
+                        "base_filters": nm.get("filters", []),
+                        "market_inefficiency_hypothesis": f"Near-miss with {nm.get('test_roi', 0):.2%} test ROI - trying variations",
+                        "source": "near_miss_refinement",
+                    }
+                    if new_avenue not in st.session_state.avenues_explored:
+                        avenues_remaining.append(new_avenue)
+            
+            # Strategy 5: Try different PL columns (cross-market)
+            if not avenues_remaining:
+                other_pl_cols = [c for c in OUTCOME_COLUMNS if c != pl_column][:2]
+                for other_pl in other_pl_cols:
+                    new_avenue = {
+                        "avenue": f"Cross-Market: {other_pl}",
+                        "base_filters": [],
+                        "explore_pl_column": other_pl,
+                        "market_inefficiency_hypothesis": f"Exploring {other_pl} market for transferable insights",
+                        "source": "cross_market",
+                    }
+                    if new_avenue not in st.session_state.avenues_explored:
+                        avenues_remaining.append(new_avenue)
+            
+            # If still no avenues, run univariate scan for new ideas
+            if not avenues_remaining:
+                st.markdown("*Running univariate scan for new ideas...*")
+                uni_result = _run_tool("univariate_scan", {"pl_column": pl_column})
+                
+                if uni_result and not uni_result.get("error"):
+                    for bf in uni_result.get("best_filters", [])[:5]:
+                        if bf.get("roi", 0) > 0:
+                            new_avenue = {
+                                "avenue": f"Univariate: {bf.get('col')} = {bf.get('value')}",
+                                "base_filters": [{"col": bf.get("col"), "op": "=", "value": bf.get("value")}],
+                                "market_inefficiency_hypothesis": f"Best single filter for {bf.get('col')}: {bf.get('roi'):.2%} ROI",
+                                "source": "univariate_scan",
+                            }
+                            if new_avenue not in st.session_state.avenues_explored:
+                                avenues_remaining.append(new_avenue)
+            
+            if avenues_remaining:
+                st.success(f"✅ Generated {len(avenues_remaining)} new avenues to explore!")
+            else:
+                # Only stop if we've REALLY exhausted everything and found strategies
+                if st.session_state.strategies_found:
+                    st.success("✅ Research complete - found strategies and exhausted all avenues!")
+                    break
+                else:
+                    st.warning("⚠️ Could not generate new avenues - consider manual guidance")
+                    st.session_state.agent_phase = "paused"
+                    return
         
         # Pick next avenue
         current_avenue = avenues_remaining.pop(0)
