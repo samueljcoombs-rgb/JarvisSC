@@ -26,7 +26,7 @@ Requires: python3 local_compute.py running on port 8000
 from __future__ import annotations
 import os, json, uuid, re, time, hashlib
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 import requests
 import streamlit as st
 
@@ -36,7 +36,7 @@ st.set_page_config(page_title="Football Research Agent v6", page_icon="⚽", lay
 # Configuration
 # ============================================================
 
-MAX_ITERATIONS = 15
+MAX_ITERATIONS = 999  # Keep going until user stops!
 MAX_MESSAGES = 200
 JOB_TIMEOUT = 300
 
@@ -55,15 +55,69 @@ DEFAULT_GATES = {
 OUTCOME_COLUMNS = ["BO 2.5 PL", "BTTS PL", "SHG PL", "SHG 2+ PL", "LU1.5 PL", "LFGHU0.5 PL", "BO1.5 FHG PL", "PL"]
 
 # Banned columns (NEVER use as features - data leakage or irrelevant)
+# These columns reveal match outcomes or are identifiers - using them is CHEATING!
 BANNED_COLUMNS = [
-    "HT Score", "FT Score", "Result",  # Match outcomes - data leakage!
-    "Home", "Away", "Date", "Time",     # Identifiers - not predictive
-    "HOME FORM", "AWAY FORM",           # As per Bible rules
+    # Match outcomes - ABSOLUTE DATA LEAKAGE!
+    "HT Score", "FT Score", "Result", "BET RESULT",
+    "1H GT", "2H GT",  # Goals scored - outcome data!
+    "RETURN",  # This is the betting return - outcome!
+    
+    # Identifiers - not predictive features
+    "ID", "Home", "Away", "HOME TEAM", "AWAY TEAM",
+    "Date", "DATE", "Time", "TIME",
+    
+    # Form columns to ignore per Bible
+    "HOME FORM", "AWAY FORM",
 ]
+
+# Convert to set for fast lookup
+BANNED_COLUMNS_SET = set(col.upper() for col in BANNED_COLUMNS)
 
 # ============================================================
 # Helpers
 # ============================================================
+
+def _is_banned_column(col_name: str) -> bool:
+    """Check if a column is banned (data leakage or identifier)."""
+    if not col_name:
+        return False
+    col_upper = col_name.upper().strip()
+    # Check exact match
+    if col_upper in BANNED_COLUMNS_SET:
+        return True
+    # Check if it's a PL column
+    if "PL" in col_upper and col_upper not in ["IMPLIED", "IMPL"]:
+        return True
+    return False
+
+def _filter_banned_from_results(results: Dict) -> Dict:
+    """Remove any suggestions that use banned columns."""
+    if not results:
+        return results
+    
+    # Filter suggested_filters
+    if "suggested_filters" in results:
+        results["suggested_filters"] = [
+            f for f in results.get("suggested_filters", [])
+            if not _is_banned_column(f.get("col", ""))
+        ]
+    
+    # Filter feature_importance
+    if "feature_importance" in results:
+        results["feature_importance"] = [
+            f for f in results.get("feature_importance", [])
+            if not _is_banned_column(f.get("feature", "") if isinstance(f, dict) else str(f))
+        ]
+    
+    return results
+
+def _validate_avenue_filters(filters: List[Dict]) -> Tuple[bool, str]:
+    """Validate that filters don't use banned columns. Returns (is_valid, error_message)."""
+    for f in filters:
+        col = f.get("col", "")
+        if _is_banned_column(col):
+            return False, f"BANNED COLUMN: {col} - this is data leakage!"
+    return True, ""
 
 def _safe_json(obj: Any, max_len: int = 5000) -> str:
     try:
@@ -551,6 +605,39 @@ At each decision point, consider:
 - Early in research: 70% explore, 30% exploit
 - Later in research: 30% explore, 70% exploit
 
+## CRITICAL: DRILL DOWN ON WINNERS! 🎯
+
+When you find a profitable combination (e.g., MODE=Quick League, MARKET=FHGO0.5 Back with positive test ROI):
+
+**DO NOT immediately move to the next avenue!**
+
+Instead, DRILL DOWN to find the optimal parameters:
+
+1. **Filter the data** to just that MODE+MARKET combination
+2. **Run bracket_sweep** on numeric columns:
+   - ACTUAL ODDS: Find the sweet spot (e.g., 1.8-2.2 vs 2.5-3.0)
+   - % DRIFT: Does higher drift improve results?
+   - IMPLIED ODDS, DIFF
+3. **Test categorical splits**:
+   - DRIFT IN vs OUT vs SAME - which is best?
+   - Which LEAGUEs perform best within this filter?
+   - Any xG BRACKET patterns?
+4. **Combine the best**:
+   - If DRIFT IN improves it, add that filter
+   - If ACTUAL ODDS 1.8-2.5 is the sweet spot, add that
+   - Build up the optimal filter combination
+
+**Example workflow when Quick League + FHGO0.5 Back shows +1% test ROI:**
+```
+Step 1: bracket_sweep ACTUAL ODDS within this filter → finds 1.5-2.0 best
+Step 2: Test DRIFT IN vs OUT → DRIFT IN adds +1.5%
+Step 3: bracket_sweep % DRIFT → finds >= 3% adds +0.5%
+Step 4: Final filter: Quick League + FHGO0.5 Back + DRIFT IN + ODDS 1.5-2.0 + % DRIFT >= 3
+Step 5: Validate with forward_walk
+```
+
+This is how you turn a weak +1% edge into a strong +5% edge!
+
 ## WHEN THINGS DON'T WORK
 
 - Don't give up after one failure
@@ -601,16 +688,41 @@ When analyzing results, ALWAYS structure your thinking:
 3. [Step 3]
 ```
 
-## CRITICAL RULES
+## CRITICAL RULES - VIOLATION = IMMEDIATE FAILURE
+
+### ABSOLUTELY BANNED COLUMNS (DATA LEAKAGE - NEVER USE!)
+These columns reveal match outcomes - using them is CHEATING and makes strategies useless:
+- **1H GT, 2H GT** - Goals scored in each half (OUTCOME!)
+- **HT Score, FT Score** - Half-time/Full-time scores (OUTCOME!)
+- **Result, BET RESULT** - Match result (OUTCOME!)
+- **RETURN** - Betting return (OUTCOME!)
+- **WINS** - Win count (OUTCOME!)
+- **ID** - Row identifier (NOT PREDICTIVE!)
+- **Home, Away, HOME TEAM, AWAY TEAM** - Team names (IDENTIFIERS!)
+- **Date, TIME** - When match played (IDENTIFIERS!)
+- **HOME FORM, AWAY FORM, Home Form Rag, Away Form Rag** - Per Bible rules
+
+### WHY THIS MATTERS
+If you use 1H GT >= 50, you're saying "bet on matches where >50 goals were scored in first half" - 
+but you DON'T KNOW this before the match! This is data leakage and will NEVER work in production.
+
+### VALID FEATURES (Can use)
+- MODE, MARKET, DRIFT IN / OUT, % DRIFT
+- ACTUAL ODDS, IMPLIED ODDS, DIFF
+- LEAGUE, BRACKET, xG MARKET, xG BRACKET
+- Home Avg Points, Away Avg Points, Points Diff
+- O2.5 Odds, U1.5 Odds, BTTS Y Odds, etc.
+
+### OTHER RULES
 1. NEVER use PL columns as features (data leakage!)
-2. NEVER use BANNED columns: HT Score, FT Score, Result, Home, Away, Date, Time, HOME FORM, AWAY FORM
-3. Split by TIME: train older, test newer (never random!)
-4. Explain WHY a filter exploits market inefficiency
-5. Simple > complex - prefer fewer filters
-6. Sample size matters - need 300+ train rows, 60+ test rows
-7. p-value < 0.10 for statistical significance
-8. Forward walk must show >60% positive periods
-9. When you find a strategy, KEEP SEARCHING for more!
+2. Split by TIME: train older, test newer (never random!)
+3. Explain WHY a filter exploits market inefficiency
+4. Simple > complex - prefer fewer filters
+5. Sample size matters - need 300+ train rows, 60+ test rows
+6. p-value < 0.10 for statistical significance
+7. Forward walk must show >60% positive periods
+8. When you find a strategy, KEEP SEARCHING for more!
+9. NEVER STOP until user tells you to stop!
 
 ## AVAILABLE TOOLS
 
@@ -1093,6 +1205,24 @@ def _explore_avenue(avenue: Dict, pl_column: str, bible: Dict, exploration_analy
     avenue_name = avenue.get("avenue", "Unknown")
     
     _log(f"Exploring avenue: {avenue_name}")
+    
+    # CRITICAL: Validate filters don't use banned columns!
+    is_valid, error_msg = _validate_avenue_filters(base_filters)
+    if not is_valid:
+        _log(f"⛔ SKIPPING AVENUE - {error_msg}")
+        return {
+            "avenue": avenue_name,
+            "base_filters": base_filters,
+            "variations_tested": 0,
+            "results": [],
+            "analysis": {
+                "summary": f"SKIPPED: {error_msg}",
+                "recommendation": "SKIP - uses banned column (data leakage)",
+                "truly_passing": [],
+                "near_misses": [],
+            },
+            "skipped_reason": error_msg,
+        }
     
     # Generate variations
     variations = _generate_variations(exploration_analysis)
@@ -2346,6 +2476,13 @@ with st.sidebar:
     st.success(f"🟢 Supabase Connected")
     st.caption("Jobs queued to Supabase, run local_compute.py to process")
     
+    # SESSION ID - Important for recovery!
+    if st.session_state.session_id:
+        st.divider()
+        st.markdown("**📋 Session ID:**")
+        st.code(st.session_state.session_id, language=None)
+        st.caption("⚠️ SAVE THIS to resume if Streamlit reboots!")
+    
     st.divider()
     
     # Market selection
@@ -2471,16 +2608,30 @@ elif st.session_state.run_requested:
 elif st.session_state.agent_phase == "idle":
     st.info("👆 Click **Start Research** in the sidebar to begin")
     
-    # Resume option
-    st.markdown("### 📂 Or Resume from Checkpoint")
-    session_id = st.text_input("Session ID:")
-    if st.button("Load Checkpoint"):
-        if session_id:
+    # Resume option - MORE PROMINENT
+    st.markdown("### 📂 Resume from Previous Session")
+    st.markdown("*Sessions are saved automatically every iteration. If Streamlit reboots, you can resume!*")
+    
+    # Show current session ID if we have one
+    if st.session_state.session_id:
+        st.success(f"📋 Current Session ID: `{st.session_state.session_id}`")
+        st.caption("Copy this ID to resume later!")
+    
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        session_id = st.text_input("Enter Session ID to resume:", placeholder="e.g., abc123-def456-...")
+    with col2:
+        st.write("")  # Spacing
+        st.write("")
+        load_btn = st.button("🔄 Load", use_container_width=True)
+    
+    if load_btn and session_id:
+        with st.spinner("Loading checkpoint..."):
             if _restore_checkpoint(session_id):
-                st.success("Checkpoint loaded!")
+                st.success(f"✅ Checkpoint loaded! Iteration {st.session_state.agent_iteration}, {len(st.session_state.strategies_found)} strategies found")
                 st.rerun()
             else:
-                st.error("Checkpoint not found")
+                st.error("❌ Checkpoint not found - check the session ID")
     
     with st.expander("🆕 What's New in v6"):
         st.markdown("""
