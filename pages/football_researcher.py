@@ -1264,20 +1264,7 @@ def _deep_drill_down(base_filters: List[Dict], pl_column: str, bible: Dict) -> D
     
     # Columns to analyze (exclude banned and outcome columns)
     ANALYZE_COLUMNS = [
-        # Numeric columns for bracket analysis
-        {"col": "ACTUAL ODDS", "type": "numeric"},
-        {"col": "IMPLIED ODDS", "type": "numeric"},
-        {"col": "DIFF", "type": "numeric"},
-        {"col": "% DRIFT", "type": "numeric"},
-        {"col": "5 MIN ODDS", "type": "numeric"},
-        {"col": "NO GAMES", "type": "numeric"},
-        {"col": "STRIKE RATE", "type": "numeric"},
-        {"col": "Home Avg Points", "type": "numeric"},
-        {"col": "Away Avg Points", "type": "numeric"},
-        {"col": "Points Diff", "type": "numeric"},
-        {"col": "O2.5 Odds", "type": "numeric"},
-        {"col": "BTTS Y Odds", "type": "numeric"},
-        # Categorical columns for subgroup analysis
+        # Categorical columns FIRST (more reliable)
         {"col": "DRIFT IN / OUT", "type": "categorical"},
         {"col": "LEAGUE", "type": "categorical"},
         {"col": "xG MARKET", "type": "categorical"},
@@ -1285,6 +1272,13 @@ def _deep_drill_down(base_filters: List[Dict], pl_column: str, bible: Dict) -> D
         {"col": "Home Form Rag", "type": "categorical"},
         {"col": "Away Form Rag", "type": "categorical"},
         {"col": "SEASON", "type": "categorical"},
+        # Numeric columns for bracket analysis
+        {"col": "ACTUAL ODDS", "type": "numeric"},
+        {"col": "% DRIFT", "type": "numeric"},
+        {"col": "STRIKE RATE", "type": "numeric"},
+        {"col": "Home Avg Points", "type": "numeric"},
+        {"col": "Away Avg Points", "type": "numeric"},
+        {"col": "O2.5 Odds", "type": "numeric"},
     ]
     
     st.markdown("**🔬 Deep Drill Down Analysis:**")
@@ -1299,7 +1293,33 @@ def _deep_drill_down(base_filters: List[Dict], pl_column: str, bible: Dict) -> D
         col_type = col_info["type"]
         
         try:
-            if col_type == "numeric":
+            if col_type == "categorical":
+                # Run query_data to get PL by category - this is most reliable
+                result = _run_tool("query_data", {
+                    "filters": base_filters,
+                    "group_by": [col_name],
+                    "metrics": ["count", f"mean:{pl_column}", f"sum:{pl_column}"],
+                })
+                
+                groups = result.get("result", [])
+                if groups and len(groups) > 1:
+                    # Filter to groups with sufficient sample
+                    valid_groups = [g for g in groups if g.get("_count", 0) >= 30]
+                    if valid_groups:
+                        # Find best performing category
+                        best_group = max(valid_groups, key=lambda x: x.get(f"mean_{pl_column}", -999))
+                        if best_group.get("_count", 0) >= 30:
+                            impact = {
+                                "column": col_name,
+                                "type": "categorical",
+                                "best_value": best_group.get(col_name),
+                                "test_roi": best_group.get(f"mean_{pl_column}", 0),
+                                "sample_size": best_group.get("_count", 0),
+                                "filter": {"col": col_name, "op": "=", "value": best_group.get(col_name)},
+                            }
+                            column_impacts.append(impact)
+                            
+            else:  # numeric
                 # Run bracket sweep for this column
                 result = _run_tool("bracket_sweep", {
                     "filters": base_filters,
@@ -1312,119 +1332,87 @@ def _deep_drill_down(base_filters: List[Dict], pl_column: str, bible: Dict) -> D
                 brackets = result.get("top_brackets", [])
                 if brackets:
                     best_bracket = brackets[0]
-                    impact = {
-                        "column": col_name,
-                        "type": "numeric",
-                        "best_range": f"{best_bracket.get('min', '?')}-{best_bracket.get('max', '?')}",
-                        "test_roi": best_bracket.get("test", {}).get("roi", 0),
-                        "sample_size": best_bracket.get("test", {}).get("rows", 0),
-                        "improvement": best_bracket.get("test", {}).get("roi", 0),  # vs base
-                    }
-                    column_impacts.append(impact)
+                    # Get the bracket range - check different possible keys
+                    bracket_min = best_bracket.get("min") or best_bracket.get("bracket_min") or best_bracket.get("low")
+                    bracket_max = best_bracket.get("max") or best_bracket.get("bracket_max") or best_bracket.get("high")
+                    test_info = best_bracket.get("test", {})
                     
-            else:  # categorical
-                # Run query_data to get PL by category
-                result = _run_tool("query_data", {
-                    "filters": base_filters,
-                    "group_by": [col_name],
-                    "metrics": ["count", f"mean:{pl_column}", f"sum:{pl_column}"],
-                })
-                
-                groups = result.get("result", [])
-                if groups:
-                    # Find best performing category
-                    best_group = max(groups, key=lambda x: x.get(f"mean_{pl_column}", -999))
-                    if best_group.get("_count", 0) >= 60:  # Minimum sample
+                    if bracket_min is not None and bracket_max is not None:
                         impact = {
                             "column": col_name,
-                            "type": "categorical",
-                            "best_value": best_group.get(col_name),
-                            "test_roi": best_group.get(f"mean_{pl_column}", 0),
-                            "sample_size": best_group.get("_count", 0),
+                            "type": "numeric",
+                            "best_range": f"{bracket_min}-{bracket_max}",
+                            "bracket_min": float(bracket_min),
+                            "bracket_max": float(bracket_max),
+                            "test_roi": test_info.get("roi", 0) if isinstance(test_info, dict) else 0,
+                            "sample_size": test_info.get("rows", 0) if isinstance(test_info, dict) else 0,
+                            "filter": {"col": col_name, "op": "between", "min": float(bracket_min), "max": float(bracket_max)},
                         }
-                        column_impacts.append(impact)
+                        if impact["sample_size"] >= 30:
+                            column_impacts.append(impact)
                         
         except Exception as e:
             _log(f"Error analyzing {col_name}: {e}")
             continue
     
-    # Sort by impact
+    # Sort by impact (test_roi)
     column_impacts.sort(key=lambda x: x.get("test_roi", 0), reverse=True)
     drill_results["column_analyses"] = column_impacts
     
     # Display top impacts
-    st.markdown("**Top Feature Impacts:**")
-    for impact in column_impacts[:5]:
-        if impact["type"] == "numeric":
-            st.markdown(f"- **{impact['column']}** {impact['best_range']}: {impact['test_roi']:.2%} ({impact['sample_size']} rows)")
-        else:
-            st.markdown(f"- **{impact['column']}** = {impact['best_value']}: {impact['test_roi']:.2%} ({impact['sample_size']} rows)")
+    if column_impacts:
+        st.markdown("**Top Feature Impacts:**")
+        for impact in column_impacts[:5]:
+            if impact["type"] == "numeric":
+                st.markdown(f"- **{impact['column']}** {impact.get('best_range', '?')}: {impact.get('test_roi', 0):.2%} ({impact.get('sample_size', 0)} rows)")
+            else:
+                st.markdown(f"- **{impact['column']}** = {impact.get('best_value', '?')}: {impact.get('test_roi', 0):.2%} ({impact.get('sample_size', 0)} rows)")
+    else:
+        st.warning("No significant feature impacts found")
+        return drill_results
     
     # Step 2: Test top 2-filter combinations
     st.markdown("*Step 2: Testing top feature combinations...*")
     
-    top_features = column_impacts[:5]  # Top 5 features
+    top_features = [f for f in column_impacts[:5] if f.get("filter")]  # Only features with valid filters
     combinations_tested = []
     
     for i, feat1 in enumerate(top_features):
         for feat2 in top_features[i+1:]:
-            # Build combined filter
-            combined_filters = base_filters.copy()
-            
-            # Add first feature
-            if feat1["type"] == "numeric":
-                range_parts = feat1["best_range"].split("-")
-                if len(range_parts) == 2:
-                    combined_filters.append({
-                        "col": feat1["column"],
-                        "op": "between",
-                        "min": float(range_parts[0]),
-                        "max": float(range_parts[1]),
-                    })
-            else:
-                combined_filters.append({
-                    "col": feat1["column"],
-                    "op": "=",
-                    "value": feat1["best_value"],
-                })
-            
-            # Add second feature
-            if feat2["type"] == "numeric":
-                range_parts = feat2["best_range"].split("-")
-                if len(range_parts) == 2:
-                    combined_filters.append({
-                        "col": feat2["column"],
-                        "op": "between",
-                        "min": float(range_parts[0]),
-                        "max": float(range_parts[1]),
-                    })
-            else:
-                combined_filters.append({
-                    "col": feat2["column"],
-                    "op": "=",
-                    "value": feat2["best_value"],
-                })
-            
-            # Test the combination
             try:
+                # Build combined filter
+                combined_filters = list(base_filters)  # Make a copy
+                
+                # Add filters from both features
+                if feat1.get("filter"):
+                    combined_filters.append(feat1["filter"])
+                if feat2.get("filter"):
+                    combined_filters.append(feat2["filter"])
+                
+                # Test the combination
                 result = _run_tool("test_filter", {
                     "filters": combined_filters,
                     "pl_column": pl_column,
                     "enforcement": gates,
                 })
                 
-                if result.get("test", {}).get("roi", -999) > 0:
-                    combinations_tested.append({
-                        "features": [feat1["column"], feat2["column"]],
-                        "filters": combined_filters,
-                        "train_roi": result.get("train", {}).get("roi", 0),
-                        "val_roi": result.get("val", {}).get("roi", 0),
-                        "test_roi": result.get("test", {}).get("roi", 0),
-                        "test_rows": result.get("test", {}).get("rows", 0),
-                        "gates_passed": result.get("gates_passed", False),
-                    })
+                if result and not result.get("error"):
+                    test_roi = result.get("test", {}).get("roi", -999)
+                    test_rows = result.get("test", {}).get("rows", 0)
+                    
+                    if test_roi > 0 and test_rows >= 30:
+                        combinations_tested.append({
+                            "features": [feat1["column"], feat2["column"]],
+                            "filters": combined_filters,
+                            "train_roi": result.get("train", {}).get("roi", 0),
+                            "val_roi": result.get("val", {}).get("roi", 0),
+                            "test_roi": test_roi,
+                            "test_rows": test_rows,
+                            "gates_passed": result.get("gates_passed", False),
+                        })
             except Exception as e:
-                _log(f"Error testing combination: {e}")
+                _log(f"Error testing combination {feat1['column']} + {feat2['column']}: {e}")
+                continue
     
     # Sort by test ROI
     combinations_tested.sort(key=lambda x: x.get("test_roi", 0), reverse=True)
@@ -1434,30 +1422,24 @@ def _deep_drill_down(base_filters: List[Dict], pl_column: str, bible: Dict) -> D
     if combinations_tested:
         st.markdown("**Best Feature Combinations:**")
         for combo in combinations_tested[:3]:
-            st.markdown(f"- **{' + '.join(combo['features'])}**: Test {combo['test_roi']:.2%} ({combo['test_rows']} rows) {'✅' if combo['gates_passed'] else '⚠️'}")
+            status = "✅" if combo.get("gates_passed") else "⚠️"
+            st.markdown(f"- **{' + '.join(combo['features'])}**: Test {combo['test_roi']:.2%} ({combo['test_rows']} rows) {status}")
+    else:
+        st.info("No profitable combinations found")
     
     # Step 3: Build recommended additions
     st.markdown("*Step 3: Generating recommended filter additions...*")
     
     for impact in column_impacts[:3]:
-        if impact.get("test_roi", 0) > 0.01:  # Only recommend if >1% improvement
-            if impact["type"] == "numeric":
-                drill_results["recommended_additions"].append({
-                    "col": impact["column"],
-                    "op": "between",
-                    "min": impact["best_range"].split("-")[0] if "-" in str(impact["best_range"]) else impact["best_range"],
-                    "max": impact["best_range"].split("-")[1] if "-" in str(impact["best_range"]) else impact["best_range"],
-                    "expected_improvement": impact["test_roi"],
-                    "reasoning": f"Bracket analysis shows {impact['column']} in range {impact['best_range']} improves ROI",
-                })
-            else:
-                drill_results["recommended_additions"].append({
-                    "col": impact["column"],
-                    "op": "=",
-                    "value": impact["best_value"],
-                    "expected_improvement": impact["test_roi"],
-                    "reasoning": f"{impact['column']}={impact['best_value']} shows strongest performance",
-                })
+        if impact.get("test_roi", 0) > 0.005 and impact.get("filter"):  # Only recommend if >0.5% improvement
+            rec = impact["filter"].copy()
+            rec["expected_improvement"] = impact.get("test_roi", 0)
+            rec["reasoning"] = f"{impact['column']} analysis shows this value/range improves ROI by {impact.get('test_roi', 0):.1%}"
+            drill_results["recommended_additions"].append(rec)
+            st.markdown(f"✅ Recommend: **{impact['column']}** (expected +{impact.get('test_roi', 0):.1%})")
+    
+    if not drill_results["recommended_additions"]:
+        st.info("No strong recommendations - base strategy may already be optimal")
     
     _log(f"Deep drill down complete: {len(column_impacts)} columns analyzed, {len(combinations_tested)} combinations tested")
     
