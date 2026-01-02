@@ -194,9 +194,16 @@ def _get_client() -> Optional[OpenAI]:
     return OpenAI(api_key=api_key)
 
 def _get_model() -> str:
-    """Get the OpenAI model to use - defaults to gpt-5, can override with env var."""
-    return os.getenv("OPENAI_MODEL") or os.getenv("PREFERRED_OPENAI_MODEL") or "gpt-5"
+    """Get the OpenAI model to use.
 
+    Priority:
+    1) OPENAI_MODEL / PREFERRED_OPENAI_MODEL
+    2) Default to the latest generally-available GPT-5.1 family
+
+    Notes:
+    - `gpt-5` is an older GPT-5 snapshot; OpenAI recommends GPT-5.1+ where possible.
+    """
+    return os.getenv("OPENAI_MODEL") or os.getenv("PREFERRED_OPENAI_MODEL") or "gpt-5.1"
 # ============================================================
 # Session State
 # ============================================================
@@ -809,53 +816,124 @@ but you DON'T KNOW this before the match! This is data leakage and will NEVER wo
 ### Memory
 - **save_learning**: Store insight
 - **query_learnings**: Search past insights
-- **save_strategy**: Store strategy
-- **query_strategies**: Find similar strategies
+- *def _llm(context: str, question: str, max_tokens: int = 3000) -> str:
+    """Call OpenAI for analysis with robust compatibility across GPT-5 / reasoning models.
 
-Remember: You are a SENIOR QUANT. Think deeply. Connect dots. Be skeptical. Find real edges.
-"""
-
-def _llm(context: str, question: str, max_tokens: int = 3000) -> str:
-    """Call LLM for analysis with proper error handling."""
+    - Uses the Responses API for GPT-5* and o-series models when available (recommended).
+    - Falls back to Chat Completions for older models / older SDKs.
+    """
     client = _get_client()
     if not client:
         _log("ERROR: OpenAI client not available - check OPENAI_API_KEY")
         return '{"error": "OpenAI client not available - check OPENAI_API_KEY"}'
-    
+
+    model = _get_model()
+    effort = os.getenv("OPENAI_REASONING_EFFORT") or "medium"
+    user_text = f"{context}\n\n---\n{question}"
+
+    # Heuristic: treat GPT-5 + o-series as reasoning models
+    is_reasoning_model = model.startswith(("gpt-5", "o"))
+
+    _log(f"Calling LLM: model={model}, context_len={len(context)}, question_len={len(question)}")
+
+    # ---------------------------
+    # Preferred path: Responses API
+    # ---------------------------
+    if is_reasoning_model and hasattr(client, "responses"):
+        try:
+            resp = client.responses.create(
+                model=model,
+                instructions=SYSTEM_PROMPT,
+                input=[{"role": "user", "content": user_text}],
+                max_output_tokens=max_tokens,
+                reasoning={"effort": effort},
+            )
+
+            served_by = getattr(resp, "model", model)
+            _log(f"Served by model: {served_by}")
+
+            status = getattr(resp, "status", None)
+            if status == "incomplete":
+                incomplete_details = getattr(resp, "incomplete_details", None)
+                reason = getattr(incomplete_details, "reason", None) if incomplete_details else None
+                _log(f"LLM response incomplete (reason={reason}). Consider increasing max_tokens/max_output_tokens.")
+
+            # SDK convenience field
+            out_text = getattr(resp, "output_text", None)
+            if out_text:
+                _log(f"LLM response received: {len(out_text)} chars")
+                return out_text
+
+            # Fallback extraction for older/newer SDK variations
+            try:
+                parts = []
+                for item in getattr(resp, "output", []) or []:
+                    if getattr(item, "type", None) == "message":
+                        for c in getattr(item, "content", []) or []:
+                            if getattr(c, "type", None) in ("output_text", "text"):
+                                parts.append(getattr(c, "text", "") or "")
+                joined = "".join(parts).strip()
+                _log(f"LLM response received (parsed): {len(joined)} chars")
+                return joined
+            except Exception:
+                _log("LLM response had no parsable text output.")
+                return ""
+
+        except Exception as e:
+            error_msg = str(e)
+            _log(f"LLM ERROR (Responses API): {error_msg}")
+
+            # Common billing/quota hinting
+            if "insufficient_quota" in error_msg.lower() or "exceeded your current quota" in error_msg.lower():
+                _log("HINT: This looks like a billing/quota issue. Verify Billing is enabled / credits purchased / project budget not zero.")
+            if "does not exist" in error_msg.lower() or "not found" in error_msg.lower():
+                _log("HINT: This looks like a model access/name issue. Try OPENAI_MODEL=gpt-5.1 or gpt-4.1.")
+
+            return f'{{"error": "{error_msg}"}}'
+
+    # ---------------------------
+    # Fallback: Chat Completions API
+    # ---------------------------
     try:
-        model = _get_model()
-        _log(f"Calling LLM: model={model}, context_len={len(context)}, question_len={len(question)}")
-        
-        # Build request params
         params = {
             "model": model,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": f"{context}\n\n---\n{question}"}
+                {"role": "user", "content": user_text},
             ],
         }
 
-        # Sampling params: Some reasoning models (GPT-5 family / o-series) reject `temperature` unless using special settings.
-        # Keep behavior the same for non-reasoning models.
-        if not model.startswith(("gpt-5", "o")):
+        # GPT-5 and o-series commonly reject sampling params like temperature/top_p.
+        if not is_reasoning_model:
             params["temperature"] = 0.7
-        
-        # Different models use different token params
-        # - Newer reasoning models (e.g. GPT-5 and o-series) prefer `max_completion_tokens`
-        # - Legacy models still accept `max_tokens`
-        if model.startswith(("gpt-5", "o")):
+
+        # Token parameter compatibility:
+        # - Newer models prefer max_completion_tokens
+        # - Legacy models accept max_tokens
+        if is_reasoning_model or model.startswith(("gpt-4o", "gpt-4.1", "gpt-4-turbo")):
             params["max_completion_tokens"] = max_tokens
         else:
             params["max_tokens"] = max_tokens
-        
-        response = client.chat.completions.create(**params)
-        # Helpful sanity-check: confirm which model actually served the request
-        try:
-            _log(f"Served by model: {getattr(response, 'model', 'unknown')}")
-        except Exception:
-            pass
-        content = response.choices[0].message.content
+
+        resp = client.chat.completions.create(**params)
+        served_by = getattr(resp, "model", model)
+        _log(f"Served by model: {served_by}")
+
+        content = resp.choices[0].message.content
         _log(f"LLM response received: {len(content) if content else 0} chars")
+        return content or ""
+
+    except Exception as e:
+        error_msg = str(e)
+        _log(f"LLM ERROR (Chat Completions): {error_msg}")
+
+        if "insufficient_quota" in error_msg.lower() or "exceeded your current quota" in error_msg.lower():
+            _log("HINT: Billing/quota issue. Ensure you have payment details set up or prepaid credits available, and your project/org budget allows spend.")
+        if "does not exist" in error_msg.lower() or "not found" in error_msg.lower():
+            _log("HINT: Model access/name issue. Try OPENAI_MODEL=gpt-5.1 or gpt-4.1.")
+
+        return f'{{"error": "{error_msg}"}}'
+)
         return content or ""
         
     except Exception as e:
