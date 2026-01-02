@@ -2923,15 +2923,19 @@ def _restore_checkpoint(session_id: str) -> bool:
 # Main Agent (combined v5 + v6)
 # ============================================================
 
-def run_agent():
-    """Main research agent loop."""
+def run_agent(is_new_run: bool = True):
+    """Main research agent loop.
+    
+    Args:
+        is_new_run: If True, reset all state. If False (resume), continue from existing state.
+    """
     if "target_pl_column" not in st.session_state:
         st.error("No target PL column selected.")
         return
     
     pl_column = st.session_state.target_pl_column
     
-    # Initialize state
+    # Initialize state (always needed)
     if "log" not in st.session_state:
         st.session_state.log = []
     if "tested_filter_hashes" not in st.session_state:
@@ -2944,21 +2948,26 @@ def run_agent():
         st.session_state.avenues_explored = []
     if "strategies_found" not in st.session_state:
         st.session_state.strategies_found = []
-    
-    # Reset for new run (but DON'T reset research_log - we want to keep it!)
-    st.session_state.log = []
-    st.session_state.tested_filter_hashes = set()
-    st.session_state.near_misses = []
-    st.session_state.accumulated_learnings = []
-    st.session_state.avenues_explored = []
-    st.session_state.strategies_found = []
-    
-    # Initialize research log if not exists (don't reset it!)
     if "research_log" not in st.session_state:
         st.session_state.research_log = []
     
-    # Log the start
-    _research_log(f"Starting research for {pl_column}", "header")
+    # Only reset for NEW runs, not resumes!
+    if is_new_run:
+        st.session_state.log = []
+        st.session_state.tested_filter_hashes = set()
+        st.session_state.near_misses = []
+        st.session_state.accumulated_learnings = []
+        st.session_state.avenues_explored = []
+        st.session_state.strategies_found = []
+        st.session_state.research_log = []  # Also reset log for new runs
+        st.session_state.agent_iteration = 0
+        st.session_state.bible = None
+        st.session_state.exploration_results = None
+        st.session_state.exploration_analysis = None
+        st.session_state.sweep_results = None
+        _research_log(f"NEW RESEARCH started for {pl_column}", "header")
+    else:
+        _research_log(f"RESUMING research for {pl_column} at iteration {st.session_state.agent_iteration}", "header")
     
     st.markdown(f"# 🤖 Research Agent v6: {pl_column}")
     st.caption("Deep Analysis Edition + Local Compute + 38 Tools + Persistence")
@@ -2989,26 +2998,33 @@ def run_agent():
     }
     
     # ========== BIBLE ==========
-    with st.status("📖 Loading Bible...", expanded=True) as status:
-        bible = _load_bible()
-        bible_source = bible.get("_source", "unknown")
-        
-        # Show source warning
-        if bible_source == "google_sheets_direct":
-            st.success(f"✅ Bible loaded from Google Sheets ({len(bible.get('research_rules', []))} rules, {len(bible.get('column_definitions', []))} column defs)")
-            _research_log(f"Bible loaded from Google Sheets ({len(bible.get('research_rules', []))} rules)", "success")
-        elif bible_source == "job_queue":
-            st.warning("⚠️ Bible loaded from job queue (local_compute) - NOT Google Sheets!")
-            _research_log("Bible loaded from job queue (NOT Google Sheets)", "warning")
-        elif bible_source == "fallback":
-            st.error("❌ Bible using FALLBACK - Google Sheets NOT connected! Check credentials.")
-            _research_log("Bible using FALLBACK - check credentials!", "error")
-        else:
-            st.warning(f"⚠️ Bible source: {bible_source}")
-            _research_log(f"Bible source: {bible_source}", "warning")
-        
-        st.markdown(_format_bible(bible))
-        status.update(label="📖 Bible loaded", state="complete")
+    # Use cached bible if resuming
+    if not is_new_run and st.session_state.get("bible"):
+        bible = st.session_state.bible
+        st.info("📖 Using cached Bible from previous session")
+        _research_log("Using cached Bible", "info")
+    else:
+        with st.status("📖 Loading Bible...", expanded=True) as status:
+            bible = _load_bible()
+            st.session_state.bible = bible
+            bible_source = bible.get("_source", "unknown")
+            
+            # Show source warning
+            if bible_source == "google_sheets_direct":
+                st.success(f"✅ Bible loaded from Google Sheets ({len(bible.get('research_rules', []))} rules, {len(bible.get('column_definitions', []))} column defs)")
+                _research_log(f"Bible loaded from Google Sheets ({len(bible.get('research_rules', []))} rules)", "success")
+            elif bible_source == "job_queue":
+                st.warning("⚠️ Bible loaded from job queue (local_compute) - NOT Google Sheets!")
+                _research_log("Bible loaded from job queue (NOT Google Sheets)", "warning")
+            elif bible_source == "fallback":
+                st.error("❌ Bible using FALLBACK - Google Sheets NOT connected! Check credentials.")
+                _research_log("Bible using FALLBACK - check credentials!", "error")
+            else:
+                st.warning(f"⚠️ Bible source: {bible_source}")
+                _research_log(f"Bible source: {bible_source}", "warning")
+            
+            st.markdown(_format_bible(bible))
+            status.update(label="📖 Bible loaded", state="complete")
     
     with st.expander("📚 Full Bible Context", expanded=False):
         st.code(_safe_json(bible, 3000), language="json")
@@ -3016,14 +3032,20 @@ def run_agent():
     _append("assistant", _format_bible(bible))
     
     # ========== EXPLORATION ==========
-    _research_log("Phase 1: Exploration - Analyzing MODE, MARKET, DRIFT distributions...", "phase")
-    with st.status("🔍 Phase 1: Exploration...", expanded=True) as status:
-        progress = st.empty()
-        exploration = _run_exploration(pl_column, progress)
-        st.session_state.exploration_results = exploration
-        status.update(label="🔍 Exploration complete", state="complete")
-    
-    _research_log("Exploration complete - analyzing results", "success")
+    # Use cached exploration if resuming
+    if not is_new_run and st.session_state.get("exploration_results"):
+        exploration = st.session_state.exploration_results
+        st.info("🔍 Using cached exploration from previous session")
+        _research_log("Using cached exploration", "info")
+    else:
+        _research_log("Phase 1: Exploration - Analyzing MODE, MARKET, DRIFT distributions...", "phase")
+        with st.status("🔍 Phase 1: Exploration...", expanded=True) as status:
+            progress = st.empty()
+            exploration = _run_exploration(pl_column, progress)
+            st.session_state.exploration_results = exploration
+            status.update(label="🔍 Exploration complete", state="complete")
+        
+        _research_log("Exploration complete - analyzing results", "success")
     
     with st.expander("Exploration Results", expanded=False):
         st.code(_safe_json(exploration, 5000), language="json")
@@ -3035,10 +3057,18 @@ def run_agent():
         return
     
     # ========== DEEP ANALYSIS ==========
-    _research_log("Phase 1b: Deep Analysis - AI analyzing patterns...", "phase")
-    st.markdown("### 🧠 Phase 1b: Deep Analysis")
-    with st.status("🧠 Analyzing exploration...", expanded=True) as status:
-        exploration_analysis = _analyze_exploration(bible, exploration, pl_column)
+    # Use cached analysis if resuming
+    if not is_new_run and st.session_state.get("exploration_analysis"):
+        exploration_analysis = st.session_state.exploration_analysis
+        st.info("🧠 Using cached analysis from previous session")
+        _research_log("Using cached analysis", "info")
+    else:
+        _research_log("Phase 1b: Deep Analysis - AI analyzing patterns...", "phase")
+        st.markdown("### 🧠 Phase 1b: Deep Analysis")
+        with st.status("🧠 Analyzing exploration...", expanded=True) as status:
+            exploration_analysis = _analyze_exploration(bible, exploration, pl_column)
+            st.session_state.exploration_analysis = exploration_analysis
+            status.update(label="🧠 Analysis complete", state="complete")
         st.session_state.exploration_analysis = exploration_analysis
         status.update(label="🧠 Analysis complete", state="complete")
     
@@ -3815,6 +3845,7 @@ with st.sidebar:
             st.session_state.strategies_found = []
             st.session_state.session_id = None
             st.session_state.run_requested = True
+            st.session_state.is_resume = False  # This is a NEW run
             # Reset hypothesis tracking for new session
             st.session_state.hypothesis_count = 0
             st.session_state.tests_per_iteration = []
@@ -3836,6 +3867,7 @@ with st.sidebar:
         if col1.button("▶️ Resume", use_container_width=True):
             st.session_state.agent_phase = "running"
             st.session_state.run_requested = True
+            st.session_state.is_resume = True  # Flag to indicate resume, not new run
             st.rerun()
         if col2.button("🛑 Stop", use_container_width=True):
             st.session_state.agent_phase = "idle"
@@ -3947,7 +3979,9 @@ if st.session_state.agent_phase == "paused":
 
 elif st.session_state.run_requested:
     st.session_state.run_requested = False
-    run_agent()
+    is_resume = st.session_state.get("is_resume", False)
+    st.session_state.is_resume = False  # Reset the flag
+    run_agent(is_new_run=not is_resume)
 
 elif st.session_state.agent_phase == "idle":
     st.info("👆 Click **Start Research** in the sidebar to begin")
