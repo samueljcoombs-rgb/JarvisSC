@@ -258,6 +258,80 @@ def _append(role: str, content: str):
     except Exception:
         pass
 
+def _research_log(content: str, level: str = "info"):
+    """Add entry to the persistent research log that survives page rerenders.
+    
+    Levels: info, success, warning, error, header, strategy, phase
+    """
+    if "research_log" not in st.session_state:
+        st.session_state.research_log = []
+    
+    entry = {
+        "ts": datetime.utcnow().strftime("%H:%M:%S"),
+        "level": level,
+        "content": content,
+    }
+    st.session_state.research_log.append(entry)
+    
+    # Keep last 500 entries
+    if len(st.session_state.research_log) > 500:
+        st.session_state.research_log = st.session_state.research_log[-500:]
+
+def _display_research_log():
+    """Display the full research log in a scrollable container."""
+    if "research_log" not in st.session_state or not st.session_state.research_log:
+        st.info("No research activity yet. Click **Start Research** to begin.")
+        return
+    
+    st.markdown("### 📜 Full Research Log (Scrollable)")
+    st.caption(f"{len(st.session_state.research_log)} entries")
+    
+    # Create scrollable container with CSS
+    log_lines = []
+    for entry in st.session_state.research_log:
+        ts = entry.get("ts", "")
+        level = entry.get("level", "info")
+        content = entry.get("content", "").replace("<", "&lt;").replace(">", "&gt;")
+        
+        # Style based on level
+        if level == "header":
+            log_lines.append(f'<div style="margin: 10px 0; padding: 8px; background: #1e3a5f; color: white; border-radius: 4px; font-weight: bold;">[{ts}] 📌 {content}</div>')
+        elif level == "phase":
+            log_lines.append(f'<div style="margin: 8px 0; padding: 6px; background: #e3f2fd; border-left: 4px solid #2196f3; font-weight: bold;">[{ts}] {content}</div>')
+        elif level == "success":
+            log_lines.append(f'<div style="margin: 4px 0; padding: 4px 8px; background: #e8f5e9; border-left: 3px solid #4caf50;">[{ts}] ✅ {content}</div>')
+        elif level == "warning":
+            log_lines.append(f'<div style="margin: 4px 0; padding: 4px 8px; background: #fff3e0; border-left: 3px solid #ff9800;">[{ts}] ⚠️ {content}</div>')
+        elif level == "error":
+            log_lines.append(f'<div style="margin: 4px 0; padding: 4px 8px; background: #ffebee; border-left: 3px solid #f44336;">[{ts}] ❌ {content}</div>')
+        elif level == "strategy":
+            log_lines.append(f'<div style="margin: 10px 0; padding: 10px; background: #f3e5f5; border: 2px solid #9c27b0; border-radius: 8px; font-weight: bold;">[{ts}] 🎉 STRATEGY FOUND: {content}</div>')
+        elif level == "iteration":
+            log_lines.append(f'<div style="margin: 8px 0; padding: 6px; background: #fff8e1; border-left: 4px solid #ffc107;">[{ts}] 🔄 {content}</div>')
+        else:
+            log_lines.append(f'<div style="margin: 2px 0; padding: 2px 8px; color: #333;">[{ts}] {content}</div>')
+    
+    log_html = f'''
+    <div id="research-log" style="
+        height: 500px; 
+        overflow-y: auto; 
+        border: 1px solid #ddd; 
+        padding: 10px; 
+        border-radius: 8px; 
+        background: #fafafa;
+        font-family: monospace;
+        font-size: 13px;
+    ">
+        {"".join(log_lines)}
+    </div>
+    <script>
+        var logDiv = document.getElementById('research-log');
+        if (logDiv) logDiv.scrollTop = logDiv.scrollHeight;
+    </script>
+    '''
+    
+    st.markdown(log_html, unsafe_allow_html=True)
+
 def _add_learning(learning: str):
     """Accumulate learnings across iterations."""
     try:
@@ -1260,24 +1334,6 @@ Respond with JSON:
         fallback = _generate_fallback_avenues(exploration, pl_column)
         parsed["prioritized_avenues"] = fallback.get("prioritized_avenues", [])
     
-    # POST-PROCESS: Ensure all avenues have promising_drift
-    # Get best drift from drift_analysis if available
-    drift_analysis = parsed.get("drift_analysis", {})
-    default_drift = drift_analysis.get("best_drift", "IN")
-    
-    for avenue in parsed.get("prioritized_avenues", []):
-        # If no promising_drift, try to extract from avenue name or use default
-        if not avenue.get("promising_drift"):
-            avenue_name = avenue.get("avenue", "")
-            if "DRIFT=IN" in avenue_name or "DRIFT IN" in avenue_name:
-                avenue["promising_drift"] = "IN"
-            elif "DRIFT=OUT" in avenue_name or "DRIFT OUT" in avenue_name:
-                avenue["promising_drift"] = "OUT"
-            elif "DRIFT=SAME" in avenue_name:
-                avenue["promising_drift"] = "SAME"
-            else:
-                avenue["promising_drift"] = default_drift
-    
     # Add situation_assessment as detailed_analysis for backward compatibility
     if parsed.get("situation_assessment") and not parsed.get("detailed_analysis"):
         parsed["detailed_analysis"] = parsed["situation_assessment"]
@@ -1289,114 +1345,37 @@ def _generate_fallback_avenues(exploration: Dict, pl_column: str) -> Dict:
     """Generate avenues from exploration data without LLM."""
     avenues = []
     
-    # First, get the best drift from drift distribution
-    drift_dist = exploration.get("drift_distribution", {}).get("result", [])
-    best_drift = "IN"  # Default
-    best_drift_pl = -999
-    for d in drift_dist:
-        drift_val = d.get("DRIFT IN / OUT")
-        drift_pl = d.get(f"mean_{pl_column}", d.get("mean_BO 2.5 PL", 0)) or 0
-        if drift_pl > best_drift_pl:
-            best_drift_pl = drift_pl
-            best_drift = drift_val
-    
-    # PRIORITY 1: MODE+MARKET+DRIFT combinations (the full picture)
-    combo_dist = exploration.get("mode_market_drift", {}).get("result", [])
-    for c in sorted(combo_dist, key=lambda x: x.get(f"mean_{pl_column}", x.get("mean_BO 2.5 PL", 0)) or 0, reverse=True)[:5]:
-        mode = c.get("MODE")
-        market = c.get("MARKET")
-        drift = c.get("DRIFT IN / OUT")
-        mean_pl = c.get(f"mean_{pl_column}", c.get("mean_BO 2.5 PL", 0)) or 0
-        count = c.get("_count", 0)
-        
-        if mode and market and mean_pl > 0 and count >= 100:
+    # Extract from mode distribution
+    mode_dist = exploration.get("mode_distribution", {}).get("result", [])
+    for m in mode_dist:
+        mode = m.get("MODE")
+        mean_pl = m.get(f"mean_{pl_column}", m.get("mean_BO 2.5 PL", 0))
+        if mode and mean_pl and mean_pl > -0.01:  # Not too negative
             avenues.append({
                 "rank": len(avenues) + 1,
-                "avenue": f"MODE={mode}, MARKET={market}, DRIFT={drift}",
-                "base_filters": [
-                    {"col": "MODE", "op": "=", "value": mode},
-                    {"col": "MARKET", "op": "=", "value": market},
-                    {"col": "DRIFT IN / OUT", "op": "=", "value": drift}
-                ],
-                "promising_drift": drift,
-                "market_inefficiency_hypothesis": f"Combination shows {mean_pl:.4f} mean PL with {count} rows",
-                "confidence": "high" if count >= 500 else "medium",
+                "avenue": f"MODE={mode}",
+                "base_filters": [{"col": "MODE", "op": "=", "value": mode}],
+                "market_inefficiency_hypothesis": f"MODE {mode} shows {mean_pl:.4f} mean PL - worth exploring",
+                "confidence": "medium" if mean_pl > 0 else "low",
             })
     
-    # PRIORITY 2: MODE+MARKET combinations (without forcing drift)
-    if len(avenues) < 4:
-        mode_market = exploration.get("mode_market", {}).get("result", [])
-        if not mode_market:
-            # Build from mode_market_drift by aggregating
-            mode_market_agg = {}
-            for c in combo_dist:
-                key = (c.get("MODE"), c.get("MARKET"))
-                if key not in mode_market_agg:
-                    mode_market_agg[key] = {"count": 0, "sum_pl": 0}
-                mode_market_agg[key]["count"] += c.get("_count", 0)
-                mode_market_agg[key]["sum_pl"] += (c.get(f"mean_{pl_column}", 0) or 0) * c.get("_count", 0)
-            mode_market = [
-                {"MODE": k[0], "MARKET": k[1], "_count": v["count"], f"mean_{pl_column}": v["sum_pl"]/v["count"] if v["count"] > 0 else 0}
-                for k, v in mode_market_agg.items()
-            ]
-        
-        for m in sorted(mode_market, key=lambda x: x.get(f"mean_{pl_column}", 0) or 0, reverse=True)[:4]:
-            mode = m.get("MODE")
-            market = m.get("MARKET")
-            mean_pl = m.get(f"mean_{pl_column}", 0) or 0
-            count = m.get("_count", 0)
-            
-            if mode and market and mean_pl > 0 and count >= 200:
-                # Check if we already have this combo
-                existing = [a for a in avenues if f"MODE={mode}" in a["avenue"] and f"MARKET={market}" in a["avenue"]]
-                if not existing:
-                    avenues.append({
-                        "rank": len(avenues) + 1,
-                        "avenue": f"MODE={mode}, MARKET={market}",
-                        "base_filters": [
-                            {"col": "MODE", "op": "=", "value": mode},
-                            {"col": "MARKET", "op": "=", "value": market}
-                        ],
-                        "promising_drift": best_drift,  # Use overall best drift
-                        "market_inefficiency_hypothesis": f"MODE+MARKET combo shows {mean_pl:.4f} mean PL with {count} rows. Try with DRIFT={best_drift}",
-                        "confidence": "medium",
-                    })
-    
-    # PRIORITY 3: Individual MODE/MARKET only if we still need more avenues
-    if len(avenues) < 4:
-        mode_dist = exploration.get("mode_distribution", {}).get("result", [])
-        for m in mode_dist:
-            mode = m.get("MODE")
-            mean_pl = m.get(f"mean_{pl_column}", m.get("mean_BO 2.5 PL", 0))
-            if mode and mean_pl and mean_pl > -0.01:
-                avenues.append({
-                    "rank": len(avenues) + 1,
-                    "avenue": f"MODE={mode}",
-                    "base_filters": [{"col": "MODE", "op": "=", "value": mode}],
-                    "promising_drift": best_drift,
-                    "market_inefficiency_hypothesis": f"MODE {mode} shows {mean_pl:.4f} mean PL - explore with different MARKETs and DRIFT={best_drift}",
-                    "confidence": "low",
-                })
-    
-    if len(avenues) < 4:
-        market_dist = exploration.get("market_distribution", {}).get("result", [])
-        for m in sorted(market_dist, key=lambda x: x.get(f"mean_{pl_column}", x.get("mean_BO 2.5 PL", 0)) or 0, reverse=True)[:5]:
-            market = m.get("MARKET")
-            mean_pl = m.get(f"mean_{pl_column}", m.get("mean_BO 2.5 PL", 0))
-            count = m.get("_count", 0)
-            if market and mean_pl and mean_pl > 0 and count >= 300:
-                avenues.append({
-                    "rank": len(avenues) + 1,
-                    "avenue": f"MARKET={market}",
-                    "base_filters": [{"col": "MARKET", "op": "=", "value": market}],
-                    "promising_drift": best_drift,
-                    "market_inefficiency_hypothesis": f"MARKET {market} shows {mean_pl:.4f} mean PL with {count} rows - try with DRIFT={best_drift}",
-                    "confidence": "low",
-                })
+    # Extract from market distribution
+    market_dist = exploration.get("market_distribution", {}).get("result", [])
+    for m in sorted(market_dist, key=lambda x: x.get(f"mean_{pl_column}", x.get("mean_BO 2.5 PL", 0)) or 0, reverse=True)[:5]:
+        market = m.get("MARKET")
+        mean_pl = m.get(f"mean_{pl_column}", m.get("mean_BO 2.5 PL", 0))
+        count = m.get("_count", 0)
+        if market and mean_pl and mean_pl > 0 and count >= 300:
+            avenues.append({
+                "rank": len(avenues) + 1,
+                "avenue": f"MARKET={market}",
+                "base_filters": [{"col": "MARKET", "op": "=", "value": market}],
+                "market_inefficiency_hypothesis": f"MARKET {market} shows {mean_pl:.4f} mean PL with {count} rows",
+                "confidence": "medium",
+            })
     
     return {
-        "detailed_analysis": f"Fallback analysis: Generated avenues from exploration data. Best overall DRIFT appears to be {best_drift} ({best_drift_pl:.4f} mean PL). LLM analysis was not available.",
-        "drift_analysis": {"best_drift": best_drift, "drift_impact": f"Best drift ({best_drift}) shows {best_drift_pl:.4f} mean PL"},
+        "detailed_analysis": "Fallback analysis: Generated avenues from exploration data distribution. LLM analysis was not available.",
         "prioritized_avenues": avenues[:8],
     }
 
@@ -1692,14 +1671,20 @@ def _deep_drill_down(base_filters: List[Dict], pl_column: str, bible: Dict) -> D
                     st.warning(f"⚠️ Could not test {col_name}: {query_result.get('error')}")
                 elif not query_result:
                     st.warning(f"⚠️ Query for {col_name} returned nothing")
+            else:
+                # Show what values we found
+                _log(f"Groups for {col_name}: {[g.get(col_name) for g in groups[:5]]}")
             
+            tested_values = 0
             for group in groups:
                 value = group.get(col_name)
                 count = group.get("_count", 0)
                 
-                if value is None or value == "" or count < 30:
+                # Lower threshold to 20 for categorical testing (we'll validate with gates later)
+                if value is None or value == "" or count < 20:
                     continue
                 
+                tested_values += 1
                 test_filters = base_filters + [{"col": col_name, "op": "=", "value": value}]
                 
                 result = _run_tool("test_filter", {
@@ -1709,6 +1694,10 @@ def _deep_drill_down(base_filters: List[Dict], pl_column: str, bible: Dict) -> D
                 })
                 
                 if result and not result.get("error"):
+                    test_roi = result.get("test", {}).get("roi", 0)
+                    test_rows = result.get("test", {}).get("rows", 0)
+                    improvement = test_roi - base_test_roi
+                    
                     test_data = {
                         "type": "categorical",
                         "column": col_name,
@@ -1716,23 +1705,32 @@ def _deep_drill_down(base_filters: List[Dict], pl_column: str, bible: Dict) -> D
                         "display": f"{col_name} = {value}",
                         "train_roi": result.get("train", {}).get("roi", 0),
                         "val_roi": result.get("val", {}).get("roi", 0),
-                        "test_roi": result.get("test", {}).get("roi", 0),
-                        "test_rows": result.get("test", {}).get("rows", 0),
-                        "improvement": result.get("test", {}).get("roi", 0) - base_test_roi,
+                        "test_roi": test_roi,
+                        "test_rows": test_rows,
+                        "improvement": improvement,
                         "gates_passed": result.get("gates_passed", False),
                         "filter": {"col": col_name, "op": "=", "value": value},
                     }
                     all_tests.append(test_data)
                     categorical_results[col_name].append(test_data)
                     
-                    if test_data["improvement"] > 0 and test_data["test_rows"] >= 30:
+                    # Log significant findings
+                    if improvement > 0.01:
+                        _log(f"  {col_name}={value}: improvement={improvement:.2%}, test_rows={test_rows}")
+                    
+                    # Track improving filters (lower threshold: improvement > -0.005 to catch near-baseline)
+                    if improvement > 0 and test_rows >= 30:
                         improving_filters.append(test_data)
                 
                 test_count += 1
                 progress.progress(min(test_count / total_tests, 0.95))
+            
+            if tested_values == 0:
+                st.caption(f"  ⚠️ No testable values for {col_name} (all groups too small)")
                         
         except Exception as e:
             _log(f"Error testing {col_name}: {e}")
+            st.warning(f"⚠️ Error testing {col_name}: {str(e)[:100]}")
     
     # Show categorical results
     cat_improving = [f for f in all_tests if f["type"] == "categorical" and f["improvement"] > 0]
@@ -2194,14 +2192,24 @@ Respond with JSON:
                     f"Adjusted: {best_passing.get('adjusted_score', 0):.2%} ({best_passing.get('num_filters', '?')} filters)"
                 )
             
-            # Add to recommendations (prefer simpler strategies)
+            # Add to recommendations (prefer simpler strategies WITH SUFFICIENT SAMPLE SIZE)
+            MIN_TEST_ROWS_FOR_QUEUE = 50  # Don't queue strategies with tiny samples
+            
             for result in all_results[:5]:
+                test_rows = result.get("test_rows", 0)
+                
+                # Skip if sample too small (likely noise)
+                if test_rows < MIN_TEST_ROWS_FOR_QUEUE:
+                    _log(f"Skipping recommendation {result.get('name', '?')}: only {test_rows} test rows (min: {MIN_TEST_ROWS_FOR_QUEUE})")
+                    continue
+                    
                 if result.get("adjusted_score", 0) > 0:
                     if "filters" in result and "added_filters" in result:
                         drill_results["recommended_additions"].append({
                             "filters": result.get("added_filters", result["filters"]),
                             "name": result.get("name", "Unknown"),
                             "test_roi": result.get("test_roi", 0),
+                            "test_rows": test_rows,
                             "adjusted_score": result.get("adjusted_score", 0),
                             "improvement": result.get("improvement", 0),
                             "num_filters": result.get("num_filters", 0),
@@ -2212,6 +2220,7 @@ Respond with JSON:
                             "filter": result["filter"],
                             "name": result.get("display", "Unknown"),
                             "test_roi": result.get("test_roi", 0),
+                            "test_rows": test_rows,
                             "adjusted_score": result.get("adjusted_score", 0),
                             "improvement": result.get("improvement", 0),
                             "num_filters": result.get("num_filters", 0),
@@ -2831,7 +2840,7 @@ def run_agent():
     if "strategies_found" not in st.session_state:
         st.session_state.strategies_found = []
     
-    # Reset for new run
+    # Reset for new run (but DON'T reset research_log - we want to keep it!)
     st.session_state.log = []
     st.session_state.tested_filter_hashes = set()
     st.session_state.near_misses = []
@@ -2839,8 +2848,40 @@ def run_agent():
     st.session_state.avenues_explored = []
     st.session_state.strategies_found = []
     
+    # Initialize research log if not exists (don't reset it!)
+    if "research_log" not in st.session_state:
+        st.session_state.research_log = []
+    
+    # Log the start
+    _research_log(f"Starting research for {pl_column}", "header")
+    
     st.markdown(f"# 🤖 Research Agent v6: {pl_column}")
     st.caption("Deep Analysis Edition + Local Compute + 38 Tools + Persistence")
+    
+    # ========== PERSISTENT SUMMARY (always visible at top) ==========
+    summary_container = st.container()
+    with summary_container:
+        st.markdown("---")
+        sum_col1, sum_col2, sum_col3, sum_col4 = st.columns(4)
+        strategies_placeholder = sum_col1.empty()
+        iteration_placeholder = sum_col2.empty()
+        avenues_placeholder = sum_col3.empty()
+        status_placeholder = sum_col4.empty()
+        
+        # Initialize placeholders
+        strategies_placeholder.metric("📊 Strategies", 0)
+        iteration_placeholder.metric("🔄 Iteration", 0)
+        avenues_placeholder.metric("🎯 Avenues Left", "?")
+        status_placeholder.metric("📍 Status", "Starting")
+        st.markdown("---")
+    
+    # Store placeholders in session state for updates
+    st.session_state._summary_placeholders = {
+        "strategies": strategies_placeholder,
+        "iteration": iteration_placeholder,
+        "avenues": avenues_placeholder,
+        "status": status_placeholder,
+    }
     
     # ========== BIBLE ==========
     with st.status("📖 Loading Bible...", expanded=True) as status:
@@ -2850,12 +2891,16 @@ def run_agent():
         # Show source warning
         if bible_source == "google_sheets_direct":
             st.success(f"✅ Bible loaded from Google Sheets ({len(bible.get('research_rules', []))} rules, {len(bible.get('column_definitions', []))} column defs)")
+            _research_log(f"Bible loaded from Google Sheets ({len(bible.get('research_rules', []))} rules)", "success")
         elif bible_source == "job_queue":
             st.warning("⚠️ Bible loaded from job queue (local_compute) - NOT Google Sheets!")
+            _research_log("Bible loaded from job queue (NOT Google Sheets)", "warning")
         elif bible_source == "fallback":
             st.error("❌ Bible using FALLBACK - Google Sheets NOT connected! Check credentials.")
+            _research_log("Bible using FALLBACK - check credentials!", "error")
         else:
             st.warning(f"⚠️ Bible source: {bible_source}")
+            _research_log(f"Bible source: {bible_source}", "warning")
         
         st.markdown(_format_bible(bible))
         status.update(label="📖 Bible loaded", state="complete")
@@ -2866,11 +2911,14 @@ def run_agent():
     _append("assistant", _format_bible(bible))
     
     # ========== EXPLORATION ==========
+    _research_log("Phase 1: Exploration - Analyzing MODE, MARKET, DRIFT distributions...", "phase")
     with st.status("🔍 Phase 1: Exploration...", expanded=True) as status:
         progress = st.empty()
         exploration = _run_exploration(pl_column, progress)
         st.session_state.exploration_results = exploration
         status.update(label="🔍 Exploration complete", state="complete")
+    
+    _research_log("Exploration complete - analyzing results", "success")
     
     with st.expander("Exploration Results", expanded=False):
         st.code(_safe_json(exploration, 5000), language="json")
@@ -2878,9 +2926,11 @@ def run_agent():
     # Check for pause
     if st.session_state.agent_phase == "paused":
         st.warning("⏸️ Research paused")
+        _research_log("Research paused by user", "warning")
         return
     
     # ========== DEEP ANALYSIS ==========
+    _research_log("Phase 1b: Deep Analysis - AI analyzing patterns...", "phase")
     st.markdown("### 🧠 Phase 1b: Deep Analysis")
     with st.status("🧠 Analyzing exploration...", expanded=True) as status:
         exploration_analysis = _analyze_exploration(bible, exploration, pl_column)
@@ -3010,9 +3060,25 @@ def run_agent():
     avenues_remaining = list(avenues)
     success_found = False
     
+    # Helper to update the persistent summary
+    def _update_summary(status_text="Running"):
+        placeholders = st.session_state.get("_summary_placeholders", {})
+        if placeholders:
+            try:
+                placeholders.get("strategies", st.empty()).metric("📊 Strategies", len(st.session_state.strategies_found))
+                placeholders.get("iteration", st.empty()).metric("🔄 Iteration", st.session_state.agent_iteration)
+                placeholders.get("avenues", st.empty()).metric("🎯 Avenues Left", len(avenues_remaining))
+                placeholders.get("status", st.empty()).metric("📍 Status", status_text)
+            except Exception:
+                pass  # Placeholders may have been cleared
+    
     for iteration in range(1, MAX_ITERATIONS + 1):
+        # Update summary at start of each iteration
+        _update_summary(f"Iter {iteration}")
+        
         # Check for pause
         if st.session_state.agent_phase == "paused":
+            _update_summary("Paused")
             st.warning("⏸️ Research paused")
             return
         
@@ -3156,7 +3222,10 @@ def run_agent():
         current_avenue = avenues_remaining.pop(0)
         st.session_state.avenues_explored.append(current_avenue)
         
-        st.markdown(f"#### Iteration {iteration}: {current_avenue.get('avenue', 'Unknown')}")
+        avenue_name = current_avenue.get('avenue', 'Unknown')
+        _research_log(f"Iteration {iteration}: Testing {avenue_name}", "iteration")
+        
+        st.markdown(f"#### Iteration {iteration}: {avenue_name}")
         st.markdown(f"*{current_avenue.get('market_inefficiency_hypothesis', current_avenue.get('why_promising', ''))}*")
         
         # Explore avenue
@@ -3166,9 +3235,14 @@ def run_agent():
         
         # Display results
         analysis = avenue_results.get("analysis", {})
+        best_roi = analysis.get('best_test_roi', 0)
+        recommendation = analysis.get('recommendation', 'N/A')
+        
+        _research_log(f"  → Best Test ROI: {best_roi:.2%}, Recommendation: {recommendation}", "info")
+        
         st.markdown(f"**Results:** {analysis.get('summary', 'N/A')}")
-        st.markdown(f"**Best Test ROI:** {analysis.get('best_test_roi', 0):.4f}")
-        st.markdown(f"**Recommendation:** {analysis.get('recommendation', 'N/A')}")
+        st.markdown(f"**Best Test ROI:** {best_roi:.4f}")
+        st.markdown(f"**Recommendation:** {recommendation}")
         
         with st.expander(f"Avenue {iteration} Details", expanded=False):
             st.code(_safe_json(avenue_results, 3000), language="json")
@@ -3239,6 +3313,10 @@ def run_agent():
             
             best_result = truly_passing[0]
             
+            # LOG STRATEGY FOUND
+            filter_desc = ", ".join([f"{f.get('col')}={f.get('value', f.get('min', ''))}" for f in best_result.get("filters", [])[:3]])
+            _research_log(f"Test ROI: {best_result.get('test_roi', 0):.2%} | Filters: {filter_desc}", "strategy")
+            
             # Display strategy
             st.markdown("#### 📋 Best Validated Strategy")
             st.markdown(f"**Filters:**")
@@ -3256,10 +3334,15 @@ def run_agent():
             
             st.code(json.dumps(best_result.get("filters", []), indent=2), language="json")
             
-            # Save to Supabase
+            # Save to Supabase (use nested format that local_compute expects)
             save_result = _run_tool("save_strategy", {
                 "filters": best_result.get("filters", []),
                 "pl_column": pl_column,
+                # Use nested format for compatibility with local_compute
+                "train": {"roi": best_result.get("train_roi", 0), "rows": best_result.get("train_rows", 0)},
+                "val": {"roi": best_result.get("val_roi", 0), "rows": best_result.get("val_rows", 0)},
+                "test": {"roi": best_result.get("test_roi", 0), "rows": best_result.get("test_rows", 0)},
+                # Also include flat values as fallback
                 "train_roi": best_result.get("train_roi", 0),
                 "train_rows": best_result.get("train_rows", 0),
                 "val_roi": best_result.get("val_roi", 0),
@@ -3270,8 +3353,10 @@ def run_agent():
                 "status": "draft"
             })
             
-            if save_result.get("saved"):
-                st.info(f"💾 Strategy saved (quality: {save_result.get('quality_score', '?')})")
+            if save_result.get("error"):
+                st.error(f"❌ Failed to save strategy: {save_result.get('error')}")
+            elif save_result.get("saved") or save_result.get("filter_hash"):
+                st.success(f"💾 Strategy saved! Hash: {save_result.get('filter_hash', '?')[:8]}...")
                 st.session_state.strategies_found.append({
                     "filters": best_result.get("filters", []),
                     "result": best_result,
@@ -3735,6 +3820,9 @@ with st.sidebar:
 if st.session_state.agent_phase == "paused":
     st.warning("⏸️ Research is paused. Use sidebar to resume or ask questions below.")
     
+    # ALWAYS show research log
+    _display_research_log()
+    
     # Ask Agent feature
     st.markdown("### 💬 Ask Agent")
     question = st.text_input("Ask about the research progress:", key="ask_input")
@@ -3758,6 +3846,9 @@ elif st.session_state.run_requested:
 
 elif st.session_state.agent_phase == "idle":
     st.info("👆 Click **Start Research** in the sidebar to begin")
+    
+    # ALWAYS show research log if it exists
+    _display_research_log()
     
     # Resume option - MORE PROMINENT
     st.markdown("### 📂 Resume from Previous Session")
@@ -3809,6 +3900,9 @@ elif st.session_state.agent_phase == "idle":
 
 elif st.session_state.agent_phase == "complete":
     st.success("✅ Research complete!")
+    
+    # ALWAYS show research log
+    _display_research_log()
     
     if st.session_state.strategies_found:
         st.markdown("### 🏆 Strategies Found")
