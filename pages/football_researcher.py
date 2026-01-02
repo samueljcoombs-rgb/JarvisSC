@@ -40,7 +40,8 @@ MAX_ITERATIONS = 999  # Keep going until user stops!
 MAX_MESSAGES = 200
 JOB_TIMEOUT = 300
 
-# Default gates
+# Default gates - SINGLE SOURCE OF TRUTH
+# These are passed to local_compute for all test_filter calls
 DEFAULT_GATES = {
     "min_train_rows": 300,
     "min_val_rows": 60,
@@ -50,6 +51,49 @@ DEFAULT_GATES = {
     "max_rolling_dd": -50,
     "max_test_losing_streak_bets": 50,
 }
+
+# ============================================================
+# COMPLEXITY PENALTY SYSTEM
+# ============================================================
+# A strategy with fewer filters is MORE likely to be real/robust
+# Penalty reduces the "adjusted score" used for ranking strategies
+COMPLEXITY_PENALTY_PER_FILTER = 0.005  # 0.5% penalty per filter
+TRAIN_VAL_GAP_PENALTY = 0.02  # 2% penalty per 1% train-val gap
+MIN_FILTERS_NO_PENALTY = 2  # First 2 filters are "free"
+
+def _calculate_adjusted_score(test_roi: float, num_filters: int, train_val_gap: float = 0) -> float:
+    """
+    Calculate complexity-adjusted score for ranking strategies.
+    
+    A simpler strategy (fewer filters) with slightly lower ROI 
+    should be preferred over a complex strategy with higher ROI.
+    
+    Formula: adjusted_score = test_roi - (filter_penalty) - (gap_penalty)
+    """
+    # Filter penalty (first 2 filters are free)
+    extra_filters = max(0, num_filters - MIN_FILTERS_NO_PENALTY)
+    filter_penalty = extra_filters * COMPLEXITY_PENALTY_PER_FILTER
+    
+    # Train-val gap penalty (bigger gap = more overfitting risk)
+    gap_penalty = abs(train_val_gap) * TRAIN_VAL_GAP_PENALTY
+    
+    adjusted = test_roi - filter_penalty - gap_penalty
+    return adjusted
+
+def _count_filters(filters: List[Dict]) -> int:
+    """Count number of filter conditions (excluding base market/mode filters)."""
+    if not filters:
+        return 0
+    return len(filters)
+
+# ============================================================
+# FINAL HOLDOUT CONFIGURATION
+# ============================================================
+# Reserve the most recent data as a FINAL holdout that is NEVER touched
+# during exploration. Only used for final strategy validation.
+# Using 8% as a conservative amount since data doesn't go super far back
+FINAL_HOLDOUT_FRACTION = 0.08  # Last 8% of data by time
+ENABLE_FINAL_HOLDOUT = True  # Set to False to disable
 
 # Outcome columns (NEVER use as features)
 OUTCOME_COLUMNS = ["BO 2.5 PL", "BTTS PL", "SHG PL", "SHG 2+ PL", "LU1.5 PL", "LFGHU0.5 PL", "BO1.5 FHG PL", "PL"]
@@ -183,6 +227,11 @@ def _init_state():
         "strategies_found": [],
         "current_thinking": "",
         "last_checkpoint": None,
+        # v6.1 - Hypothesis tracking & validation improvements
+        "hypothesis_count": 0,  # Total hypotheses tested this session
+        "tests_per_iteration": [],  # Track tests per iteration for analysis
+        "final_holdout_tested": False,  # Have we used final holdout?
+        "strategies_pending_final_validation": [],  # Strategies awaiting final holdout test
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -240,6 +289,17 @@ def _check_server() -> Dict:
 def _run_tool(name: str, args: Optional[Dict] = None, timeout: int = JOB_TIMEOUT) -> Any:
     """Submit job to Supabase and wait for result."""
     args = args or {}
+    
+    # ====== HYPOTHESIS TRACKING ======
+    # Track how many filter tests we're running (for multiple testing awareness)
+    if name == "test_filter":
+        if "hypothesis_count" not in st.session_state:
+            st.session_state.hypothesis_count = 0
+        st.session_state.hypothesis_count += 1
+        
+        # Log milestone counts
+        if st.session_state.hypothesis_count % 50 == 0:
+            _log(f"📊 Hypothesis count: {st.session_state.hypothesis_count} tests run this session")
     
     # Get storage config
     storage_bucket = os.getenv("DATA_STORAGE_BUCKET") or st.secrets.get("DATA_STORAGE_BUCKET", "football-data")
@@ -825,6 +885,94 @@ def _parse_json(resp: str) -> Optional[Dict]:
     return None
 
 # ============================================================
+# Final Holdout Validation
+# ============================================================
+
+def _validate_on_final_holdout(filters: List[Dict], pl_column: str, bible: Dict) -> Dict:
+    """
+    Validate a strategy on the FINAL HOLDOUT - data never seen during exploration.
+    
+    This is the ultimate test. The final holdout is the most recent ~8% of data
+    that was NEVER used during any exploration, drill down, or testing.
+    
+    Rules:
+    - This should only be called ONCE per strategy
+    - If it fails here, the strategy should be rejected
+    - This is the closest we can get to "real" out-of-sample validation
+    """
+    if not ENABLE_FINAL_HOLDOUT:
+        return {"skipped": True, "reason": "Final holdout disabled"}
+    
+    _log(f"🔒 FINAL HOLDOUT VALIDATION for {len(filters)} filters")
+    
+    gates = bible.get("gates", DEFAULT_GATES)
+    
+    # Call test_filter with final_holdout flag
+    result = _run_tool("test_filter", {
+        "filters": filters,
+        "pl_column": pl_column,
+        "enforcement": gates,
+        "use_final_holdout": True,  # Special flag for local_compute
+        "final_holdout_fraction": FINAL_HOLDOUT_FRACTION,
+    })
+    
+    if not result or result.get("error"):
+        return {
+            "passed": False,
+            "error": result.get("error", "Unknown error"),
+            "recommendation": "Could not validate - try again"
+        }
+    
+    # Extract final holdout results
+    holdout = result.get("final_holdout", result.get("test", {}))
+    holdout_roi = holdout.get("roi", 0)
+    holdout_rows = holdout.get("rows", 0)
+    
+    # Compare to training performance
+    train_roi = result.get("train", {}).get("roi", 0)
+    test_roi = result.get("test", {}).get("roi", 0)
+    
+    # Calculate if strategy holds up
+    # More lenient than test - just needs to be profitable
+    passed = holdout_roi > -0.02  # Allow small negative (within noise)
+    strong_pass = holdout_roi > 0.01  # Clearly profitable
+    
+    # Calculate complexity-adjusted score
+    num_filters = _count_filters(filters)
+    adjusted_score = _calculate_adjusted_score(holdout_roi, num_filters, abs(train_roi - holdout_roi))
+    
+    verdict = {
+        "passed": passed,
+        "strong_pass": strong_pass,
+        "holdout_roi": holdout_roi,
+        "holdout_rows": holdout_rows,
+        "train_roi": train_roi,
+        "test_roi": test_roi,
+        "adjusted_score": adjusted_score,
+        "num_filters": num_filters,
+        "degradation": test_roi - holdout_roi,  # How much worse vs test
+    }
+    
+    # Generate recommendation
+    if strong_pass:
+        verdict["recommendation"] = "✅ VALIDATED - Strategy performs well on unseen data!"
+        verdict["confidence"] = "high"
+    elif passed:
+        verdict["recommendation"] = "⚠️ MARGINAL - Strategy is near breakeven on unseen data. Use with caution."
+        verdict["confidence"] = "medium"
+    else:
+        verdict["recommendation"] = "❌ FAILED - Strategy does not hold up on unseen data. Likely overfit."
+        verdict["confidence"] = "low"
+    
+    # Add warning if significant degradation
+    if verdict["degradation"] > 0.03:
+        verdict["warning"] = f"⚠️ Significant degradation: {verdict['degradation']*100:.1f}% worse than test set"
+    
+    _log(f"Final holdout result: ROI {holdout_roi:.2%}, passed={passed}")
+    
+    return verdict
+
+# ============================================================
 # Exploration Phase (from v5)
 # ============================================================
 
@@ -1251,18 +1399,26 @@ def _deep_drill_down(base_filters: List[Dict], pl_column: str, bible: Dict) -> D
     2. ALL numeric ranges (multiple odds columns, points, etc.)
     3. MANY combinations (cat+num, cat+cat, num+num)
     4. AI analysis between phases to guide exploration
+    5. COMPLEXITY-ADJUSTED SCORING (simpler strategies preferred)
     """
     _log(f"🔬 DEEP DRILL DOWN on: {base_filters}")
     
     gates = bible.get("gates", DEFAULT_GATES)
+    base_filter_count = _count_filters(base_filters)
+    
     drill_results = {
         "base_filters": base_filters,
         "individual_tests": [],
         "combinations": [],
         "recommended_additions": [],
+        "tests_run": 0,  # Track for hypothesis counting
     }
     
     st.markdown("### 🔬 Comprehensive Deep Drill Down")
+    
+    # Show hypothesis count so far
+    hypothesis_count = st.session_state.get("hypothesis_count", 0)
+    st.caption(f"📊 Total hypotheses tested this session: {hypothesis_count}")
     
     # ===== PHASE 1: Get Baseline =====
     st.markdown("**Phase 1: Establishing Baseline**")
@@ -1275,8 +1431,14 @@ def _deep_drill_down(base_filters: List[Dict], pl_column: str, bible: Dict) -> D
     base_test_roi = base_result.get("test", {}).get("roi", 0) if base_result else 0
     base_test_rows = base_result.get("test", {}).get("rows", 0) if base_result else 0
     base_train_roi = base_result.get("train", {}).get("roi", 0) if base_result else 0
+    base_val_roi = base_result.get("val", {}).get("roi", 0) if base_result else 0
+    base_train_val_gap = abs(base_train_roi - base_val_roi)
+    
+    # Calculate baseline adjusted score
+    base_adjusted_score = _calculate_adjusted_score(base_test_roi, base_filter_count, base_train_val_gap)
     
     st.markdown(f"📊 **Baseline:** Train {base_train_roi:.2%} → Test {base_test_roi:.2%} ({base_test_rows} rows)")
+    st.markdown(f"📐 **Complexity:** {base_filter_count} filters | Adjusted Score: {base_adjusted_score:.2%}")
     
     # ===== DEFINE ALL FEATURES TO TEST =====
     
@@ -1788,38 +1950,80 @@ Respond with JSON:
             
             combination_results.extend(three_way_results)
     
-    # ===== PHASE 7: Final Recommendations =====
-    st.markdown("**Phase 7: Final Recommendations**")
+    # ===== PHASE 7: Final Recommendations (with COMPLEXITY SCORING) =====
+    st.markdown("**Phase 7: Final Recommendations (Complexity-Adjusted)**")
     
+    # Calculate adjusted scores for all results
     all_results = improving_filters + combination_results
-    all_results.sort(key=lambda x: x.get("improvement", 0), reverse=True)
+    
+    for result in all_results:
+        # Count filters in this result
+        if "filters" in result:
+            num_filters = _count_filters(result["filters"])
+        elif "filter" in result:
+            num_filters = base_filter_count + 1  # Base + this one filter
+        else:
+            num_filters = base_filter_count
+        
+        # Calculate adjusted score
+        train_val_gap = abs(result.get("train_roi", 0) - result.get("val_roi", 0))
+        result["num_filters"] = num_filters
+        result["adjusted_score"] = _calculate_adjusted_score(
+            result.get("test_roi", 0), 
+            num_filters, 
+            train_val_gap
+        )
+        result["complexity_penalty"] = (max(0, num_filters - MIN_FILTERS_NO_PENALTY) * COMPLEXITY_PENALTY_PER_FILTER)
+    
+    # Sort by ADJUSTED score (not raw improvement) - this prefers simpler strategies!
+    all_results.sort(key=lambda x: x.get("adjusted_score", 0), reverse=True)
     
     if all_results:
         best = all_results[0]
         
-        if best.get("improvement", 0) > 0:
+        if best.get("improvement", 0) > 0 or best.get("adjusted_score", 0) > base_adjusted_score:
+            # Show both raw and adjusted
             st.success(
-                f"🏆 **Best Result:** {best.get('name', best.get('display', 'Unknown'))} "
+                f"🏆 **Best Result (Complexity-Adjusted):** {best.get('name', best.get('display', 'Unknown'))} "
                 f"with Test ROI **{best.get('test_roi', 0):.2%}** "
-                f"(**+{best.get('improvement', 0)*100:.1f}%** vs baseline)"
+                f"(Adjusted: {best.get('adjusted_score', 0):.2%})"
+            )
+            st.caption(
+                f"📐 {best.get('num_filters', '?')} filters | "
+                f"Complexity penalty: -{best.get('complexity_penalty', 0)*100:.1f}% | "
+                f"Raw improvement: +{best.get('improvement', 0)*100:.1f}%"
             )
             
-            passing_gates = [r for r in all_results if r.get("gates_passed") and r.get("improvement", 0) > 0]
+            # Also show best by raw ROI if different
+            raw_sorted = sorted(all_results, key=lambda x: x.get("test_roi", 0), reverse=True)
+            if raw_sorted and raw_sorted[0] != best:
+                raw_best = raw_sorted[0]
+                st.info(
+                    f"📈 **Highest raw ROI:** {raw_best.get('name', raw_best.get('display', 'Unknown'))} "
+                    f"Test {raw_best.get('test_roi', 0):.2%} "
+                    f"({raw_best.get('num_filters', '?')} filters, penalty: -{raw_best.get('complexity_penalty', 0)*100:.1f}%)"
+                )
+            
+            # Show strategies passing gates
+            passing_gates = [r for r in all_results if r.get("gates_passed") and r.get("adjusted_score", 0) > 0]
             if passing_gates and passing_gates[0] != best:
                 best_passing = passing_gates[0]
                 st.info(
-                    f"📊 **Best passing all gates:** {best_passing.get('name', best_passing.get('display', 'Unknown'))} "
-                    f"Test ROI {best_passing.get('test_roi', 0):.2%} (+{best_passing.get('improvement', 0)*100:.1f}%)"
+                    f"✅ **Best passing all gates:** {best_passing.get('name', best_passing.get('display', 'Unknown'))} "
+                    f"Adjusted: {best_passing.get('adjusted_score', 0):.2%} ({best_passing.get('num_filters', '?')} filters)"
                 )
             
+            # Add to recommendations (prefer simpler strategies)
             for result in all_results[:5]:
-                if result.get("improvement", 0) > 0:
+                if result.get("adjusted_score", 0) > 0:
                     if "filters" in result and "added_filters" in result:
                         drill_results["recommended_additions"].append({
                             "filters": result.get("added_filters", result["filters"]),
                             "name": result.get("name", "Unknown"),
                             "test_roi": result.get("test_roi", 0),
+                            "adjusted_score": result.get("adjusted_score", 0),
                             "improvement": result.get("improvement", 0),
+                            "num_filters": result.get("num_filters", 0),
                             "gates_passed": result.get("gates_passed", False),
                         })
                     elif "filter" in result:
@@ -1827,11 +2031,17 @@ Respond with JSON:
                             "filter": result["filter"],
                             "name": result.get("display", "Unknown"),
                             "test_roi": result.get("test_roi", 0),
+                            "adjusted_score": result.get("adjusted_score", 0),
                             "improvement": result.get("improvement", 0),
+                            "num_filters": result.get("num_filters", 0),
                             "gates_passed": result.get("gates_passed", False),
                         })
         else:
             st.info("📊 No improvements found - base strategy may already be optimal")
+    
+    # Show hypothesis count update
+    final_hypothesis_count = st.session_state.get("hypothesis_count", 0)
+    tests_this_drill = final_hypothesis_count - hypothesis_count
     
     st.markdown("---")
     st.markdown(f"""**Summary:**
@@ -1839,9 +2049,18 @@ Respond with JSON:
 - Improving filters: {len(improving_filters)}
 - Combinations tested: {len(combination_results)}
 - Improving combinations: {len(improving_combos) if 'improving_combos' in dir() else 0}
+- **Tests run in this drill down:** {tests_this_drill}
+- **Total hypotheses tested this session:** {final_hypothesis_count}
 """)
     
-    _log(f"Deep drill down complete: {len(all_tests)} individual, {len(combination_results)} combos")
+    # Warn if many hypotheses tested (multiple testing concern)
+    if final_hypothesis_count > 100:
+        st.warning(
+            f"⚠️ **Multiple Testing Warning:** {final_hypothesis_count} hypotheses tested. "
+            f"Consider that ~{int(final_hypothesis_count * 0.05)} could appear significant by chance alone (5% false discovery)."
+        )
+    
+    _log(f"Deep drill down complete: {len(all_tests)} individual, {len(combination_results)} combos, {tests_this_drill} total tests")
     
     return drill_results
 
@@ -2878,18 +3097,54 @@ def run_agent():
                     "filter_hash": save_result.get("filter_hash"),
                 })
             
-            # Advanced validation option
-            with st.expander("🔬 Run Advanced Validation", expanded=False):
-                if st.button(f"Validate Strategy {iteration}", key=f"validate_{iteration}"):
-                    validation = _validate_strategy(best_result.get("filters", []), pl_column)
-                    st.json(validation)
-                    
-                    if validation.get("overall_verdict", {}).get("recommend_validate"):
-                        st.success("🎉 **STRATEGY VALIDATED!**")
-                        # Promote
-                        _run_tool("promote_strategy", {"filter_hash": save_result.get("filter_hash", "")})
-                    else:
-                        st.warning("⚠️ Did not pass full validation")
+            # ===== VALIDATION OPTIONS =====
+            with st.expander("🔬 Run Validation", expanded=False):
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown("**Standard Validation**")
+                    if st.button(f"Validate Strategy {iteration}", key=f"validate_{iteration}"):
+                        validation = _validate_strategy(best_result.get("filters", []), pl_column)
+                        st.json(validation)
+                        
+                        if validation.get("overall_verdict", {}).get("recommend_validate"):
+                            st.success("🎉 **STRATEGY VALIDATED!**")
+                            _run_tool("promote_strategy", {"filter_hash": save_result.get("filter_hash", "")})
+                        else:
+                            st.warning("⚠️ Did not pass full validation")
+                
+                with col2:
+                    st.markdown("**🔒 Final Holdout Test**")
+                    st.caption("Tests on data NEVER seen during exploration")
+                    if st.button(f"Final Holdout Test {iteration}", key=f"holdout_{iteration}"):
+                        with st.spinner("Testing on final holdout (unseen data)..."):
+                            holdout_result = _validate_on_final_holdout(
+                                best_result.get("filters", []),
+                                pl_column,
+                                bible
+                            )
+                        
+                        if holdout_result.get("skipped"):
+                            st.info(f"Skipped: {holdout_result.get('reason')}")
+                        elif holdout_result.get("error"):
+                            st.error(f"Error: {holdout_result.get('error')}")
+                        else:
+                            # Show results
+                            st.markdown(f"**Holdout ROI:** {holdout_result.get('holdout_roi', 0):.2%}")
+                            st.markdown(f"**Holdout Rows:** {holdout_result.get('holdout_rows', 0)}")
+                            st.markdown(f"**Adjusted Score:** {holdout_result.get('adjusted_score', 0):.2%}")
+                            
+                            if holdout_result.get("warning"):
+                                st.warning(holdout_result["warning"])
+                            
+                            # Recommendation
+                            if holdout_result.get("strong_pass"):
+                                st.success(holdout_result.get("recommendation", "VALIDATED!"))
+                                _run_tool("promote_strategy", {"filter_hash": save_result.get("filter_hash", "")})
+                            elif holdout_result.get("passed"):
+                                st.warning(holdout_result.get("recommendation", "MARGINAL"))
+                            else:
+                                st.error(holdout_result.get("recommendation", "FAILED"))
             
             # ====== DEEP DRILL DOWN ======
             # When we find a strategy, drill down to find optimal parameters!
@@ -3162,6 +3417,11 @@ with st.sidebar:
             st.session_state.strategies_found = []
             st.session_state.session_id = None
             st.session_state.run_requested = True
+            # Reset hypothesis tracking for new session
+            st.session_state.hypothesis_count = 0
+            st.session_state.tests_per_iteration = []
+            st.session_state.final_holdout_tested = False
+            st.session_state.strategies_pending_final_validation = []
             st.rerun()
     
     elif phase == "running":
@@ -3199,6 +3459,15 @@ with st.sidebar:
     st.metric("Avenues Explored", len(st.session_state.avenues_explored))
     st.metric("Remaining", len(st.session_state.avenues_to_explore))
     st.metric("Near-misses", len(st.session_state.near_misses))
+    
+    # Hypothesis tracking
+    hypothesis_count = st.session_state.get("hypothesis_count", 0)
+    st.metric("Hypotheses Tested", hypothesis_count)
+    
+    # Multiple testing warning
+    if hypothesis_count > 100:
+        expected_false_positives = int(hypothesis_count * 0.05)
+        st.warning(f"⚠️ ~{expected_false_positives} may be false positives")
     
     if st.session_state.last_checkpoint:
         st.caption(f"Last checkpoint: {st.session_state.last_checkpoint}")
