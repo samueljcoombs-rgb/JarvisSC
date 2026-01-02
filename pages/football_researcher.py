@@ -1260,6 +1260,24 @@ Respond with JSON:
         fallback = _generate_fallback_avenues(exploration, pl_column)
         parsed["prioritized_avenues"] = fallback.get("prioritized_avenues", [])
     
+    # POST-PROCESS: Ensure all avenues have promising_drift
+    # Get best drift from drift_analysis if available
+    drift_analysis = parsed.get("drift_analysis", {})
+    default_drift = drift_analysis.get("best_drift", "IN")
+    
+    for avenue in parsed.get("prioritized_avenues", []):
+        # If no promising_drift, try to extract from avenue name or use default
+        if not avenue.get("promising_drift"):
+            avenue_name = avenue.get("avenue", "")
+            if "DRIFT=IN" in avenue_name or "DRIFT IN" in avenue_name:
+                avenue["promising_drift"] = "IN"
+            elif "DRIFT=OUT" in avenue_name or "DRIFT OUT" in avenue_name:
+                avenue["promising_drift"] = "OUT"
+            elif "DRIFT=SAME" in avenue_name:
+                avenue["promising_drift"] = "SAME"
+            else:
+                avenue["promising_drift"] = default_drift
+    
     # Add situation_assessment as detailed_analysis for backward compatibility
     if parsed.get("situation_assessment") and not parsed.get("detailed_analysis"):
         parsed["detailed_analysis"] = parsed["situation_assessment"]
@@ -1271,37 +1289,114 @@ def _generate_fallback_avenues(exploration: Dict, pl_column: str) -> Dict:
     """Generate avenues from exploration data without LLM."""
     avenues = []
     
-    # Extract from mode distribution
-    mode_dist = exploration.get("mode_distribution", {}).get("result", [])
-    for m in mode_dist:
-        mode = m.get("MODE")
-        mean_pl = m.get(f"mean_{pl_column}", m.get("mean_BO 2.5 PL", 0))
-        if mode and mean_pl and mean_pl > -0.01:  # Not too negative
+    # First, get the best drift from drift distribution
+    drift_dist = exploration.get("drift_distribution", {}).get("result", [])
+    best_drift = "IN"  # Default
+    best_drift_pl = -999
+    for d in drift_dist:
+        drift_val = d.get("DRIFT IN / OUT")
+        drift_pl = d.get(f"mean_{pl_column}", d.get("mean_BO 2.5 PL", 0)) or 0
+        if drift_pl > best_drift_pl:
+            best_drift_pl = drift_pl
+            best_drift = drift_val
+    
+    # PRIORITY 1: MODE+MARKET+DRIFT combinations (the full picture)
+    combo_dist = exploration.get("mode_market_drift", {}).get("result", [])
+    for c in sorted(combo_dist, key=lambda x: x.get(f"mean_{pl_column}", x.get("mean_BO 2.5 PL", 0)) or 0, reverse=True)[:5]:
+        mode = c.get("MODE")
+        market = c.get("MARKET")
+        drift = c.get("DRIFT IN / OUT")
+        mean_pl = c.get(f"mean_{pl_column}", c.get("mean_BO 2.5 PL", 0)) or 0
+        count = c.get("_count", 0)
+        
+        if mode and market and mean_pl > 0 and count >= 100:
             avenues.append({
                 "rank": len(avenues) + 1,
-                "avenue": f"MODE={mode}",
-                "base_filters": [{"col": "MODE", "op": "=", "value": mode}],
-                "market_inefficiency_hypothesis": f"MODE {mode} shows {mean_pl:.4f} mean PL - worth exploring",
-                "confidence": "medium" if mean_pl > 0 else "low",
+                "avenue": f"MODE={mode}, MARKET={market}, DRIFT={drift}",
+                "base_filters": [
+                    {"col": "MODE", "op": "=", "value": mode},
+                    {"col": "MARKET", "op": "=", "value": market},
+                    {"col": "DRIFT IN / OUT", "op": "=", "value": drift}
+                ],
+                "promising_drift": drift,
+                "market_inefficiency_hypothesis": f"Combination shows {mean_pl:.4f} mean PL with {count} rows",
+                "confidence": "high" if count >= 500 else "medium",
             })
     
-    # Extract from market distribution
-    market_dist = exploration.get("market_distribution", {}).get("result", [])
-    for m in sorted(market_dist, key=lambda x: x.get(f"mean_{pl_column}", x.get("mean_BO 2.5 PL", 0)) or 0, reverse=True)[:5]:
-        market = m.get("MARKET")
-        mean_pl = m.get(f"mean_{pl_column}", m.get("mean_BO 2.5 PL", 0))
-        count = m.get("_count", 0)
-        if market and mean_pl and mean_pl > 0 and count >= 300:
-            avenues.append({
-                "rank": len(avenues) + 1,
-                "avenue": f"MARKET={market}",
-                "base_filters": [{"col": "MARKET", "op": "=", "value": market}],
-                "market_inefficiency_hypothesis": f"MARKET {market} shows {mean_pl:.4f} mean PL with {count} rows",
-                "confidence": "medium",
-            })
+    # PRIORITY 2: MODE+MARKET combinations (without forcing drift)
+    if len(avenues) < 4:
+        mode_market = exploration.get("mode_market", {}).get("result", [])
+        if not mode_market:
+            # Build from mode_market_drift by aggregating
+            mode_market_agg = {}
+            for c in combo_dist:
+                key = (c.get("MODE"), c.get("MARKET"))
+                if key not in mode_market_agg:
+                    mode_market_agg[key] = {"count": 0, "sum_pl": 0}
+                mode_market_agg[key]["count"] += c.get("_count", 0)
+                mode_market_agg[key]["sum_pl"] += (c.get(f"mean_{pl_column}", 0) or 0) * c.get("_count", 0)
+            mode_market = [
+                {"MODE": k[0], "MARKET": k[1], "_count": v["count"], f"mean_{pl_column}": v["sum_pl"]/v["count"] if v["count"] > 0 else 0}
+                for k, v in mode_market_agg.items()
+            ]
+        
+        for m in sorted(mode_market, key=lambda x: x.get(f"mean_{pl_column}", 0) or 0, reverse=True)[:4]:
+            mode = m.get("MODE")
+            market = m.get("MARKET")
+            mean_pl = m.get(f"mean_{pl_column}", 0) or 0
+            count = m.get("_count", 0)
+            
+            if mode and market and mean_pl > 0 and count >= 200:
+                # Check if we already have this combo
+                existing = [a for a in avenues if f"MODE={mode}" in a["avenue"] and f"MARKET={market}" in a["avenue"]]
+                if not existing:
+                    avenues.append({
+                        "rank": len(avenues) + 1,
+                        "avenue": f"MODE={mode}, MARKET={market}",
+                        "base_filters": [
+                            {"col": "MODE", "op": "=", "value": mode},
+                            {"col": "MARKET", "op": "=", "value": market}
+                        ],
+                        "promising_drift": best_drift,  # Use overall best drift
+                        "market_inefficiency_hypothesis": f"MODE+MARKET combo shows {mean_pl:.4f} mean PL with {count} rows. Try with DRIFT={best_drift}",
+                        "confidence": "medium",
+                    })
+    
+    # PRIORITY 3: Individual MODE/MARKET only if we still need more avenues
+    if len(avenues) < 4:
+        mode_dist = exploration.get("mode_distribution", {}).get("result", [])
+        for m in mode_dist:
+            mode = m.get("MODE")
+            mean_pl = m.get(f"mean_{pl_column}", m.get("mean_BO 2.5 PL", 0))
+            if mode and mean_pl and mean_pl > -0.01:
+                avenues.append({
+                    "rank": len(avenues) + 1,
+                    "avenue": f"MODE={mode}",
+                    "base_filters": [{"col": "MODE", "op": "=", "value": mode}],
+                    "promising_drift": best_drift,
+                    "market_inefficiency_hypothesis": f"MODE {mode} shows {mean_pl:.4f} mean PL - explore with different MARKETs and DRIFT={best_drift}",
+                    "confidence": "low",
+                })
+    
+    if len(avenues) < 4:
+        market_dist = exploration.get("market_distribution", {}).get("result", [])
+        for m in sorted(market_dist, key=lambda x: x.get(f"mean_{pl_column}", x.get("mean_BO 2.5 PL", 0)) or 0, reverse=True)[:5]:
+            market = m.get("MARKET")
+            mean_pl = m.get(f"mean_{pl_column}", m.get("mean_BO 2.5 PL", 0))
+            count = m.get("_count", 0)
+            if market and mean_pl and mean_pl > 0 and count >= 300:
+                avenues.append({
+                    "rank": len(avenues) + 1,
+                    "avenue": f"MARKET={market}",
+                    "base_filters": [{"col": "MARKET", "op": "=", "value": market}],
+                    "promising_drift": best_drift,
+                    "market_inefficiency_hypothesis": f"MARKET {market} shows {mean_pl:.4f} mean PL with {count} rows - try with DRIFT={best_drift}",
+                    "confidence": "low",
+                })
     
     return {
-        "detailed_analysis": "Fallback analysis: Generated avenues from exploration data distribution. LLM analysis was not available.",
+        "detailed_analysis": f"Fallback analysis: Generated avenues from exploration data. Best overall DRIFT appears to be {best_drift} ({best_drift_pl:.4f} mean PL). LLM analysis was not available.",
+        "drift_analysis": {"best_drift": best_drift, "drift_impact": f"Best drift ({best_drift}) shows {best_drift_pl:.4f} mean PL"},
         "prioritized_avenues": avenues[:8],
     }
 
