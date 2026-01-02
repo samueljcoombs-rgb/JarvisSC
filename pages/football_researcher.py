@@ -174,7 +174,7 @@ def _filter_hash(filters: List[Dict]) -> str:
     return hashlib.md5(json.dumps(filters, sort_keys=True, default=str).encode()).hexdigest()[:12]
 
 # ============================================================
-# OpenAI Client (GPT-4o)
+# OpenAI Client (GPT-5)
 # ============================================================
 
 try:
@@ -194,8 +194,8 @@ def _get_client() -> Optional[OpenAI]:
     return OpenAI(api_key=api_key)
 
 def _get_model() -> str:
-    """Get the OpenAI model to use - defaults to gpt-4o, can override with env var."""
-    return os.getenv("OPENAI_MODEL") or os.getenv("PREFERRED_OPENAI_MODEL") or "gpt-4o"
+    """Get the OpenAI model to use - defaults to gpt-5, can override with env var."""
+    return os.getenv("OPENAI_MODEL") or os.getenv("PREFERRED_OPENAI_MODEL") or "gpt-5"
 
 # ============================================================
 # Session State
@@ -566,7 +566,7 @@ def _format_bible(bible: Dict) -> str:
 {rules_text}"""
 
 # ============================================================
-# LLM Functions (GPT-4o)
+# LLM Functions (GPT-5)
 # ============================================================
 
 SYSTEM_PROMPT = """You are a SENIOR QUANTITATIVE RESEARCHER at a top hedge fund. 
@@ -837,12 +837,19 @@ def _llm(context: str, question: str, max_tokens: int = 3000) -> str:
         }
         
         # Different models use different token params
-        if model.startswith("o1"):
+        # - Newer reasoning models (e.g. GPT-5 and o-series) prefer `max_completion_tokens`
+        # - Legacy models still accept `max_tokens`
+        if model.startswith(("gpt-5", "o")):
             params["max_completion_tokens"] = max_tokens
         else:
             params["max_tokens"] = max_tokens
         
         response = client.chat.completions.create(**params)
+        # Helpful sanity-check: confirm which model actually served the request
+        try:
+            _log(f"Served by model: {getattr(response, 'model', 'unknown')}")
+        except Exception:
+            pass
         content = response.choices[0].message.content
         _log(f"LLM response received: {len(content) if content else 0} chars")
         return content or ""
@@ -1525,6 +1532,14 @@ def _deep_drill_down(base_filters: List[Dict], pl_column: str, bible: Dict) -> D
             groups = query_result.get("result", []) if query_result else []
             _log(f"Found {len(groups)} groups for {col_name}")
             
+            # Debug: show if query failed or returned no groups
+            if not groups:
+                _log(f"WARNING: No groups returned for {col_name}. Query result: {query_result}")
+                if query_result and query_result.get("error"):
+                    st.warning(f"⚠️ Could not test {col_name}: {query_result.get('error')}")
+                elif not query_result:
+                    st.warning(f"⚠️ Query for {col_name} returned nothing")
+            
             for group in groups:
                 value = group.get(col_name)
                 count = group.get("_count", 0)
@@ -1884,6 +1899,19 @@ Respond with JSON:
     
     combination_results.sort(key=lambda x: x["improvement"], reverse=True)
     drill_results["combinations"] = combination_results
+    
+    # Also set best_combinations for the queueing logic
+    drill_results["best_combinations"] = [
+        {
+            "features": combo.get("name", "").split(" + ") if " + " in combo.get("name", "") else [combo.get("name", "")],
+            "filters": combo.get("filters", []),
+            "added_filters": combo.get("added_filters", []),
+            "test_roi": combo.get("test_roi", 0),
+            "gates_passed": combo.get("gates_passed", False),
+        }
+        for combo in combination_results[:5]
+        if combo.get("improvement", 0) > 0
+    ]
     
     improving_combos = [c for c in combination_results if c["improvement"] > 0]
     
@@ -3161,28 +3189,55 @@ def run_agent():
             
             # Add recommended filters as new avenues to explore
             for rec in drill_results.get("recommended_additions", [])[:3]:
-                new_filters = best_result.get("filters", []) + [rec]
+                # Extract the actual filter(s) from the recommendation
+                rec_filter = rec.get("filter")  # Single filter case
+                rec_filters = rec.get("filters", [])  # Multiple filters case
+                rec_name = rec.get("name", "Unknown refinement")
+                
+                if rec_filter:
+                    # Single filter - add to base filters
+                    new_filters = best_result.get("filters", []) + [rec_filter]
+                elif rec_filters:
+                    # Multiple filters from combination
+                    new_filters = best_result.get("filters", []) + rec_filters
+                else:
+                    continue  # Skip if no valid filters
+                
                 new_avenue = {
-                    "avenue": f"Drill Down: {current_avenue.get('avenue', '')} + {rec.get('col')}",
+                    "avenue": f"Drill Down: {current_avenue.get('avenue', '')} + {rec_name}",
                     "base_filters": new_filters,
-                    "market_inefficiency_hypothesis": rec.get("reasoning", ""),
+                    "market_inefficiency_hypothesis": f"Tested refinement showing {rec.get('test_roi', 0):.1%} test ROI",
                     "source": "deep_drill_down",
-                    "expected_improvement": rec.get("expected_improvement", 0),
+                    "expected_improvement": rec.get("improvement", 0),
                 }
                 avenues_remaining.insert(0, new_avenue)
-                st.markdown(f"✅ Queued for testing: **{rec.get('col')}** (expected +{rec.get('expected_improvement', 0):.1%})")
+                st.markdown(f"✅ Queued for testing: **{rec_name}** (expected +{rec.get('improvement', 0):.1%})")
+            
+            # Also save drill down results to session state for review
+            if "drill_down_history" not in st.session_state:
+                st.session_state.drill_down_history = []
+            st.session_state.drill_down_history.append({
+                "timestamp": datetime.now().isoformat(),
+                "base_filters": best_result.get("filters", []),
+                "improving_filters": [f for f in drill_results.get("individual_tests", []) if f.get("improvement", 0) > 0],
+                "combinations": drill_results.get("combinations", []),
+                "recommended": drill_results.get("recommended_additions", []),
+            })
             
             # If we found good combinations, add those too
             for combo in drill_results.get("best_combinations", [])[:2]:
                 if combo.get("gates_passed") and combo.get("test_roi", 0) > best_result.get("test_roi", 0):
+                    combo_features = combo.get("features", [])
+                    if isinstance(combo_features, str):
+                        combo_features = [combo_features]
                     new_avenue = {
-                        "avenue": f"Combo: {' + '.join(combo.get('features', []))}",
+                        "avenue": f"Combo: {' + '.join(combo_features)}",
                         "base_filters": combo.get("filters", []),
                         "market_inefficiency_hypothesis": f"Combined top features show {combo['test_roi']:.1%} test ROI",
                         "source": "deep_drill_down_combo",
                     }
                     avenues_remaining.insert(0, new_avenue)
-                    st.markdown(f"✅ Queued promising combination: **{' + '.join(combo.get('features', []))}** ({combo['test_roi']:.1%})")
+                    st.markdown(f"✅ Queued promising combination: **{' + '.join(combo_features)}** ({combo['test_roi']:.1%})")
             
             st.markdown("---")
             
@@ -3351,7 +3406,7 @@ If the user gives a direction (e.g., "try BTTS more"), acknowledge and incorpora
 # ============================================================
 
 st.title("⚽ Football Research Agent v6")
-st.caption("Deep Analysis Edition + Local Compute + 38 Tools + Persistence + GPT-4o")
+st.caption("Deep Analysis Edition + Local Compute + 38 Tools + Persistence + GPT-5")
 
 # Check server
 server_status = _check_server()
@@ -3485,6 +3540,28 @@ with st.sidebar:
         result = _run_tool("query_learnings", {"limit": 10})
         st.json(result)
     
+    # Drill down history viewer
+    drill_history = st.session_state.get("drill_down_history", [])
+    if drill_history:
+        with st.expander(f"🔬 Drill Down History ({len(drill_history)} runs)", expanded=False):
+            for i, dd in enumerate(reversed(drill_history[-5:])):  # Show last 5
+                st.markdown(f"**Run {len(drill_history) - i}** - {dd.get('timestamp', '?')[:16]}")
+                
+                improving = dd.get("improving_filters", [])
+                if improving:
+                    st.markdown(f"  📈 {len(improving)} improving filters found")
+                    # Show top 3
+                    for f in sorted(improving, key=lambda x: x.get("improvement", 0), reverse=True)[:3]:
+                        st.caption(f"    • {f.get('display', '?')}: +{f.get('improvement', 0)*100:.1f}%")
+                
+                combos = dd.get("combinations", [])
+                if combos:
+                    good_combos = [c for c in combos if c.get("improvement", 0) > 0]
+                    if good_combos:
+                        st.markdown(f"  🎯 {len(good_combos)} improving combinations")
+                
+                st.markdown("---")
+    
     st.divider()
     
     # Clear button
@@ -3499,7 +3576,7 @@ with st.sidebar:
             for line in st.session_state.log[-30:]:
                 st.text(line)
     
-    st.caption("v6.0 - GPT-4o + Local Compute")
+    st.caption("v6.0 - GPT-5 + Local Compute")
 
 # Main content
 if st.session_state.agent_phase == "paused":
@@ -3560,7 +3637,7 @@ elif st.session_state.agent_phase == "idle":
 
 **From v5:**
 1. **BATCH TESTING**: Each avenue tested with 8-10 variations
-2. **DEEP ANALYSIS**: GPT-4o analyzes after EVERY phase
+2. **DEEP ANALYSIS**: GPT-5 analyzes after EVERY phase
 3. **NO PREMATURE CONCLUSIONS**: Explores ALL avenues
 4. **COMBINATION SCANNING**: Auto-scans when base shows promise
 5. **LEARNING ACCUMULATION**: Tracks insights across iterations
@@ -3574,7 +3651,7 @@ elif st.session_state.agent_phase == "idle":
 11. **PAUSE/RESUME**: Control research flow
 12. **ASK AGENT**: Query when paused
 13. **CRASH RECOVERY**: Checkpoint restore
-14. **GPT-4o**: Latest model for analysis
+14. **GPT-5**: Latest model for analysis
 """)
 
 elif st.session_state.agent_phase == "complete":
