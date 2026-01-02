@@ -1488,6 +1488,20 @@ def _deep_drill_down(base_filters: List[Dict], pl_column: str, bible: Dict) -> D
     st.markdown("**Phase 4: AI Strategic Analysis**")
     
     # Build context for AI
+    # Build trend strings outside f-string to avoid quote nesting issues
+    trend_lines = []
+    for col, trend in numeric_trends.items():
+        sorted_trend = sorted(trend, key=lambda x: x['min'])
+        trend_str = ' → '.join([f"{t['label']}:{t['test_roi']:.1%}" for t in sorted_trend])
+        trend_lines.append(f"- {col}: {trend_str}")
+    trends_text = chr(10).join(trend_lines) if trend_lines else "No numeric trends"
+    
+    improving_lines = []
+    for f in improving_filters[:10]:
+        gates_str = 'PASS' if f['gates_passed'] else 'FAIL'
+        improving_lines.append(f"- {f['display']}: Test {f['test_roi']:.2%} (+{f['improvement']*100:.1f}%), {f['test_rows']} rows, gates={gates_str}")
+    improving_text = chr(10).join(improving_lines) if improving_lines else "No improving filters"
+    
     analysis_context = f"""
 ## Deep Drill Down Results for {pl_column}
 
@@ -1496,10 +1510,10 @@ Filters: {json.dumps(base_filters)}
 Train ROI: {base_train_roi:.2%}, Test ROI: {base_test_roi:.2%} ({base_test_rows} rows)
 
 ### Top Improving Filters (sorted by improvement)
-{chr(10).join([f"- {f['display']}: Test {f['test_roi']:.2%} (+{f['improvement']*100:.1f}%), {f['test_rows']} rows, gates={'PASS' if f['gates_passed'] else 'FAIL'}" for f in improving_filters[:10]])}
+{improving_text}
 
 ### Numeric Trends
-{chr(10).join([f"- {col}: {' → '.join([f'{t['label']}:{t['test_roi']:.1%}' for t in sorted(trend, key=lambda x: x['min'])])}" for col, trend in numeric_trends.items()])}
+{trends_text}
 
 ### All Test Results Count
 - Total tests: {len(all_tests)}
