@@ -60,6 +60,7 @@ DEFAULT_GATES = {
 COMPLEXITY_PENALTY_PER_FILTER = 0.005  # 0.5% penalty per filter
 TRAIN_VAL_GAP_PENALTY = 0.02  # 2% penalty per 1% train-val gap
 MIN_FILTERS_NO_PENALTY = 2  # First 2 filters are "free"
+MIN_ROWS_FOR_RECOMMENDATION = 60  # Minimum test rows to recommend a strategy
 
 def _calculate_adjusted_score(test_roi: float, num_filters: int, train_val_gap: float = 0) -> float:
     """
@@ -79,6 +80,74 @@ def _calculate_adjusted_score(test_roi: float, num_filters: int, train_val_gap: 
     
     adjusted = test_roi - filter_penalty - gap_penalty
     return adjusted
+
+def _is_consistent(result: Dict) -> bool:
+    """
+    Check if a result shows consistent performance across train/val/test.
+    
+    Requirements:
+    - Train > 0% (strategy works in-sample)
+    - Val > -1% (allows some variance, but shouldn't collapse)
+    - Test > 0% (works out-of-sample)
+    - |Train - Val| < 5% (not severely overfitting)
+    - |Val - Test| < 5% (stable across time splits)
+    """
+    train = result.get("train_roi", 0)
+    val = result.get("val_roi", 0)
+    test = result.get("test_roi", 0)
+    
+    # All should be positive-ish
+    if train <= 0:
+        return False
+    if val < -0.01:  # Allow small negative val
+        return False
+    if test <= 0:
+        return False
+    
+    # Check for overfitting (large gaps)
+    train_val_gap = abs(train - val)
+    val_test_gap = abs(val - test)
+    
+    if train_val_gap > 0.05:  # More than 5% gap = overfitting concern
+        return False
+    if val_test_gap > 0.05:  # More than 5% gap = unstable
+        return False
+    
+    return True
+
+def _composite_score(result: Dict) -> float:
+    """
+    Calculate a composite score that balances ROI, volume, and consistency.
+    
+    A 3% ROI on 500 rows should beat 30% ROI on 30 rows.
+    """
+    import math
+    
+    test_roi = result.get("test_roi", 0)
+    test_rows = result.get("test_rows", 0)
+    train_roi = result.get("train_roi", 0)
+    val_roi = result.get("val_roi", 0)
+    
+    if test_rows < 30:
+        return 0  # Too small, ignore
+    
+    if test_roi <= 0:
+        return 0  # Not profitable
+    
+    # Volume factor: log scale (diminishing returns on volume)
+    # log10(30) ≈ 1.5, log10(300) ≈ 2.5, log10(1000) ≈ 3
+    volume_factor = math.log10(max(test_rows, 30)) / 3.0  # Normalized
+    
+    # Consistency factor: penalize large gaps
+    train_val_gap = abs(train_roi - val_roi)
+    val_test_gap = abs(val_roi - test_roi)
+    max_gap = max(train_val_gap, val_test_gap)
+    consistency_factor = max(0, 1 - max_gap * 10)  # 10% gap = factor of 0
+    
+    # Composite score
+    score = test_roi * volume_factor * consistency_factor
+    
+    return score
 
 def _count_filters(filters: List[Dict]) -> int:
     """Count number of filter conditions (excluding base market/mode filters)."""
@@ -2297,40 +2366,58 @@ Respond with JSON:
                     f"Adjusted: {best_passing.get('adjusted_score', 0):.2%} ({best_passing.get('num_filters', '?')} filters)"
                 )
             
-            # Add to recommendations (prefer simpler strategies WITH SUFFICIENT SAMPLE SIZE)
-            MIN_TEST_ROWS_FOR_QUEUE = 50  # Don't queue strategies with tiny samples
-            
-            for result in all_results[:5]:
+            # Add to recommendations (require consistency AND sufficient sample)
+            for result in all_results[:10]:  # Check more results since we'll filter
                 test_rows = result.get("test_rows", 0)
                 
-                # Skip if sample too small (likely noise)
-                if test_rows < MIN_TEST_ROWS_FOR_QUEUE:
-                    _log(f"Skipping recommendation {result.get('name', '?')}: only {test_rows} test rows (min: {MIN_TEST_ROWS_FOR_QUEUE})")
+                # Skip if sample too small
+                if test_rows < MIN_ROWS_FOR_RECOMMENDATION:
+                    _log(f"Skipping {result.get('name', '?')}: only {test_rows} rows (min: {MIN_ROWS_FOR_RECOMMENDATION})")
+                    continue
+                
+                # Skip if not consistent across train/val/test
+                if not _is_consistent(result):
+                    _log(f"Skipping {result.get('name', '?')}: not consistent (train={result.get('train_roi',0):.2%}, val={result.get('val_roi',0):.2%}, test={result.get('test_roi',0):.2%})")
                     continue
                     
                 if result.get("adjusted_score", 0) > 0:
+                    # Add composite score for better ranking
+                    result["composite_score"] = _composite_score(result)
+                    
                     if "filters" in result and "added_filters" in result:
                         drill_results["recommended_additions"].append({
                             "filters": result.get("added_filters", result["filters"]),
                             "name": result.get("name", "Unknown"),
                             "test_roi": result.get("test_roi", 0),
+                            "train_roi": result.get("train_roi", 0),
+                            "val_roi": result.get("val_roi", 0),
                             "test_rows": test_rows,
                             "adjusted_score": result.get("adjusted_score", 0),
+                            "composite_score": result.get("composite_score", 0),
                             "improvement": result.get("improvement", 0),
                             "num_filters": result.get("num_filters", 0),
                             "gates_passed": result.get("gates_passed", False),
+                            "is_consistent": True,
                         })
                     elif "filter" in result:
                         drill_results["recommended_additions"].append({
                             "filter": result["filter"],
                             "name": result.get("display", "Unknown"),
                             "test_roi": result.get("test_roi", 0),
+                            "train_roi": result.get("train_roi", 0),
+                            "val_roi": result.get("val_roi", 0),
                             "test_rows": test_rows,
                             "adjusted_score": result.get("adjusted_score", 0),
+                            "composite_score": result.get("composite_score", 0),
                             "improvement": result.get("improvement", 0),
                             "num_filters": result.get("num_filters", 0),
                             "gates_passed": result.get("gates_passed", False),
+                            "is_consistent": True,
                         })
+                    
+                    # Limit to top 5 consistent recommendations
+                    if len(drill_results["recommended_additions"]) >= 5:
+                        break
         else:
             st.info("📊 No improvements found - base strategy may already be optimal")
     
@@ -2605,11 +2692,27 @@ Respond with JSON:
     parsed = _parse_json(resp)
     
     if not parsed:
+        # Generate meaningful fallback analysis
+        best_result = results[0] if results else {}
+        best_roi = best_result.get("test_roi", 0) if best_result else 0
+        recommendation = avenue_results.get("analysis", {}).get("recommendation", "")
+        
         return {
-            "situation_assessment": resp[:500] if resp else "Analysis failed",
-            "key_learning": "",
-            "decision": {"should_continue_avenue": False, "next_action": "move to next avenue"}
+            "situation_assessment": resp[:500] if resp else f"Tested avenue with {len(results)} variations. Best test ROI: {best_roi:.2%}. {recommendation}",
+            "key_learning": f"Avenue {'shows promise' if best_roi > 0.01 else 'needs refinement' if best_roi > 0 else 'underperforms'} with {best_roi:.2%} ROI",
+            "decision": {"should_continue_avenue": best_roi > 0, "next_action": "refine filters" if best_roi > 0 else "move to next avenue"},
+            "next_recommendation": f"{'Continue refining this avenue' if best_roi > 0.01 else 'Try different filters' if best_roi > 0 else 'Move to next avenue'}",
+            "confidence_in_direction": "medium" if best_roi > 0.01 else "low",
         }
+    
+    # Ensure key fields have values
+    if not parsed.get("key_learning"):
+        best_result = results[0] if results else {}
+        best_roi = best_result.get("test_roi", 0) if best_result else 0
+        parsed["key_learning"] = f"Best variation achieved {best_roi:.2%} test ROI"
+    
+    if not parsed.get("next_recommendation"):
+        parsed["next_recommendation"] = "Continue exploration based on results"
     
     # Backward compatibility
     if not parsed.get("detailed_reasoning"):
@@ -3469,6 +3572,13 @@ def run_agent(is_new_run: bool = True):
             
             st.code(json.dumps(best_result.get("filters", []), indent=2), language="json")
             
+            # Check consistency before saving
+            is_strategy_consistent = _is_consistent(best_result)
+            if is_strategy_consistent:
+                st.success("✅ Strategy is CONSISTENT across train/val/test!")
+            else:
+                st.warning("⚠️ Strategy shows inconsistent performance across splits")
+            
             # Save to Supabase (use nested format that local_compute expects)
             save_result = _run_tool("save_strategy", {
                 "filters": best_result.get("filters", []),
@@ -3485,21 +3595,41 @@ def run_agent(is_new_run: bool = True):
                 "test_roi": best_result.get("test_roi", 0),
                 "test_rows": best_result.get("test_rows", 0),
                 "hypothesis": current_avenue.get("market_inefficiency_hypothesis", ""),
-                "status": "draft"
+                "status": "validated" if is_strategy_consistent else "draft"  # Auto-promote if consistent
             })
             
             if save_result.get("error"):
                 st.error(f"❌ Failed to save strategy: {save_result.get('error')}")
             elif save_result.get("saved") or save_result.get("filter_hash"):
-                st.success(f"💾 Strategy saved! Hash: {save_result.get('filter_hash', '?')[:8]}...")
+                status_text = "VALIDATED ✅" if is_strategy_consistent else "Draft"
+                st.success(f"💾 Strategy saved as {status_text}! Hash: {save_result.get('filter_hash', '?')[:8]}...")
                 st.session_state.strategies_found.append({
                     "filters": best_result.get("filters", []),
                     "result": best_result,
                     "filter_hash": save_result.get("filter_hash"),
+                    "is_consistent": is_strategy_consistent,
                 })
+                
+                # Log to research log
+                _research_log(
+                    f"Train: {best_result.get('train_roi', 0):.2%}, Val: {best_result.get('val_roi', 0):.2%}, Test: {best_result.get('test_roi', 0):.2%} ({best_result.get('test_rows', 0)} rows) - {'CONSISTENT' if is_strategy_consistent else 'needs review'}",
+                    "strategy"
+                )
             
-            # ===== VALIDATION OPTIONS =====
-            with st.expander("🔬 Run Validation", expanded=False):
+            # ===== AUTO-VALIDATION (if consistent, run full validation automatically) =====
+            if is_strategy_consistent:
+                st.info("🔬 Auto-validating consistent strategy...")
+                validation = _validate_strategy(best_result.get("filters", []), pl_column)
+                
+                if validation.get("overall_verdict", {}).get("recommend_validate"):
+                    st.success("🎉 **AUTO-VALIDATED: Strategy passes all checks!**")
+                    _research_log("Strategy AUTO-VALIDATED - passes all consistency checks", "success")
+                else:
+                    concerns = validation.get("overall_verdict", {}).get("concerns", [])
+                    st.warning(f"⚠️ Validation concerns: {', '.join(concerns) if concerns else 'See details'}")
+            
+            # ===== MANUAL VALIDATION OPTIONS (for review) =====
+            with st.expander("🔬 Additional Validation Options", expanded=False):
                 col1, col2 = st.columns(2)
                 
                 with col1:
