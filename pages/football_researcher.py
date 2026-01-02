@@ -1554,9 +1554,10 @@ Respond with JSON:
 }"""
     
     with st.spinner("🧠 AI analyzing patterns and deciding next tests..."):
-        ai_response = _call_gpt4o(analysis_context, ai_question)
+        raw_response = _llm(analysis_context, ai_question)
+        ai_response = _parse_json(raw_response)
     
-    if ai_response:
+    if ai_response and not ai_response.get("error"):
         st.markdown(f"🧠 **AI Analysis:** {ai_response.get('pattern_analysis', 'N/A')[:500]}")
         st.markdown(f"💡 **Key Insight:** {ai_response.get('key_insight', 'N/A')}")
         
