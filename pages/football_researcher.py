@@ -833,8 +833,12 @@ def _llm(context: str, question: str, max_tokens: int = 3000) -> str:
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": f"{context}\n\n---\n{question}"}
             ],
-            "temperature": 0.7,
         }
+
+        # Sampling params: Some reasoning models (GPT-5 family / o-series) reject `temperature` unless using special settings.
+        # Keep behavior the same for non-reasoning models.
+        if not model.startswith(("gpt-5", "o")):
+            params["temperature"] = 0.7
         
         # Different models use different token params
         # - Newer reasoning models (e.g. GPT-5 and o-series) prefer `max_completion_tokens`
