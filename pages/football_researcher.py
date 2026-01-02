@@ -1244,15 +1244,13 @@ def _explore_avenue(avenue: Dict, pl_column: str, bible: Dict, exploration_analy
 
 def _deep_drill_down(base_filters: List[Dict], pl_column: str, bible: Dict) -> Dict:
     """
-    AI-DRIVEN DEEP DRILL DOWN on a promising filter combination.
+    COMPREHENSIVE AI-DRIVEN DEEP DRILL DOWN.
     
-    This does what a senior analyst would do:
-    1. Get baseline performance
-    2. Test ALL categorical values with proper train/val/test
-    3. For numerics: test LOW/MID/HIGH to see TRENDS
-    4. AI analyzes patterns and decides what to explore next
-    5. Test 2-way and 3-way combinations
-    6. AI synthesizes findings and recommends best path
+    Tests EVERYTHING systematically:
+    1. ALL categorical values (DRIFT, LEAGUE, etc.)
+    2. ALL numeric ranges (multiple odds columns, points, etc.)
+    3. MANY combinations (cat+num, cat+cat, num+num)
+    4. AI analysis between phases to guide exploration
     """
     _log(f"🔬 DEEP DRILL DOWN on: {base_filters}")
     
@@ -1260,12 +1258,11 @@ def _deep_drill_down(base_filters: List[Dict], pl_column: str, bible: Dict) -> D
     drill_results = {
         "base_filters": base_filters,
         "individual_tests": [],
-        "numeric_trends": {},
         "combinations": [],
         "recommended_additions": [],
     }
     
-    st.markdown("### 🔬 Deep Drill Down Analysis")
+    st.markdown("### 🔬 Comprehensive Deep Drill Down")
     
     # ===== PHASE 1: Get Baseline =====
     st.markdown("**Phase 1: Establishing Baseline**")
@@ -1281,57 +1278,82 @@ def _deep_drill_down(base_filters: List[Dict], pl_column: str, bible: Dict) -> D
     
     st.markdown(f"📊 **Baseline:** Train {base_train_roi:.2%} → Test {base_test_roi:.2%} ({base_test_rows} rows)")
     
-    # ===== PHASE 2: Systematic Feature Testing =====
-    st.markdown("**Phase 2: Testing Every Feature Value**")
+    # ===== DEFINE ALL FEATURES TO TEST =====
     
-    CATEGORICAL_COLS = ["DRIFT IN / OUT", "LEAGUE", "xG MARKET", "Home Form Rag", "Away Form Rag"]
+    # Categorical columns - test EVERY value
+    CATEGORICAL_COLS = [
+        "DRIFT IN / OUT",
+        "LEAGUE", 
+        "xG MARKET",
+        "Home Form Rag",
+        "Away Form Rag",
+        "SEASON",
+    ]
     
-    # For numerics, test multiple brackets to see TRENDS
+    # Numeric columns with multiple test approaches
+    # For each: test brackets AND thresholds (>= X, <= X)
     NUMERIC_TESTS = {
-        "ACTUAL ODDS": [
-            ("Very Low", 1.1, 1.3),
-            ("Low", 1.3, 1.5),
-            ("Low-Mid", 1.5, 1.7),
-            ("Mid", 1.7, 2.0),
-            ("Mid-High", 2.0, 2.5),
-            ("High", 2.5, 3.5),
-        ],
-        "% DRIFT": [
-            ("Minimal", 0, 2),
-            ("Low", 2, 4),
-            ("Medium", 4, 7),
-            ("High", 7, 12),
-            ("Very High", 12, 25),
-        ],
-        "STRIKE RATE": [
-            ("Low", 20, 40),
-            ("Medium", 40, 55),
-            ("Good", 55, 65),
-            ("High", 65, 80),
-        ],
-        "Home Avg Points": [
-            ("Weak", 0, 1.2),
-            ("Average", 1.2, 1.6),
-            ("Good", 1.6, 2.0),
-            ("Strong", 2.0, 2.5),
-        ],
+        "ACTUAL ODDS": {
+            "brackets": [(1.1, 1.3), (1.3, 1.5), (1.5, 1.8), (1.8, 2.2), (2.2, 3.0)],
+            "thresholds_gte": [1.3, 1.5, 1.8],
+            "thresholds_lte": [1.5, 1.8, 2.0],
+        },
+        "% DRIFT": {
+            "brackets": [(0, 3), (3, 6), (6, 10), (10, 20)],
+            "thresholds_gte": [3, 5, 8],
+            "thresholds_lte": [3, 5, 8],
+        },
+        "STRIKE RATE": {
+            "brackets": [(30, 50), (50, 60), (60, 70), (70, 90)],
+            "thresholds_gte": [50, 60, 70],
+            "thresholds_lte": [50, 60],
+        },
+        "Home Avg Points": {
+            "brackets": [(0, 1.0), (1.0, 1.4), (1.4, 1.8), (1.8, 2.2), (2.2, 3.0)],
+            "thresholds_gte": [1.0, 1.2, 1.4, 1.6, 1.8, 2.0],
+            "thresholds_lte": [1.2, 1.4, 1.6],
+        },
+        "Away Avg Points": {
+            "brackets": [(0, 1.0), (1.0, 1.4), (1.4, 1.8), (1.8, 2.2)],
+            "thresholds_gte": [1.0, 1.2, 1.4],
+            "thresholds_lte": [1.2, 1.4],
+        },
+        "O2.5 Odds": {
+            "brackets": [(1.3, 1.6), (1.6, 2.0), (2.0, 2.5), (2.5, 3.5)],
+            "thresholds_gte": [1.8, 2.0, 2.5],
+            "thresholds_lte": [1.8, 2.0, 2.5],
+        },
+        "BTTS Y Odds": {
+            "brackets": [(1.4, 1.7), (1.7, 2.0), (2.0, 2.5)],
+            "thresholds_gte": [1.6, 1.8, 2.0],
+            "thresholds_lte": [1.8, 2.0],
+        },
+        "Points Diff": {
+            "brackets": [(-1.5, -0.5), (-0.5, 0.5), (0.5, 1.5), (1.5, 3.0)],
+            "thresholds_gte": [0, 0.5, 1.0],
+            "thresholds_lte": [0, -0.5],
+        },
     }
     
     all_tests = []
     improving_filters = []
+    categorical_results = {}
+    numeric_results = {}
     
     progress = st.progress(0)
     status = st.empty()
     
-    total_tests = len(CATEGORICAL_COLS) * 5 + sum(len(v) for v in NUMERIC_TESTS.values())  # Estimate
+    total_tests = 100  # Rough estimate
     test_count = 0
     
-    # Test all categorical values
+    # ===== PHASE 2A: Test ALL Categorical Values =====
+    st.markdown("**Phase 2A: Testing Categorical Features**")
+    
     for col_name in CATEGORICAL_COLS:
         status.text(f"Testing {col_name}...")
+        categorical_results[col_name] = []
         
         try:
-            # Get unique values
             query_result = _run_tool("query_data", {
                 "filters": base_filters,
                 "group_by": [col_name],
@@ -1339,12 +1361,13 @@ def _deep_drill_down(base_filters: List[Dict], pl_column: str, bible: Dict) -> D
             })
             
             groups = query_result.get("result", []) if query_result else []
+            _log(f"Found {len(groups)} groups for {col_name}")
             
             for group in groups:
                 value = group.get(col_name)
                 count = group.get("_count", 0)
                 
-                if value is None or count < 40:
+                if value is None or value == "" or count < 30:
                     continue
                 
                 test_filters = base_filters + [{"col": col_name, "op": "=", "value": value}]
@@ -1370,24 +1393,35 @@ def _deep_drill_down(base_filters: List[Dict], pl_column: str, bible: Dict) -> D
                         "filter": {"col": col_name, "op": "=", "value": value},
                     }
                     all_tests.append(test_data)
+                    categorical_results[col_name].append(test_data)
                     
                     if test_data["improvement"] > 0 and test_data["test_rows"] >= 30:
                         improving_filters.append(test_data)
                 
                 test_count += 1
-                progress.progress(min(test_count / total_tests, 1.0))
+                progress.progress(min(test_count / total_tests, 0.95))
                         
         except Exception as e:
             _log(f"Error testing {col_name}: {e}")
     
-    # Test numeric brackets and track TRENDS
-    numeric_trends = {}
+    # Show categorical results
+    cat_improving = [f for f in all_tests if f["type"] == "categorical" and f["improvement"] > 0]
+    if cat_improving:
+        st.markdown(f"✅ **Categorical improvements found:** {len(cat_improving)}")
+        for f in sorted(cat_improving, key=lambda x: x["improvement"], reverse=True)[:5]:
+            st.markdown(f"  - {f['display']}: +{f['improvement']*100:.1f}% ({f['test_rows']} rows)")
+    else:
+        st.info("No categorical improvements found (this is unusual)")
     
-    for col_name, brackets in NUMERIC_TESTS.items():
-        status.text(f"Testing {col_name} ranges...")
-        trend_data = []
+    # ===== PHASE 2B: Test ALL Numeric Ranges =====
+    st.markdown("**Phase 2B: Testing Numeric Features**")
+    
+    for col_name, tests in NUMERIC_TESTS.items():
+        status.text(f"Testing {col_name}...")
+        numeric_results[col_name] = []
         
-        for label, min_val, max_val in brackets:
+        # Test brackets
+        for min_val, max_val in tests.get("brackets", []):
             try:
                 test_filters = base_filters + [{"col": col_name, "op": "between", "min": min_val, "max": max_val}]
                 
@@ -1398,53 +1432,120 @@ def _deep_drill_down(base_filters: List[Dict], pl_column: str, bible: Dict) -> D
                 })
                 
                 if result and not result.get("error"):
-                    test_data = {
-                        "type": "numeric",
-                        "column": col_name,
-                        "label": label,
-                        "range": f"{min_val}-{max_val}",
-                        "min": min_val,
-                        "max": max_val,
-                        "display": f"{col_name} {min_val}-{max_val} ({label})",
-                        "train_roi": result.get("train", {}).get("roi", 0),
-                        "val_roi": result.get("val", {}).get("roi", 0),
-                        "test_roi": result.get("test", {}).get("roi", 0),
-                        "test_rows": result.get("test", {}).get("rows", 0),
-                        "improvement": result.get("test", {}).get("roi", 0) - base_test_roi,
-                        "gates_passed": result.get("gates_passed", False),
-                        "filter": {"col": col_name, "op": "between", "min": min_val, "max": max_val},
-                    }
-                    all_tests.append(test_data)
-                    trend_data.append(test_data)
-                    
-                    if test_data["improvement"] > 0 and test_data["test_rows"] >= 30:
-                        improving_filters.append(test_data)
+                    test_rows = result.get("test", {}).get("rows", 0)
+                    if test_rows >= 20:
+                        test_data = {
+                            "type": "numeric_bracket",
+                            "column": col_name,
+                            "range": f"{min_val}-{max_val}",
+                            "display": f"{col_name} {min_val}-{max_val}",
+                            "train_roi": result.get("train", {}).get("roi", 0),
+                            "val_roi": result.get("val", {}).get("roi", 0),
+                            "test_roi": result.get("test", {}).get("roi", 0),
+                            "test_rows": test_rows,
+                            "improvement": result.get("test", {}).get("roi", 0) - base_test_roi,
+                            "gates_passed": result.get("gates_passed", False),
+                            "filter": {"col": col_name, "op": "between", "min": min_val, "max": max_val},
+                        }
+                        all_tests.append(test_data)
+                        numeric_results[col_name].append(test_data)
+                        
+                        if test_data["improvement"] > 0 and test_rows >= 30:
+                            improving_filters.append(test_data)
                 
                 test_count += 1
-                progress.progress(min(test_count / total_tests, 1.0))
+                progress.progress(min(test_count / total_tests, 0.95))
                         
             except Exception as e:
                 _log(f"Error testing {col_name} {min_val}-{max_val}: {e}")
         
-        if trend_data:
-            numeric_trends[col_name] = trend_data
+        # Test >= thresholds
+        for threshold in tests.get("thresholds_gte", []):
+            try:
+                test_filters = base_filters + [{"col": col_name, "op": ">=", "value": threshold}]
+                
+                result = _run_tool("test_filter", {
+                    "filters": test_filters,
+                    "pl_column": pl_column,
+                    "enforcement": gates,
+                })
+                
+                if result and not result.get("error"):
+                    test_rows = result.get("test", {}).get("rows", 0)
+                    if test_rows >= 30:
+                        test_data = {
+                            "type": "numeric_gte",
+                            "column": col_name,
+                            "threshold": threshold,
+                            "display": f"{col_name} >= {threshold}",
+                            "train_roi": result.get("train", {}).get("roi", 0),
+                            "val_roi": result.get("val", {}).get("roi", 0),
+                            "test_roi": result.get("test", {}).get("roi", 0),
+                            "test_rows": test_rows,
+                            "improvement": result.get("test", {}).get("roi", 0) - base_test_roi,
+                            "gates_passed": result.get("gates_passed", False),
+                            "filter": {"col": col_name, "op": ">=", "value": threshold},
+                        }
+                        all_tests.append(test_data)
+                        
+                        if test_data["improvement"] > 0:
+                            improving_filters.append(test_data)
+                
+                test_count += 1
+                        
+            except Exception as e:
+                _log(f"Error testing {col_name} >= {threshold}: {e}")
+        
+        # Test <= thresholds
+        for threshold in tests.get("thresholds_lte", []):
+            try:
+                test_filters = base_filters + [{"col": col_name, "op": "<=", "value": threshold}]
+                
+                result = _run_tool("test_filter", {
+                    "filters": test_filters,
+                    "pl_column": pl_column,
+                    "enforcement": gates,
+                })
+                
+                if result and not result.get("error"):
+                    test_rows = result.get("test", {}).get("rows", 0)
+                    if test_rows >= 30:
+                        test_data = {
+                            "type": "numeric_lte",
+                            "column": col_name,
+                            "threshold": threshold,
+                            "display": f"{col_name} <= {threshold}",
+                            "train_roi": result.get("train", {}).get("roi", 0),
+                            "val_roi": result.get("val", {}).get("roi", 0),
+                            "test_roi": result.get("test", {}).get("roi", 0),
+                            "test_rows": test_rows,
+                            "improvement": result.get("test", {}).get("roi", 0) - base_test_roi,
+                            "gates_passed": result.get("gates_passed", False),
+                            "filter": {"col": col_name, "op": "<=", "value": threshold},
+                        }
+                        all_tests.append(test_data)
+                        
+                        if test_data["improvement"] > 0:
+                            improving_filters.append(test_data)
+                
+                test_count += 1
+                        
+            except Exception as e:
+                _log(f"Error testing {col_name} <= {threshold}: {e}")
     
-    progress.empty()
+    progress.progress(1.0)
     status.empty()
     
-    drill_results["individual_tests"] = all_tests
-    drill_results["numeric_trends"] = numeric_trends
+    # ===== PHASE 3: Display All Results =====
+    st.markdown("**Phase 3: Analysis of All Results**")
     
-    # ===== PHASE 3: Display Results & Trends =====
-    st.markdown("**Phase 3: Analysis of Results**")
-    
-    # Show improving filters
     improving_filters.sort(key=lambda x: x["improvement"], reverse=True)
     
     if improving_filters:
         st.markdown(f"🎯 **Found {len(improving_filters)} filters that IMPROVE test ROI:**")
-        for f in improving_filters[:8]:
-            status_icon = "✅" if f["gates_passed"] else "⚠️"
+        
+        for f in improving_filters[:12]:
+            status_icon = "✅" if f.get("gates_passed") else "⚠️"
             st.markdown(
                 f"- **{f['display']}**: Test {f['test_roi']:.2%} "
                 f"(**+{f['improvement']*100:.1f}%**) "
@@ -1452,156 +1553,139 @@ def _deep_drill_down(base_filters: List[Dict], pl_column: str, bible: Dict) -> D
             )
     else:
         st.warning("No individual filters improve test ROI over baseline")
+        return drill_results
     
-    # Show numeric trends
-    if numeric_trends:
-        st.markdown("📈 **Numeric Trends (looking for patterns):**")
-        for col_name, trend in numeric_trends.items():
-            if len(trend) >= 2:
-                trend_str = " → ".join([
-                    f"{t['label']}: {t['test_roi']:.1%}" 
-                    for t in sorted(trend, key=lambda x: x['min'])
-                ])
-                
-                # Detect trend direction
-                sorted_trend = sorted(trend, key=lambda x: x['min'])
-                if len(sorted_trend) >= 2:
-                    first_roi = sorted_trend[0]['test_roi']
-                    last_roi = sorted_trend[-1]['test_roi']
-                    if last_roi > first_roi + 0.01:
-                        pattern = "📈 Higher values = better"
-                    elif first_roi > last_roi + 0.01:
-                        pattern = "📉 Lower values = better"
-                    else:
-                        # Check for mid-peak
-                        mid_idx = len(sorted_trend) // 2
-                        mid_roi = sorted_trend[mid_idx]['test_roi']
-                        if mid_roi > first_roi and mid_roi > last_roi:
-                            pattern = "🔔 Mid-range is best"
-                        else:
-                            pattern = "➡️ No clear pattern"
-                    
-                    st.markdown(f"**{col_name}:** {pattern}")
-                    st.caption(trend_str)
+    drill_results["individual_tests"] = all_tests
     
-    # ===== PHASE 4: AI Analysis & Decision =====
+    # ===== PHASE 4: AI Analysis & Combination Planning =====
     st.markdown("**Phase 4: AI Strategic Analysis**")
     
-    # Build context for AI
-    # Build trend strings outside f-string to avoid quote nesting issues
-    trend_lines = []
-    for col, trend in numeric_trends.items():
-        sorted_trend = sorted(trend, key=lambda x: x['min'])
-        trend_str = ' → '.join([f"{t['label']}:{t['test_roi']:.1%}" for t in sorted_trend])
-        trend_lines.append(f"- {col}: {trend_str}")
-    trends_text = chr(10).join(trend_lines) if trend_lines else "No numeric trends"
+    top_cat = [f for f in improving_filters if f["type"] == "categorical"][:5]
+    top_num = [f for f in improving_filters if f["type"] != "categorical"][:8]
     
-    improving_lines = []
-    for f in improving_filters[:10]:
-        gates_str = 'PASS' if f['gates_passed'] else 'FAIL'
-        improving_lines.append(f"- {f['display']}: Test {f['test_roi']:.2%} (+{f['improvement']*100:.1f}%), {f['test_rows']} rows, gates={gates_str}")
-    improving_text = chr(10).join(improving_lines) if improving_lines else "No improving filters"
+    improving_summary = "\n".join([
+        f"- {f['display']}: +{f['improvement']*100:.1f}%, {f['test_rows']} rows, gates={'PASS' if f['gates_passed'] else 'FAIL'}"
+        for f in improving_filters[:15]
+    ])
+    
+    cat_summary = "\n".join([f"- {f['display']}: +{f['improvement']*100:.1f}%" for f in top_cat]) if top_cat else "None found"
+    num_summary = "\n".join([f"- {f['display']}: +{f['improvement']*100:.1f}%" for f in top_num]) if top_num else "None found"
     
     analysis_context = f"""
 ## Deep Drill Down Results for {pl_column}
 
-### Base Strategy
-Filters: {json.dumps(base_filters)}
+### Base Strategy: {json.dumps(base_filters)}
 Train ROI: {base_train_roi:.2%}, Test ROI: {base_test_roi:.2%} ({base_test_rows} rows)
 
-### Top Improving Filters (sorted by improvement)
-{improving_text}
+### Top Improving Filters (sorted by improvement):
+{improving_summary}
 
-### Numeric Trends
-{trends_text}
+### Categorical Winners:
+{cat_summary}
 
-### All Test Results Count
-- Total tests: {len(all_tests)}
-- Improving filters: {len(improving_filters)}
-- Filters passing gates: {len([f for f in improving_filters if f['gates_passed']])}
+### Numeric Winners:
+{num_summary}
+
+### Summary Stats:
+- Total tests run: {len(all_tests)}
+- Filters showing improvement: {len(improving_filters)}
+- Filters passing all gates: {len([f for f in improving_filters if f['gates_passed']])}
 """
     
-    ai_question = """Based on these drill down results, analyze:
+    ai_question = """Analyze these drill down results and plan combination testing.
 
-1. **PATTERN ANALYSIS**: What patterns do you see? Which features consistently improve ROI? Any surprising findings?
-
-2. **COMBINATION HYPOTHESES**: Based on the individual results, which 2-3 feature combinations should we test? Think about:
+Think step by step:
+1. What patterns do you see? Which feature types (categorical vs numeric) are strongest?
+2. Are there logical combinations? (e.g., DRIFT IN + high home points = informed money on strong home teams)
+3. What 2-way combinations should we test? Consider ALL of:
    - Best categorical + best numeric
-   - Complementary features (not overlapping)
-   - Features that might have synergy
+   - Best categorical + second best numeric  
+   - Two different numerics that make sense together
+   - Second best categorical + best numeric
+4. What 3-way combinations might work? (only if 2-ways show promise)
 
-3. **TREND INSIGHTS**: For numeric features, what do the trends tell us? Should we focus on low/mid/high ranges?
-
-4. **RECOMMENDED COMBINATIONS** (provide exactly 5):
-   - Each should combine 2-3 of the improving filters
-   - Prioritize combinations that make logical sense
-   - Include at least one "experimental" combo
+Provide your analysis and exactly 8-10 combinations to test.
 
 Respond with JSON:
 {
-    "pattern_analysis": "Your analysis of what's working and why",
+    "pattern_analysis": "2-3 sentences on what patterns you see",
     "key_insight": "The single most important finding",
     "combinations_to_test": [
         {
-            "name": "Descriptive name",
-            "filters": [{"col": "X", "op": "=", "value": "Y"}, ...],
-            "hypothesis": "Why this combo might work",
-            "priority": 1-5
+            "name": "Descriptive name for this combo",
+            "filters": [
+                {"col": "X", "op": "=", "value": "Y"},
+                {"col": "Z", "op": ">=", "value": 1.5}
+            ],
+            "hypothesis": "Why this combination might work well together"
         }
-    ],
-    "numeric_recommendation": "Which numeric ranges to focus on",
-    "next_exploration": "What to explore if these don't work"
+    ]
 }"""
     
-    with st.spinner("🧠 AI analyzing patterns and deciding next tests..."):
+    with st.spinner("🧠 AI analyzing patterns and planning combinations..."):
         raw_response = _llm(analysis_context, ai_question)
         ai_response = _parse_json(raw_response)
     
+    combinations_to_test = []
+    
     if ai_response and not ai_response.get("error"):
-        st.markdown(f"🧠 **AI Analysis:** {ai_response.get('pattern_analysis', 'N/A')[:500]}")
+        st.markdown(f"🧠 **AI Analysis:** {ai_response.get('pattern_analysis', 'N/A')}")
         st.markdown(f"💡 **Key Insight:** {ai_response.get('key_insight', 'N/A')}")
         
         combinations_to_test = ai_response.get("combinations_to_test", [])
-    else:
-        # Fallback: auto-generate combinations from top improvers
-        st.info("Using automatic combination generation...")
-        combinations_to_test = []
-        
-        # Get top categorical and numeric
-        top_cat = [f for f in improving_filters if f["type"] == "categorical"][:3]
-        top_num = [f for f in improving_filters if f["type"] == "numeric"][:3]
-        
-        # Generate combos
-        for cat in top_cat[:2]:
-            for num in top_num[:2]:
-                combinations_to_test.append({
-                    "name": f"{cat['column']} + {num['column']}",
-                    "filters": [cat["filter"], num["filter"]],
-                    "hypothesis": "Top categorical + top numeric",
-                })
-        
-        # Add cat + cat combo
-        if len(top_cat) >= 2:
-            combinations_to_test.append({
-                "name": f"{top_cat[0]['column']} + {top_cat[1]['column']}",
-                "filters": [top_cat[0]["filter"], top_cat[1]["filter"]],
-                "hypothesis": "Two best categoricals",
-            })
+        st.markdown(f"📋 AI suggests **{len(combinations_to_test)}** combinations to test")
     
-    # ===== PHASE 5: Test Combinations =====
-    st.markdown("**Phase 5: Testing AI-Recommended Combinations**")
+    # Fallback: generate combinations automatically
+    if not combinations_to_test:
+        st.info("Generating combinations automatically...")
+        
+        top_cat = [f for f in improving_filters if f["type"] == "categorical"][:4]
+        top_num = [f for f in improving_filters if f["type"] != "categorical"][:6]
+        
+        # cat × num
+        for cat in top_cat:
+            for num in top_num:
+                if cat["column"] != num["column"]:
+                    combinations_to_test.append({
+                        "name": f"{cat['display']} + {num['display']}",
+                        "filters": [cat["filter"], num["filter"]],
+                        "hypothesis": "Top categorical × top numeric",
+                    })
+        
+        # num × num
+        for i, num1 in enumerate(top_num):
+            for num2 in top_num[i+1:]:
+                if num1["column"] != num2["column"]:
+                    combinations_to_test.append({
+                        "name": f"{num1['display']} + {num2['display']}",
+                        "filters": [num1["filter"], num2["filter"]],
+                        "hypothesis": "Two numeric filters",
+                    })
+        
+        # cat × cat
+        for i, cat1 in enumerate(top_cat):
+            for cat2 in top_cat[i+1:]:
+                if cat1["column"] != cat2["column"]:
+                    combinations_to_test.append({
+                        "name": f"{cat1['display']} + {cat2['display']}",
+                        "filters": [cat1["filter"], cat2["filter"]],
+                        "hypothesis": "Two categorical filters",
+                    })
+    
+    # ===== PHASE 5: Test ALL Combinations =====
+    st.markdown(f"**Phase 5: Testing {len(combinations_to_test)} Combinations**")
     
     combination_results = []
+    combo_progress = st.progress(0)
     
-    for combo in combinations_to_test[:6]:  # Test up to 6 combinations
-        combo_name = combo.get("name", "Unknown")
+    for idx, combo in enumerate(combinations_to_test[:25]):  # Test up to 25 combinations
+        combo_name = combo.get("name", f"Combo {idx+1}")
         combo_filters = combo.get("filters", [])
         
         if not combo_filters:
             continue
         
         try:
-            # Build full filter set
             full_filters = list(base_filters) + combo_filters
             
             result = _run_tool("test_filter", {
@@ -1618,6 +1702,7 @@ Respond with JSON:
                 combo_result = {
                     "name": combo_name,
                     "filters": full_filters,
+                    "added_filters": combo_filters,
                     "hypothesis": combo.get("hypothesis", ""),
                     "train_roi": result.get("train", {}).get("roi", 0),
                     "val_roi": result.get("val", {}).get("roi", 0),
@@ -1627,27 +1712,85 @@ Respond with JSON:
                     "gates_passed": result.get("gates_passed", False),
                 }
                 combination_results.append(combo_result)
-                
-                status_icon = "✅" if combo_result["gates_passed"] else "⚠️"
-                improvement_str = f"+{improvement*100:.1f}%" if improvement > 0 else f"{improvement*100:.1f}%"
-                
-                st.markdown(
-                    f"- **{combo_name}**: Test {test_roi:.2%} ({improvement_str}) "
-                    f"[{test_rows} rows] {status_icon}"
-                )
-                
+        
         except Exception as e:
             _log(f"Error testing combo {combo_name}: {e}")
-            st.markdown(f"- **{combo_name}**: ❌ Error")
+        
+        combo_progress.progress((idx + 1) / min(len(combinations_to_test), 25))
     
-    # Sort by improvement
+    combo_progress.empty()
+    
     combination_results.sort(key=lambda x: x["improvement"], reverse=True)
     drill_results["combinations"] = combination_results
     
-    # ===== PHASE 6: Final Recommendations =====
-    st.markdown("**Phase 6: Final Recommendations**")
+    improving_combos = [c for c in combination_results if c["improvement"] > 0]
     
-    # Find the best overall result
+    if improving_combos:
+        st.markdown(f"🎯 **{len(improving_combos)} combinations IMPROVE over baseline:**")
+        for combo in improving_combos[:10]:
+            status_icon = "✅" if combo["gates_passed"] else "⚠️"
+            st.markdown(
+                f"- **{combo['name']}**: Test {combo['test_roi']:.2%} "
+                f"(**+{combo['improvement']*100:.1f}%**) "
+                f"[{combo['test_rows']} rows] {status_icon}"
+            )
+    else:
+        st.warning("No combinations improved over individual filters")
+    
+    # ===== PHASE 6: Test 3-Way Combinations =====
+    if improving_combos and len(improving_combos) >= 2:
+        st.markdown("**Phase 6: Testing 3-Way Combinations**")
+        
+        best_combo = improving_combos[0]
+        three_way_results = []
+        
+        for individual in improving_filters[:5]:
+            individual_col = individual["filter"].get("col")
+            combo_cols = [f.get("col") for f in best_combo["added_filters"]]
+            
+            if individual_col in combo_cols:
+                continue
+            
+            try:
+                full_filters = best_combo["filters"] + [individual["filter"]]
+                
+                result = _run_tool("test_filter", {
+                    "filters": full_filters,
+                    "pl_column": pl_column,
+                    "enforcement": gates,
+                })
+                
+                if result and not result.get("error"):
+                    test_roi = result.get("test", {}).get("roi", 0)
+                    test_rows = result.get("test", {}).get("rows", 0)
+                    
+                    if test_rows >= 30:
+                        three_way_results.append({
+                            "name": f"{best_combo['name']} + {individual['display']}",
+                            "filters": full_filters,
+                            "test_roi": test_roi,
+                            "test_rows": test_rows,
+                            "improvement": test_roi - base_test_roi,
+                            "gates_passed": result.get("gates_passed", False),
+                        })
+            except:
+                continue
+        
+        if three_way_results:
+            three_way_results.sort(key=lambda x: x["improvement"], reverse=True)
+            st.markdown("**Top 3-way combinations:**")
+            for tw in three_way_results[:3]:
+                status_icon = "✅" if tw["gates_passed"] else "⚠️"
+                st.markdown(
+                    f"- **{tw['name']}**: Test {tw['test_roi']:.2%} "
+                    f"(**+{tw['improvement']*100:.1f}%**) [{tw['test_rows']} rows] {status_icon}"
+                )
+            
+            combination_results.extend(three_way_results)
+    
+    # ===== PHASE 7: Final Recommendations =====
+    st.markdown("**Phase 7: Final Recommendations**")
+    
     all_results = improving_filters + combination_results
     all_results.sort(key=lambda x: x.get("improvement", 0), reverse=True)
     
@@ -1657,40 +1800,50 @@ Respond with JSON:
         if best.get("improvement", 0) > 0:
             st.success(
                 f"🏆 **Best Result:** {best.get('name', best.get('display', 'Unknown'))} "
-                f"with Test ROI {best.get('test_roi', 0):.2%} "
-                f"(**+{best.get('improvement', 0)*100:.1f}%** improvement)"
+                f"with Test ROI **{best.get('test_roi', 0):.2%}** "
+                f"(**+{best.get('improvement', 0)*100:.1f}%** vs baseline)"
             )
             
-            # Add to recommendations
-            if "filters" in best:
-                drill_results["recommended_additions"].append({
-                    "filters": best["filters"],
-                    "is_combo": "name" in best,
-                    "test_roi": best.get("test_roi", 0),
-                    "improvement": best.get("improvement", 0),
-                    "gates_passed": best.get("gates_passed", False),
-                })
-            elif "filter" in best:
-                drill_results["recommended_additions"].append({
-                    "filter": best["filter"],
-                    "is_combo": False,
-                    "test_roi": best.get("test_roi", 0),
-                    "improvement": best.get("improvement", 0),
-                    "gates_passed": best.get("gates_passed", False),
-                })
+            passing_gates = [r for r in all_results if r.get("gates_passed") and r.get("improvement", 0) > 0]
+            if passing_gates and passing_gates[0] != best:
+                best_passing = passing_gates[0]
+                st.info(
+                    f"📊 **Best passing all gates:** {best_passing.get('name', best_passing.get('display', 'Unknown'))} "
+                    f"Test ROI {best_passing.get('test_roi', 0):.2%} (+{best_passing.get('improvement', 0)*100:.1f}%)"
+                )
+            
+            for result in all_results[:5]:
+                if result.get("improvement", 0) > 0:
+                    if "filters" in result and "added_filters" in result:
+                        drill_results["recommended_additions"].append({
+                            "filters": result.get("added_filters", result["filters"]),
+                            "name": result.get("name", "Unknown"),
+                            "test_roi": result.get("test_roi", 0),
+                            "improvement": result.get("improvement", 0),
+                            "gates_passed": result.get("gates_passed", False),
+                        })
+                    elif "filter" in result:
+                        drill_results["recommended_additions"].append({
+                            "filter": result["filter"],
+                            "name": result.get("display", "Unknown"),
+                            "test_roi": result.get("test_roi", 0),
+                            "improvement": result.get("improvement", 0),
+                            "gates_passed": result.get("gates_passed", False),
+                        })
         else:
             st.info("📊 No improvements found - base strategy may already be optimal")
     
-    # Show top 3 recommendations
-    if drill_results["recommended_additions"]:
-        st.markdown("**📋 Queued for further testing:**")
-        for i, rec in enumerate(drill_results["recommended_additions"][:3], 1):
-            st.markdown(f"{i}. +{rec.get('improvement', 0)*100:.1f}% improvement")
+    st.markdown("---")
+    st.markdown(f"""**Summary:**
+- Individual tests: {len(all_tests)}
+- Improving filters: {len(improving_filters)}
+- Combinations tested: {len(combination_results)}
+- Improving combinations: {len(improving_combos) if 'improving_combos' in dir() else 0}
+""")
     
-    _log(f"Deep drill down complete: {len(all_tests)} individual tests, {len(combination_results)} combinations")
+    _log(f"Deep drill down complete: {len(all_tests)} individual, {len(combination_results)} combos")
     
     return drill_results
-
 
 def _analyze_avenue_results(avenue: Dict, results: List[Dict], bible: Dict) -> Dict:
     """Deep analysis of results from exploring an avenue."""
