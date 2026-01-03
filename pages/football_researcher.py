@@ -1045,6 +1045,115 @@ def _get_model() -> str:
 # Session State
 # ============================================================
 
+# STATE PERSISTENCE FILE - survives Streamlit refreshes
+STATE_PERSISTENCE_FILE = "/tmp/football_researcher_state.json"
+STATE_AUTO_SAVE_INTERVAL = 30  # seconds
+
+
+def _save_state_to_file():
+    """Save critical state to file for persistence across refreshes."""
+    try:
+        state_to_save = {
+            "session_id": st.session_state.get("session_id"),
+            "agent_phase": st.session_state.get("agent_phase", "idle"),
+            "agent_iteration": st.session_state.get("agent_iteration", 0),
+            "target_pl_column": st.session_state.get("target_pl_column", "BO 2.5 PL"),
+            "bible": st.session_state.get("bible"),
+            "exploration_results": st.session_state.get("exploration_results", {}),
+            "sweep_results": st.session_state.get("sweep_results", {}),
+            "exploration_analysis": st.session_state.get("exploration_analysis", {}),
+            "avenues_to_explore": st.session_state.get("avenues_to_explore", []),
+            "avenues_explored": st.session_state.get("avenues_explored", []),
+            "accumulated_learnings": st.session_state.get("accumulated_learnings", []),
+            "strategies_found": st.session_state.get("strategies_found", []),
+            "research_log": st.session_state.get("research_log", []),
+            "hypothesis_count": st.session_state.get("hypothesis_count", 0),
+            "near_misses": st.session_state.get("near_misses", []),
+            "promising_bases": st.session_state.get("promising_bases", []),
+            "feature_analysis": st.session_state.get("feature_analysis", {}),
+            "tested_combinations": list(st.session_state.get("tested_combinations", set())),
+            "last_save_time": datetime.utcnow().isoformat(),
+        }
+        
+        with open(STATE_PERSISTENCE_FILE, "w") as f:
+            json.dump(state_to_save, f, default=str)
+        
+        return True
+    except Exception as e:
+        print(f"Failed to save state: {e}")
+        return False
+
+
+def _load_state_from_file() -> Dict:
+    """Load state from persistence file."""
+    try:
+        if os.path.exists(STATE_PERSISTENCE_FILE):
+            with open(STATE_PERSISTENCE_FILE, "r") as f:
+                state = json.load(f)
+            
+            # Check if state is recent (within last 2 hours)
+            last_save = state.get("last_save_time", "")
+            if last_save:
+                try:
+                    save_time = datetime.fromisoformat(last_save.replace("Z", "+00:00").replace("+00:00", ""))
+                    age_seconds = (datetime.utcnow() - save_time).total_seconds()
+                    if age_seconds > 7200:  # 2 hours
+                        print(f"State file too old ({age_seconds/3600:.1f} hours), ignoring")
+                        return {}
+                except:
+                    pass
+            
+            # Convert tested_combinations back to set
+            if "tested_combinations" in state:
+                state["tested_combinations"] = set(state["tested_combinations"])
+            
+            return state
+    except Exception as e:
+        print(f"Failed to load state: {e}")
+    return {}
+
+
+def _restore_state_if_needed():
+    """Restore state from file if this looks like a refresh (state is empty but file exists)."""
+    # Check if this is a fresh page load with lost state
+    is_fresh_load = (
+        st.session_state.get("agent_phase") == "idle" and
+        st.session_state.get("agent_iteration", 0) == 0 and
+        not st.session_state.get("bible")
+    )
+    
+    if is_fresh_load and os.path.exists(STATE_PERSISTENCE_FILE):
+        saved_state = _load_state_from_file()
+        
+        if saved_state and saved_state.get("agent_phase") in ["running", "paused"]:
+            # This was an active session - offer to restore
+            st.session_state._pending_restore = saved_state
+            return True
+    
+    return False
+
+
+def _apply_restored_state(saved_state: Dict):
+    """Apply restored state to session state."""
+    for key, value in saved_state.items():
+        if key not in ["last_save_time", "_pending_restore"]:
+            st.session_state[key] = value
+    
+    # Mark as restored
+    st.session_state._state_restored = True
+    st.session_state._pending_restore = None
+
+
+def _clear_persisted_state():
+    """Clear the persisted state file (for fresh starts)."""
+    try:
+        if os.path.exists(STATE_PERSISTENCE_FILE):
+            os.remove(STATE_PERSISTENCE_FILE)
+        return True
+    except:
+        return False
+
+
 def _init_state():
     defaults = {
         "messages": [], 
@@ -1076,12 +1185,21 @@ def _init_state():
         "tests_per_iteration": [],  # Track tests per iteration for analysis
         "final_holdout_tested": False,  # Have we used final holdout?
         "strategies_pending_final_validation": [],  # Strategies awaiting final holdout test
+        # v6.5 - Persistence
+        "_state_restored": False,
+        "_pending_restore": None,
+        "_last_auto_save": None,
+        "tested_combinations": set(),
+        "feature_analysis": {},
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
 
 _init_state()
+
+# Check for state restoration on load
+_has_pending_restore = _restore_state_if_needed()
 
 def _log(msg: str):
     try:
@@ -4138,13 +4256,34 @@ def run_agent(is_new_run: bool = True):
                 pass  # Placeholders may have been cleared
     
     for iteration in range(1, MAX_ITERATIONS + 1):
+        # ============================================================
+        # AUTO-SAVE STATE (survives Streamlit refreshes)
+        # ============================================================
+        # Save state at start of each iteration and periodically
+        last_save = st.session_state.get("_last_auto_save")
+        should_save = (
+            last_save is None or 
+            (datetime.utcnow() - last_save).total_seconds() > STATE_AUTO_SAVE_INTERVAL
+        )
+        
+        if should_save:
+            # Update avenues in session state before saving
+            st.session_state.avenues_to_explore = avenues_remaining
+            
+            if _save_state_to_file():
+                st.session_state._last_auto_save = datetime.utcnow()
+                _log(f"Auto-saved state at iteration {iteration}")
+        
         # Update summary at start of each iteration
         _update_summary(f"Iter {iteration}")
         
         # Check for pause
         if st.session_state.agent_phase == "paused":
             _update_summary("Paused")
-            st.warning("⏸️ Research paused")
+            # Save state when pausing
+            st.session_state.avenues_to_explore = avenues_remaining
+            _save_state_to_file()
+            st.warning("⏸️ Research paused - state saved")
             return
         
         st.session_state.agent_iteration = iteration
@@ -4735,6 +4874,11 @@ def run_agent(is_new_run: bool = True):
                     "avenue_learnings": avenue_learnings,  # Store learnings with strategy
                 })
                 
+                # AUTO-SAVE STATE after finding strategy (critical!)
+                st.session_state.avenues_to_explore = avenues_remaining
+                _save_state_to_file()
+                _log("State auto-saved after finding strategy")
+                
                 # Log to research log
                 _research_log(
                     f"Train: {best_result.get('train_roi', 0):.2%}, Val: {best_result.get('val_roi', 0):.2%}, Test: {best_result.get('test_roi', 0):.2%} ({best_result.get('test_rows', 0)} rows) - {'CONSISTENT' if is_strategy_consistent else 'needs review'}",
@@ -5036,6 +5180,41 @@ If the user gives a direction (e.g., "try BTTS more"), acknowledge and incorpora
 st.title("⚽ Football Research Agent v6")
 st.caption("Deep Analysis Edition + Local Compute + 38 Tools + Persistence + GPT-5")
 
+# ============================================================
+# STATE RESTORATION PROMPT (if refresh detected)
+# ============================================================
+if st.session_state.get("_pending_restore"):
+    saved_state = st.session_state._pending_restore
+    
+    st.warning("🔄 **Previous research session detected!**")
+    
+    col1, col2, col3 = st.columns([2, 1, 1])
+    
+    with col1:
+        st.markdown(f"""
+**Session Details:**
+- Phase: `{saved_state.get('agent_phase', 'unknown')}`
+- Iteration: {saved_state.get('agent_iteration', 0)}
+- Strategies Found: {len(saved_state.get('strategies_found', []))}
+- Avenues Explored: {len(saved_state.get('avenues_explored', []))}
+- Learnings: {len(saved_state.get('accumulated_learnings', []))}
+- Last Saved: {saved_state.get('last_save_time', 'Unknown')[:19]}
+        """)
+    
+    with col2:
+        if st.button("✅ Restore Session", type="primary", use_container_width=True):
+            _apply_restored_state(saved_state)
+            st.success("Session restored!")
+            st.rerun()
+    
+    with col3:
+        if st.button("🗑️ Start Fresh", use_container_width=True):
+            _clear_persisted_state()
+            st.session_state._pending_restore = None
+            st.rerun()
+    
+    st.divider()
+
 # Check server
 server_status = _check_server()
 if server_status.get("status") != "healthy":
@@ -5071,7 +5250,11 @@ with st.sidebar:
         st.divider()
         st.markdown("**📋 Session ID:**")
         st.code(st.session_state.session_id, language=None)
-        st.caption("⚠️ SAVE THIS to resume if Streamlit reboots!")
+        st.caption("⚠️ State auto-saved to survive refreshes")
+    
+    # Show restore status
+    if st.session_state.get("_state_restored"):
+        st.success("✅ Session restored from backup")
     
     st.divider()
     
@@ -5084,6 +5267,9 @@ with st.sidebar:
     
     if phase == "idle":
         if st.button("🚀 Start Research", type="primary", use_container_width=True):
+            # Clear any old persisted state when starting fresh
+            _clear_persisted_state()
+            
             st.session_state.agent_phase = "running"
             st.session_state.agent_iteration = 0
             st.session_state.agent_findings = []
@@ -5100,6 +5286,7 @@ with st.sidebar:
             st.session_state.strategies_found = []
             st.session_state.session_id = None
             st.session_state.run_requested = True
+            st.session_state._state_restored = False
             st.session_state.is_resume = False  # This is a NEW run
             # Reset hypothesis tracking for new session
             st.session_state.hypothesis_count = 0
