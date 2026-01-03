@@ -19,12 +19,19 @@ PLUS v6 Enhancements:
 13. DEEP THINKING SYSTEM: OBSERVE → CONNECT → HYPOTHESIZE → PLAN → DECIDE → RECORD
 14. CRASH RECOVERY: Checkpoint-based state restore
 
+v6.5 WORLD-CLASS QUANT ENHANCEMENTS:
+15. HYPOTHESIS-DRIVEN: Every test has a reason
+16. DEEP PERSISTENCE: 50+ tests per profitable avenue
+17. INTELLIGENT COMBINATIONS: Logical filter pairing
+18. EXCLUSION-BASED CATEGORICALS: Remove bad, don't just find good
+19. CONSISTENCY-FIRST: Train/Val/Test must all agree
+
 Usage: streamlit run football_researcher_v6.py
 Requires: python3 local_compute.py running on port 8000
 """
 
 from __future__ import annotations
-import os, json, uuid, re, time, hashlib
+import os, json, uuid, re, time, hashlib, math
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 import requests
@@ -241,6 +248,774 @@ def _safe_json(obj: Any, max_len: int = 5000) -> str:
 
 def _filter_hash(filters: List[Dict]) -> str:
     return hashlib.md5(json.dumps(filters, sort_keys=True, default=str).encode()).hexdigest()[:12]
+
+# ============================================================
+# WORLD-CLASS QUANT RESEARCH ENGINE
+# ============================================================
+# Hypothesis-driven, persistent, intelligent research functions
+
+# Research configuration
+MIN_TESTS_PER_PROFITABLE_AVENUE = 50
+MAX_ITERATIONS_PER_AVENUE = 5
+MIN_PROFITABLE_ROI = 0.01  # 1%
+MAX_HYPOTHESES_PER_SESSION = 500
+
+
+def _generate_hypotheses_for_avenue(avenue: Dict, current_results: List[Dict], 
+                                    learnings: List[str], iteration: int) -> List[Dict]:
+    """
+    Generate intelligent hypotheses based on current state.
+    A world-class quant doesn't just test random brackets - they have REASONS.
+    """
+    hypotheses = []
+    base_filters = avenue.get("base_filters", [])
+    
+    # Get what's already been tested
+    tested_cols = set()
+    for r in current_results:
+        if r.get("filter"):
+            tested_cols.add(r["filter"].get("col"))
+    
+    # HYPOTHESIS TYPE 1: Market Microstructure (DRIFT)
+    if "DRIFT IN / OUT" not in str(base_filters) and "DRIFT IN / OUT" not in tested_cols:
+        hypotheses.append({
+            "name": "Informed Money (DRIFT IN)",
+            "filter": {"col": "DRIFT IN / OUT", "op": "=", "value": "IN"},
+            "reasoning": "Price shortening (DRIFT IN) indicates informed bettors agree with our position",
+            "expected_effect": "Should improve ROI by filtering to matches where smart money confirms",
+            "category": "market_microstructure",
+        })
+        hypotheses.append({
+            "name": "Contrarian (DRIFT OUT)",
+            "filter": {"col": "DRIFT IN / OUT", "op": "=", "value": "OUT"},
+            "reasoning": "Price drifting OUT might indicate value if model disagrees with market",
+            "expected_effect": "Could improve if our edge is in mispriced matches",
+            "category": "market_microstructure",
+        })
+    
+    # HYPOTHESIS TYPE 2: Team Quality Differential
+    if "Points Diff" not in tested_cols:
+        for threshold in [0.5, 1.0, 1.5]:
+            hypotheses.append({
+                "name": f"Quality Gap >= {threshold}",
+                "filter": {"col": "Points Diff", "op": ">=", "value": threshold},
+                "reasoning": f"Home team significantly better (>{threshold} pts advantage) = predictable outcome",
+                "expected_effect": "Better teams create more predictable games",
+                "category": "team_quality",
+            })
+    
+    # HYPOTHESIS TYPE 3: O2.5 Odds (Market view on goals)
+    if "O2.5 Odds" not in tested_cols:
+        hypotheses.append({
+            "name": "Market Disagrees (High O2.5 Odds >= 2.0)",
+            "filter": {"col": "O2.5 Odds", "op": ">=", "value": 2.0},
+            "reasoning": "High odds = market expects few goals. If our model picks these, we may have edge",
+            "expected_effect": "Higher ROI on value selections",
+            "category": "market_odds",
+        })
+        hypotheses.append({
+            "name": "Market Agrees (Low O2.5 Odds <= 1.7)",
+            "filter": {"col": "O2.5 Odds", "op": "<=", "value": 1.7},
+            "reasoning": "Low odds = market agrees goals likely. Higher strike rate expected",
+            "expected_effect": "Lower variance, more consistent results",
+            "category": "market_odds",
+        })
+    
+    # HYPOTHESIS TYPE 4: Home/Away Odds Brackets
+    if "Home Odds" not in tested_cols:
+        hypotheses.append({
+            "name": "Strong Favorite (Home Odds <= 1.5)",
+            "filter": {"col": "Home Odds", "op": "<=", "value": 1.5},
+            "reasoning": "Heavy home favorites often dominate, leading to predictable patterns",
+            "expected_effect": "More predictable match outcomes",
+            "category": "match_dynamics",
+        })
+        hypotheses.append({
+            "name": "Balanced Match (Home Odds 2.0-3.0)",
+            "filter": {"col": "Home Odds", "op": "between", "min": 2.0, "max": 3.0},
+            "reasoning": "Even matches may be more open with both teams attacking",
+            "expected_effect": "Could lead to higher-scoring games",
+            "category": "match_dynamics",
+        })
+    
+    # HYPOTHESIS TYPE 5: Away Team Quality
+    if "Away Avg Points" not in tested_cols:
+        hypotheses.append({
+            "name": "Weak Away Team (<= 1.0 pts)",
+            "filter": {"col": "Away Avg Points", "op": "<=", "value": 1.0},
+            "reasoning": "Weak away teams concede more, making home attacks more effective",
+            "expected_effect": "More goals when away team is weak",
+            "category": "team_quality",
+        })
+        hypotheses.append({
+            "name": "Strong Away Team (>= 1.5 pts)", 
+            "filter": {"col": "Away Avg Points", "op": ">=", "value": 1.5},
+            "reasoning": "Strong away team = competitive match, different dynamic",
+            "expected_effect": "May change goal expectation",
+            "category": "team_quality",
+        })
+    
+    # HYPOTHESIS TYPE 6: % DRIFT Magnitude
+    if "% DRIFT" not in tested_cols:
+        hypotheses.append({
+            "name": "Strong Drift (>= 5%)",
+            "filter": {"col": "% DRIFT", "op": ">=", "value": 5},
+            "reasoning": "Significant price movement = strong conviction from market participants",
+            "expected_effect": "Stronger signal when drift magnitude is high",
+            "category": "market_microstructure",
+        })
+    
+    # HYPOTHESIS TYPE 7: Strike Rate Quality
+    if "STRIKE RATE" not in tested_cols:
+        hypotheses.append({
+            "name": "High Strike Rate (>= 60%)",
+            "filter": {"col": "STRIKE RATE", "op": ">=", "value": 60},
+            "reasoning": "Focus on higher quality selections with proven track record",
+            "expected_effect": "More consistent results, lower variance",
+            "category": "selection_quality",
+        })
+    
+    # HYPOTHESIS TYPE 8: ACTUAL ODDS brackets
+    if "ACTUAL ODDS" not in tested_cols:
+        for low, high in [(1.3, 1.6), (1.6, 2.0), (2.0, 2.5)]:
+            hypotheses.append({
+                "name": f"Odds Range {low}-{high}",
+                "filter": {"col": "ACTUAL ODDS", "op": "between", "min": low, "max": high},
+                "reasoning": f"Different odds ranges have different risk/reward profiles",
+                "expected_effect": f"Find optimal odds range for this strategy",
+                "category": "odds_optimization",
+            })
+    
+    # HYPOTHESIS TYPE 9: Learning-based refinements (iteration > 1)
+    if iteration > 1 and learnings:
+        for learning in learnings[-3:]:
+            learning_lower = learning.lower() if isinstance(learning, str) else ""
+            if "away" in learning_lower and "weak" in learning_lower:
+                if "Away Avg Points" not in tested_cols:
+                    hypotheses.append({
+                        "name": "Learning: Weak Away Team",
+                        "filter": {"col": "Away Avg Points", "op": "<=", "value": 1.2},
+                        "reasoning": f"Previous learning: {learning[:80]}",
+                        "expected_effect": "Refine based on accumulated knowledge",
+                        "category": "iterative_refinement",
+                    })
+            if "drift" in learning_lower and "in" in learning_lower:
+                if "DRIFT IN / OUT" not in tested_cols:
+                    hypotheses.append({
+                        "name": "Learning: DRIFT IN works",
+                        "filter": {"col": "DRIFT IN / OUT", "op": "=", "value": "IN"},
+                        "reasoning": f"Previous learning: {learning[:80]}",
+                        "expected_effect": "Confirm learning with this avenue",
+                        "category": "iterative_refinement",
+                    })
+    
+    return hypotheses
+
+
+def _should_continue_avenue(avenue: Dict, results: List[Dict], 
+                            tests_done: int, iteration: int,
+                            best_roi: float) -> Tuple[bool, str]:
+    """
+    Decide if we should keep exploring this avenue or move on.
+    Returns: (should_continue: bool, reason: str)
+    """
+    if not results:
+        return True, "No results yet - need initial exploration"
+    
+    # Calculate metrics
+    passing_count = len([r for r in results if r.get("gates_passed")])
+    consistent_count = len([r for r in results if r.get("is_consistent")])
+    
+    # RULE 1: If avenue is profitable and we haven't tested enough, CONTINUE
+    if best_roi >= MIN_PROFITABLE_ROI and tests_done < MIN_TESTS_PER_PROFITABLE_AVENUE:
+        return True, f"Profitable ({best_roi:.2%}) but only {tests_done}/{MIN_TESTS_PER_PROFITABLE_AVENUE} tests"
+    
+    # RULE 2: If we have passing strategies, keep refining
+    if passing_count > 0 and iteration < MAX_ITERATIONS_PER_AVENUE:
+        return True, f"Found {passing_count} passing strategies - worth refining"
+    
+    # RULE 3: If iteration limit reached, move on
+    if iteration >= MAX_ITERATIONS_PER_AVENUE:
+        return False, f"Reached max iterations ({MAX_ITERATIONS_PER_AVENUE})"
+    
+    # RULE 4: If we've tested a lot with no success, move on
+    if tests_done >= MIN_TESTS_PER_PROFITABLE_AVENUE and passing_count == 0:
+        return False, f"Tested {tests_done} variations with no passing strategies"
+    
+    # RULE 5: Negative ROI after decent testing
+    if best_roi < 0 and tests_done >= 20:
+        return False, f"Negative ROI ({best_roi:.2%}) after {tests_done} tests"
+    
+    # Default: continue if early
+    if tests_done < 20:
+        return True, "Early exploration - continue testing"
+    
+    return False, "Avenue exploration complete"
+
+
+def _analyze_results_deeply(results: List[Dict], base_filters: List[Dict], 
+                           hypotheses: List[Dict]) -> Dict:
+    """
+    Deep analysis of results - not just metrics, but UNDERSTANDING.
+    """
+    analysis = {
+        "summary": "",
+        "patterns_found": [],
+        "hypotheses_supported": [],
+        "hypotheses_refuted": [],
+        "recommended_next_steps": [],
+        "key_insight": "",
+        "confidence": "low",
+    }
+    
+    if not results:
+        analysis["summary"] = "No results to analyze"
+        return analysis
+    
+    # Categorize results
+    passing = [r for r in results if r.get("gates_passed")]
+    consistent = [r for r in results if r.get("is_consistent")]
+    high_roi = [r for r in results if r.get("test_roi", 0) > 0.05]
+    negative = [r for r in results if r.get("test_roi", 0) < 0]
+    
+    best_roi = max([r.get("test_roi", 0) for r in results]) if results else 0
+    
+    # Find patterns - what do successful strategies have in common?
+    if passing:
+        passing_filters = [r.get("filter", {}) for r in passing if r.get("filter")]
+        cols_that_work = [f.get("col") for f in passing_filters if f.get("col")]
+        
+        col_counts = {}
+        for col in cols_that_work:
+            col_counts[col] = col_counts.get(col, 0) + 1
+        
+        if col_counts:
+            most_common = max(col_counts, key=col_counts.get)
+            analysis["patterns_found"].append({
+                "pattern": f"{most_common} appears in {col_counts[most_common]} passing strategies",
+                "implication": f"Filtering by {most_common} improves results",
+            })
+    
+    # Check which hypotheses were supported/refuted
+    for hyp in hypotheses:
+        filter_col = hyp.get("filter", {}).get("col")
+        matching_results = [r for r in results if r.get("filter", {}).get("col") == filter_col]
+        
+        if matching_results:
+            best_match = max(matching_results, key=lambda x: x.get("test_roi", 0))
+            if best_match.get("test_roi", 0) > 0.02 and best_match.get("is_consistent"):
+                analysis["hypotheses_supported"].append({
+                    "hypothesis": hyp["name"],
+                    "evidence": f"Test ROI: {best_match.get('test_roi', 0):.2%}",
+                    "reasoning": hyp.get("reasoning", ""),
+                })
+            elif best_match.get("test_roi", 0) < 0:
+                analysis["hypotheses_refuted"].append({
+                    "hypothesis": hyp["name"],
+                    "evidence": f"Test ROI: {best_match.get('test_roi', 0):.2%}",
+                    "learning": "Opposite may be true",
+                })
+    
+    # Generate next steps
+    if analysis["hypotheses_supported"]:
+        for supported in analysis["hypotheses_supported"][:2]:
+            analysis["recommended_next_steps"].append({
+                "action": f"Drill deeper into {supported['hypothesis']}",
+                "reason": f"Hypothesis supported with {supported['evidence']}",
+                "priority": "high",
+            })
+    
+    if not passing and consistent:
+        analysis["recommended_next_steps"].append({
+            "action": "Combine consistent filters together",
+            "reason": "Individual filters consistent but not passing - try combinations",
+            "priority": "medium",
+        })
+    
+    # Key insight
+    if len(passing) >= 3:
+        analysis["key_insight"] = f"Strong avenue - {len(passing)} strategies pass all gates. Focus on optimization."
+        analysis["confidence"] = "high"
+    elif len(consistent) >= 5:
+        analysis["key_insight"] = f"Promising - {len(consistent)} consistent results. Need better combinations."
+        analysis["confidence"] = "medium"
+    elif best_roi > 0:
+        analysis["key_insight"] = f"Some signal (best: {best_roi:.2%}). Worth exploring further."
+        analysis["confidence"] = "low"
+    else:
+        analysis["key_insight"] = "No clear signal. Consider pivoting."
+        analysis["confidence"] = "low"
+    
+    analysis["summary"] = f"Tested {len(results)} variations. {len(passing)} pass gates, {len(consistent)} consistent. Best: {best_roi:.2%}"
+    
+    return analysis
+
+
+def _generate_intelligent_combinations(successful_results: List[Dict], 
+                                       tested_combinations: Set[str]) -> List[Dict]:
+    """
+    Generate combinations that make LOGICAL sense, not just random pairs.
+    """
+    combinations = []
+    
+    # Group results by category
+    market_results = [r for r in successful_results if r.get("category") == "market_microstructure"]
+    quality_results = [r for r in successful_results if r.get("category") == "team_quality"]
+    odds_results = [r for r in successful_results if r.get("category") in ["market_odds", "odds_optimization"]]
+    
+    # LOGICAL COMBINATION 1: Market + Quality
+    for mr in market_results[:2]:
+        for qr in quality_results[:2]:
+            mr_col = mr.get("filter", {}).get("col", "")
+            qr_col = qr.get("filter", {}).get("col", "")
+            combo_key = f"{mr_col}+{qr_col}"
+            if combo_key not in tested_combinations and mr_col and qr_col:
+                combinations.append({
+                    "name": f"{mr.get('hypothesis', mr_col)} + {qr.get('hypothesis', qr_col)}",
+                    "filters": [mr["filter"], qr["filter"]],
+                    "reasoning": f"Market signal ({mr_col}) + match characteristic ({qr_col})",
+                })
+                tested_combinations.add(combo_key)
+    
+    # LOGICAL COMBINATION 2: Quality + Odds
+    for qr in quality_results[:2]:
+        for or_ in odds_results[:2]:
+            qr_col = qr.get("filter", {}).get("col", "")
+            or_col = or_.get("filter", {}).get("col", "")
+            combo_key = f"{qr_col}+{or_col}"
+            if combo_key not in tested_combinations and qr_col and or_col:
+                combinations.append({
+                    "name": f"{qr.get('hypothesis', qr_col)} + {or_.get('hypothesis', or_col)}",
+                    "filters": [qr["filter"], or_["filter"]],
+                    "reasoning": f"Match quality ({qr_col}) + market pricing ({or_col})",
+                })
+                tested_combinations.add(combo_key)
+    
+    return combinations[:8]  # Limit to 8 combinations
+
+
+def _get_numeric_distribution(base_filters: List[Dict], col_name: str, 
+                              pl_column: str, num_buckets: int = 10) -> Dict:
+    """
+    Get the full distribution of a numeric column grouped into buckets.
+    This gives the bot VISIBILITY into the data to make intelligent decisions.
+    
+    Returns bucket-level stats: count, mean PL, sum PL for each bucket.
+    """
+    result = {
+        "column": col_name,
+        "buckets": [],
+        "total_rows": 0,
+        "overall_mean_pl": 0,
+        "min_value": None,
+        "max_value": None,
+        "analysis": "",
+        "recommended_brackets": [],
+    }
+    
+    # First, get min/max and basic stats
+    stats_result = _run_tool("query_data", {
+        "filters": base_filters,
+        "columns": [col_name],
+        "metrics": ["min", "max", "mean", "count"],
+        "pl_column": pl_column,
+    })
+    
+    if not stats_result or stats_result.get("error"):
+        return result
+    
+    stats = stats_result.get("result", {})
+    if isinstance(stats, list) and stats:
+        stats = stats[0]
+    
+    min_val = stats.get(f"{col_name}_min") or stats.get("_min") or stats.get("min")
+    max_val = stats.get(f"{col_name}_max") or stats.get("_max") or stats.get("max")
+    
+    if min_val is None or max_val is None:
+        return result
+    
+    try:
+        min_val = float(min_val)
+        max_val = float(max_val)
+    except (TypeError, ValueError):
+        return result
+    
+    result["min_value"] = min_val
+    result["max_value"] = max_val
+    
+    # Calculate bucket boundaries
+    bucket_size = (max_val - min_val) / num_buckets
+    if bucket_size <= 0:
+        return result
+    
+    # Query each bucket
+    buckets_data = []
+    for i in range(num_buckets):
+        bucket_min = min_val + (i * bucket_size)
+        bucket_max = min_val + ((i + 1) * bucket_size)
+        
+        # Query this bucket
+        bucket_filters = base_filters + [
+            {"col": col_name, "op": ">=", "value": bucket_min},
+            {"col": col_name, "op": "<" if i < num_buckets - 1 else "<=", "value": bucket_max},
+        ]
+        
+        bucket_result = _run_tool("query_data", {
+            "filters": bucket_filters,
+            "metrics": ["count", "mean", "sum"],
+            "pl_column": pl_column,
+        })
+        
+        if bucket_result and not bucket_result.get("error"):
+            bucket_stats = bucket_result.get("result", {})
+            if isinstance(bucket_stats, list) and bucket_stats:
+                bucket_stats = bucket_stats[0]
+            
+            count = bucket_stats.get("_count", 0)
+            mean_pl = bucket_stats.get("_mean", 0) or 0
+            sum_pl = bucket_stats.get("_sum", 0) or 0
+            
+            buckets_data.append({
+                "bucket_id": i + 1,
+                "min": round(bucket_min, 2),
+                "max": round(bucket_max, 2),
+                "range": f"{bucket_min:.2f}-{bucket_max:.2f}",
+                "count": count,
+                "mean_pl": mean_pl,
+                "sum_pl": sum_pl,
+                "roi_percent": f"{mean_pl * 100:.2f}%",
+            })
+            result["total_rows"] += count
+    
+    result["buckets"] = buckets_data
+    
+    # Calculate overall mean
+    if result["total_rows"] > 0:
+        total_pl = sum(b["sum_pl"] for b in buckets_data)
+        result["overall_mean_pl"] = total_pl / result["total_rows"]
+    
+    # Analyze and generate recommendations
+    result["analysis"], result["recommended_brackets"] = _analyze_bucket_distribution(buckets_data, col_name)
+    
+    return result
+
+
+def _analyze_bucket_distribution(buckets: List[Dict], col_name: str) -> Tuple[str, List[Dict]]:
+    """
+    Analyze bucket distribution to find optimal brackets.
+    Returns (analysis_text, recommended_brackets)
+    """
+    if not buckets:
+        return "No data available", []
+    
+    analysis_parts = []
+    recommendations = []
+    
+    # Find best and worst buckets
+    profitable_buckets = [b for b in buckets if b["mean_pl"] > 0]
+    unprofitable_buckets = [b for b in buckets if b["mean_pl"] < 0]
+    
+    # Sort by ROI
+    sorted_by_roi = sorted(buckets, key=lambda x: x["mean_pl"], reverse=True)
+    best_bucket = sorted_by_roi[0] if sorted_by_roi else None
+    worst_bucket = sorted_by_roi[-1] if sorted_by_roi else None
+    
+    # Analysis text
+    analysis_parts.append(f"Distribution of {col_name} across {len(buckets)} buckets:")
+    analysis_parts.append(f"• {len(profitable_buckets)} profitable buckets, {len(unprofitable_buckets)} unprofitable")
+    
+    if best_bucket:
+        analysis_parts.append(f"• BEST: {best_bucket['range']} with {best_bucket['roi_percent']} ROI ({best_bucket['count']} rows)")
+    if worst_bucket:
+        analysis_parts.append(f"• WORST: {worst_bucket['range']} with {worst_bucket['roi_percent']} ROI ({worst_bucket['count']} rows)")
+    
+    # Find consecutive profitable regions (potential brackets)
+    consecutive_profitable = []
+    current_run = []
+    
+    for bucket in buckets:
+        if bucket["mean_pl"] > 0:
+            current_run.append(bucket)
+        else:
+            if len(current_run) >= 2:
+                consecutive_profitable.append(current_run)
+            current_run = []
+    
+    if len(current_run) >= 2:
+        consecutive_profitable.append(current_run)
+    
+    # Generate bracket recommendations
+    for run in consecutive_profitable:
+        total_count = sum(b["count"] for b in run)
+        avg_roi = sum(b["mean_pl"] * b["count"] for b in run) / total_count if total_count > 0 else 0
+        
+        bracket = {
+            "min": run[0]["min"],
+            "max": run[-1]["max"],
+            "range": f"{run[0]['min']:.2f}-{run[-1]['max']:.2f}",
+            "count": total_count,
+            "avg_roi": avg_roi,
+            "num_buckets": len(run),
+            "filter": {"col": col_name, "op": "between", "min": run[0]["min"], "max": run[-1]["max"]},
+        }
+        recommendations.append(bracket)
+        
+        analysis_parts.append(f"• RECOMMENDED BRACKET: {bracket['range']} - {avg_roi*100:.2f}% ROI on {total_count} rows")
+    
+    # Also recommend excluding worst buckets if they're bad enough
+    very_bad = [b for b in buckets if b["mean_pl"] < -0.03]  # Worse than -3%
+    if very_bad:
+        exclude_ranges = [f"{b['range']}" for b in very_bad[:3]]
+        analysis_parts.append(f"• CONSIDER EXCLUDING: {', '.join(exclude_ranges)} (severely negative)")
+    
+    return "\n".join(analysis_parts), recommendations
+
+
+def _expand_bracket_for_volume(base_filters: List[Dict], bracket_filter: Dict, 
+                               pl_column: str, target_rows: int = 100) -> Dict:
+    """
+    If a good bracket has too few rows, intelligently expand it.
+    
+    Strategy:
+    1. Get the current bucket distribution around the bracket
+    2. Expand in the direction that has better ROI
+    3. Stop when we reach target_rows or ROI drops significantly
+    """
+    result = {
+        "original_filter": bracket_filter,
+        "expanded_filter": None,
+        "original_rows": 0,
+        "expanded_rows": 0,
+        "original_roi": 0,
+        "expanded_roi": 0,
+        "expansion_direction": None,
+        "success": False,
+    }
+    
+    col_name = bracket_filter.get("col")
+    original_min = bracket_filter.get("min")
+    original_max = bracket_filter.get("max")
+    
+    if not col_name or original_min is None or original_max is None:
+        return result
+    
+    # Get original stats
+    original_filters = base_filters + [bracket_filter]
+    original_result = _run_tool("test_filter", {
+        "filters": original_filters,
+        "pl_column": pl_column,
+    })
+    
+    if not original_result or original_result.get("error"):
+        return result
+    
+    result["original_rows"] = original_result.get("test", {}).get("rows", 0)
+    result["original_roi"] = original_result.get("test", {}).get("roi", 0)
+    
+    if result["original_rows"] >= target_rows:
+        result["success"] = True
+        result["expanded_filter"] = bracket_filter
+        result["expanded_rows"] = result["original_rows"]
+        result["expanded_roi"] = result["original_roi"]
+        return result
+    
+    # Get distribution to see expansion options
+    distribution = _get_numeric_distribution(base_filters, col_name, pl_column, num_buckets=20)
+    
+    if not distribution.get("buckets"):
+        return result
+    
+    buckets = distribution["buckets"]
+    
+    # Find buckets adjacent to our bracket
+    bracket_center = (original_min + original_max) / 2
+    lower_adjacent = [b for b in buckets if b["max"] <= original_min]
+    upper_adjacent = [b for b in buckets if b["min"] >= original_max]
+    
+    # Calculate ROI of adjacent regions
+    lower_roi = sum(b["mean_pl"] * b["count"] for b in lower_adjacent[-3:]) / sum(b["count"] for b in lower_adjacent[-3:]) if lower_adjacent else -999
+    upper_roi = sum(b["mean_pl"] * b["count"] for b in upper_adjacent[:3]) / sum(b["count"] for b in upper_adjacent[:3]) if upper_adjacent else -999
+    
+    # Expand in better direction
+    if lower_roi > upper_roi and lower_roi > -0.02:
+        # Expand downward
+        new_min = lower_adjacent[-1]["min"] if lower_adjacent else original_min
+        new_max = original_max
+        result["expansion_direction"] = "lower"
+    elif upper_roi > -0.02:
+        # Expand upward
+        new_min = original_min
+        new_max = upper_adjacent[0]["max"] if upper_adjacent else original_max
+        result["expansion_direction"] = "upper"
+    else:
+        # Both directions are bad, expand both slightly
+        bucket_size = buckets[0]["max"] - buckets[0]["min"] if buckets else 0.1
+        new_min = original_min - bucket_size
+        new_max = original_max + bucket_size
+        result["expansion_direction"] = "both"
+    
+    # Test expanded bracket
+    expanded_filter = {"col": col_name, "op": "between", "min": new_min, "max": new_max}
+    expanded_filters = base_filters + [expanded_filter]
+    
+    expanded_result = _run_tool("test_filter", {
+        "filters": expanded_filters,
+        "pl_column": pl_column,
+    })
+    
+    if expanded_result and not expanded_result.get("error"):
+        result["expanded_filter"] = expanded_filter
+        result["expanded_rows"] = expanded_result.get("test", {}).get("rows", 0)
+        result["expanded_roi"] = expanded_result.get("test", {}).get("roi", 0)
+        
+        # Only count as success if we gained rows without losing too much ROI
+        roi_drop = result["original_roi"] - result["expanded_roi"]
+        if result["expanded_rows"] > result["original_rows"] and roi_drop < 0.02:
+            result["success"] = True
+    
+    return result
+
+
+def _get_full_feature_analysis(base_filters: List[Dict], pl_column: str, 
+                               features: List[str] = None) -> Dict:
+    """
+    Get comprehensive analysis of all numeric features.
+    This gives the bot full visibility to make intelligent decisions.
+    
+    Returns a structured analysis that can be passed to LLM for decision-making.
+    """
+    if features is None:
+        features = [
+            "ACTUAL ODDS", "% DRIFT", "STRIKE RATE", 
+            "Home Avg Points", "Away Avg Points", "Points Diff",
+            "O2.5 Odds", "U2.5 Odds", "BTTS Y Odds", "BTTS N Odds",
+            "Home Odds", "Away Odds", "Draw Odds",
+        ]
+    
+    analysis = {
+        "features_analyzed": [],
+        "best_opportunities": [],
+        "summary": "",
+    }
+    
+    for feature in features:
+        dist = _get_numeric_distribution(base_filters, feature, pl_column, num_buckets=10)
+        
+        if dist.get("buckets"):
+            feature_analysis = {
+                "feature": feature,
+                "total_rows": dist["total_rows"],
+                "overall_roi": f"{dist['overall_mean_pl']*100:.2f}%",
+                "min": dist["min_value"],
+                "max": dist["max_value"],
+                "bucket_summary": [],
+                "recommended_brackets": dist.get("recommended_brackets", []),
+                "analysis": dist.get("analysis", ""),
+            }
+            
+            # Summarize buckets
+            for b in dist["buckets"]:
+                feature_analysis["bucket_summary"].append({
+                    "range": b["range"],
+                    "count": b["count"],
+                    "roi": b["roi_percent"],
+                })
+            
+            analysis["features_analyzed"].append(feature_analysis)
+            
+            # Track best opportunities
+            for rec in dist.get("recommended_brackets", []):
+                if rec["avg_roi"] > 0.02 and rec["count"] >= 50:
+                    analysis["best_opportunities"].append({
+                        "feature": feature,
+                        "bracket": rec["range"],
+                        "roi": f"{rec['avg_roi']*100:.2f}%",
+                        "rows": rec["count"],
+                        "filter": rec["filter"],
+                    })
+    
+    # Sort best opportunities by ROI
+    analysis["best_opportunities"].sort(key=lambda x: float(x["roi"].replace("%", "")), reverse=True)
+    
+    # Generate summary
+    analysis["summary"] = f"""
+Analyzed {len(analysis['features_analyzed'])} features.
+Found {len(analysis['best_opportunities'])} promising brackets with ROI > 2% and 50+ rows.
+Top opportunities:
+""" + "\n".join([f"• {opp['feature']} {opp['bracket']}: {opp['roi']} ({opp['rows']} rows)" 
+                for opp in analysis["best_opportunities"][:5]])
+    
+    return analysis
+
+
+def _find_categories_to_exclude(base_filters: List[Dict], col_name: str, 
+                                base_roi: float, pl_column: str) -> Dict:
+    """
+    Instead of finding the BEST category to include,
+    find the WORST categories to EXCLUDE.
+    This preserves volume while removing noise.
+    """
+    results = {
+        "col": col_name,
+        "values_tested": [],
+        "values_to_exclude": [],
+        "exclusion_filter": None,
+        "expected_improvement": 0,
+    }
+    
+    # Get value distribution
+    query_result = _run_tool("query_data", {
+        "filters": base_filters,
+        "group_by": [col_name],
+        "metrics": ["count", "mean"],
+        "pl_column": pl_column,
+    })
+    
+    if not query_result or query_result.get("error"):
+        return results
+    
+    groups = query_result.get("result", [])
+    if not isinstance(groups, list):
+        return results
+    
+    # Test each value
+    bad_values = []
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        value = group.get(col_name)
+        count = group.get("_count", 0)
+        mean_pl = group.get("_mean", 0)
+        
+        if value is None or count < 20:
+            continue
+        
+        results["values_tested"].append({
+            "value": value,
+            "count": count,
+            "mean_pl": mean_pl,
+        })
+        
+        # If this value is significantly WORSE than baseline
+        if mean_pl < base_roi - 0.02:  # More than 2% worse
+            bad_values.append(value)
+    
+    # If we found bad values (but not too many)
+    if bad_values and len(bad_values) < len(groups) / 2:
+        results["values_to_exclude"] = bad_values
+        results["exclusion_filter"] = {
+            "col": col_name,
+            "op": "not_in",
+            "value": bad_values,
+        }
+        
+        # Estimate improvement
+        avg_bad_pl = sum([v["mean_pl"] for v in results["values_tested"] 
+                        if v["value"] in bad_values]) / len(bad_values) if bad_values else 0
+        results["expected_improvement"] = base_roi - avg_bad_pl
+    
+    return results
+
 
 # ============================================================
 # OpenAI Client (GPT-5)
@@ -1769,44 +2544,69 @@ def _deep_drill_down(base_filters: List[Dict], pl_column: str, bible: Dict) -> D
     # For each: test brackets AND thresholds (>= X, <= X)
     NUMERIC_TESTS = {
         "ACTUAL ODDS": {
-            "brackets": [(1.1, 1.3), (1.3, 1.5), (1.5, 1.8), (1.8, 2.2), (2.2, 3.0)],
-            "thresholds_gte": [1.3, 1.5, 1.8],
-            "thresholds_lte": [1.5, 1.8, 2.0],
+            "brackets": [(1.1, 1.3), (1.3, 1.5), (1.5, 1.8), (1.8, 2.2), (2.2, 3.0), (3.0, 5.0)],
+            "thresholds_gte": [1.3, 1.5, 1.8, 2.0, 2.5],
+            "thresholds_lte": [1.5, 1.8, 2.0, 2.5, 3.0],
         },
         "% DRIFT": {
-            "brackets": [(0, 3), (3, 6), (6, 10), (10, 20)],
-            "thresholds_gte": [3, 5, 8],
-            "thresholds_lte": [3, 5, 8],
+            "brackets": [(0, 3), (3, 6), (6, 10), (10, 20), (0, 5), (5, 15)],
+            "thresholds_gte": [2, 3, 5, 8, 10],
+            "thresholds_lte": [3, 5, 8, 10],
         },
         "STRIKE RATE": {
-            "brackets": [(30, 50), (50, 60), (60, 70), (70, 90)],
-            "thresholds_gte": [50, 60, 70],
-            "thresholds_lte": [50, 60],
+            "brackets": [(30, 50), (50, 60), (60, 70), (70, 90), (40, 60), (55, 75)],
+            "thresholds_gte": [45, 50, 55, 60, 65, 70],
+            "thresholds_lte": [50, 55, 60, 65],
         },
         "Home Avg Points": {
-            "brackets": [(0, 1.0), (1.0, 1.4), (1.4, 1.8), (1.8, 2.2), (2.2, 3.0)],
+            "brackets": [(0, 1.0), (1.0, 1.4), (1.4, 1.8), (1.8, 2.2), (2.2, 3.0), (0.8, 1.6), (1.2, 2.0)],
             "thresholds_gte": [1.0, 1.2, 1.4, 1.6, 1.8, 2.0],
-            "thresholds_lte": [1.2, 1.4, 1.6],
+            "thresholds_lte": [1.0, 1.2, 1.4, 1.6, 1.8],
         },
         "Away Avg Points": {
-            "brackets": [(0, 1.0), (1.0, 1.4), (1.4, 1.8), (1.8, 2.2)],
-            "thresholds_gte": [1.0, 1.2, 1.4],
-            "thresholds_lte": [1.2, 1.4],
+            "brackets": [(0, 1.0), (1.0, 1.4), (1.4, 1.8), (1.8, 2.2), (0.6, 1.2), (0.8, 1.5)],
+            "thresholds_gte": [0.8, 1.0, 1.2, 1.4, 1.6],
+            "thresholds_lte": [1.0, 1.2, 1.4, 1.6],
         },
         "O2.5 Odds": {
+            "brackets": [(1.3, 1.6), (1.6, 2.0), (2.0, 2.5), (2.5, 3.5), (1.4, 1.8), (1.8, 2.3)],
+            "thresholds_gte": [1.5, 1.7, 1.8, 2.0, 2.2, 2.5],
+            "thresholds_lte": [1.6, 1.8, 2.0, 2.3, 2.5],
+        },
+        "U2.5 Odds": {
             "brackets": [(1.3, 1.6), (1.6, 2.0), (2.0, 2.5), (2.5, 3.5)],
-            "thresholds_gte": [1.8, 2.0, 2.5],
+            "thresholds_gte": [1.5, 1.8, 2.0, 2.5],
             "thresholds_lte": [1.8, 2.0, 2.5],
         },
         "BTTS Y Odds": {
+            "brackets": [(1.4, 1.7), (1.7, 2.0), (2.0, 2.5), (1.5, 1.9), (1.8, 2.3)],
+            "thresholds_gte": [1.5, 1.6, 1.8, 2.0],
+            "thresholds_lte": [1.7, 1.8, 2.0, 2.2],
+        },
+        "BTTS N Odds": {
             "brackets": [(1.4, 1.7), (1.7, 2.0), (2.0, 2.5)],
-            "thresholds_gte": [1.6, 1.8, 2.0],
-            "thresholds_lte": [1.8, 2.0],
+            "thresholds_gte": [1.5, 1.8, 2.0],
+            "thresholds_lte": [1.8, 2.0, 2.3],
         },
         "Points Diff": {
-            "brackets": [(-1.5, -0.5), (-0.5, 0.5), (0.5, 1.5), (1.5, 3.0)],
-            "thresholds_gte": [0, 0.5, 1.0],
-            "thresholds_lte": [0, -0.5],
+            "brackets": [(-1.5, -0.5), (-0.5, 0.5), (0.5, 1.5), (1.5, 3.0), (-1.0, 0.5), (0, 1.0), (0.5, 2.0)],
+            "thresholds_gte": [-0.5, 0, 0.5, 1.0, 1.5],
+            "thresholds_lte": [0, 0.5, 1.0, -0.5],
+        },
+        "Home Odds": {
+            "brackets": [(1.1, 1.4), (1.4, 1.8), (1.8, 2.3), (2.3, 3.0), (3.0, 5.0)],
+            "thresholds_gte": [1.3, 1.5, 1.8, 2.0, 2.5],
+            "thresholds_lte": [1.5, 1.8, 2.0, 2.5, 3.0],
+        },
+        "Away Odds": {
+            "brackets": [(1.5, 2.0), (2.0, 2.8), (2.8, 4.0), (4.0, 6.0), (6.0, 10.0)],
+            "thresholds_gte": [2.0, 2.5, 3.0, 4.0, 5.0],
+            "thresholds_lte": [2.5, 3.0, 4.0, 5.0],
+        },
+        "Draw Odds": {
+            "brackets": [(3.0, 3.5), (3.5, 4.0), (4.0, 5.0), (5.0, 7.0)],
+            "thresholds_gte": [3.2, 3.5, 4.0, 4.5],
+            "thresholds_lte": [3.5, 4.0, 4.5, 5.0],
         },
     }
     
@@ -2048,10 +2848,17 @@ def _deep_drill_down(base_filters: List[Dict], pl_column: str, bible: Dict) -> D
         
         for f in improving_filters[:12]:
             status_icon = "✅" if f.get("gates_passed") else "⚠️"
+            # Show FULL train→val→test consistency
+            train_roi = f.get('train_roi', 0)
+            val_roi = f.get('val_roi', 0)
+            test_roi = f.get('test_roi', 0)
+            is_consistent = _is_consistent(f)
+            consistency_icon = "🟢" if is_consistent else "🔴"
+            
             st.markdown(
-                f"- **{f['display']}**: Test {f['test_roi']:.2%} "
+                f"- **{f['display']}**: Train {train_roi:.1%} → Val {val_roi:.1%} → Test {test_roi:.1%} "
                 f"(**+{f['improvement']*100:.1f}%**) "
-                f"[{f['test_rows']} rows] {status_icon}"
+                f"[{f['test_rows']} rows] {status_icon} {consistency_icon}"
             )
     else:
         st.warning("No individual filters improve test ROI over baseline")
@@ -2689,36 +3496,56 @@ Respond with JSON:
 }"""
 
     resp = _llm(context, question, max_tokens=3000)
+    _log(f"_deep_analyze_iteration LLM response length: {len(resp) if resp else 0}")
+    
     parsed = _parse_json(resp)
     
+    # Get results for analysis
+    results = avenue_results.get("results", [])
+    analysis = avenue_results.get("analysis", {})
+    best_roi = analysis.get("best_test_roi", 0)
+    truly_passing = analysis.get("truly_passing", [])
+    recommendation = analysis.get("recommendation", "")
+    
     if not parsed:
+        _log("LLM response failed to parse - using fallback analysis")
         # Generate meaningful fallback analysis
-        best_result = results[0] if results else {}
-        best_roi = best_result.get("test_roi", 0) if best_result else 0
-        recommendation = avenue_results.get("analysis", {}).get("recommendation", "")
-        
         return {
-            "situation_assessment": resp[:500] if resp else f"Tested avenue with {len(results)} variations. Best test ROI: {best_roi:.2%}. {recommendation}",
-            "key_learning": f"Avenue {'shows promise' if best_roi > 0.01 else 'needs refinement' if best_roi > 0 else 'underperforms'} with {best_roi:.2%} ROI",
-            "decision": {"should_continue_avenue": best_roi > 0, "next_action": "refine filters" if best_roi > 0 else "move to next avenue"},
-            "next_recommendation": f"{'Continue refining this avenue' if best_roi > 0.01 else 'Try different filters' if best_roi > 0 else 'Move to next avenue'}",
-            "confidence_in_direction": "medium" if best_roi > 0.01 else "low",
+            "situation_assessment": f"Tested avenue with {len(results)} variations. Best test ROI: {best_roi:.2%}. Recommendation: {recommendation}. {resp[:300] if resp else 'LLM analysis unavailable.'}",
+            "detailed_reasoning": f"Found {len(truly_passing)} strategies passing all gates. {'This is promising!' if truly_passing else 'Need to explore different filters or combinations.'}",
+            "key_learning": f"Avenue achieved {best_roi:.2%} test ROI with {len(truly_passing)} passing strategies - {'promising, continue refining' if best_roi > 0.02 else 'marginal, try variations' if best_roi > 0 else 'weak, consider pivoting'}",
+            "decision": {"should_continue_avenue": best_roi > 0.01, "next_action": "drill down on best filters" if best_roi > 0.01 else "try next avenue"},
+            "next_recommendation": f"{'CONTINUE: Drill deeper into this profitable avenue' if best_roi > 0.02 else 'VARY: Try different filter combinations' if best_roi > 0 else 'PIVOT: Move to next most promising avenue'}",
+            "confidence_in_direction": "high" if best_roi > 0.03 else "medium" if best_roi > 0.01 else "low",
+            "refinement_ideas": [],
         }
     
-    # Ensure key fields have values
-    if not parsed.get("key_learning"):
-        best_result = results[0] if results else {}
-        best_roi = best_result.get("test_roi", 0) if best_result else 0
-        parsed["key_learning"] = f"Best variation achieved {best_roi:.2%} test ROI"
+    # ALWAYS ensure key_learning has meaningful content
+    if not parsed.get("key_learning") or parsed.get("key_learning", "").strip() == "":
+        # Generate based on actual results
+        if best_roi > 0.03:
+            parsed["key_learning"] = f"STRONG: Avenue shows {best_roi:.2%} ROI with {len(truly_passing)} validated strategies - high potential"
+        elif best_roi > 0.01:
+            parsed["key_learning"] = f"PROMISING: Avenue shows {best_roi:.2%} ROI - worth continued exploration with refined filters"
+        elif best_roi > 0:
+            parsed["key_learning"] = f"MARGINAL: Avenue shows {best_roi:.2%} ROI - may improve with right combinations"
+        else:
+            parsed["key_learning"] = f"WEAK: Avenue shows {best_roi:.2%} ROI - consider pivoting to different approach"
     
-    if not parsed.get("next_recommendation"):
-        parsed["next_recommendation"] = "Continue exploration based on results"
+    # ALWAYS ensure next_recommendation has content
+    if not parsed.get("next_recommendation") or parsed.get("next_recommendation", "").strip() == "":
+        if best_roi > 0.02:
+            parsed["next_recommendation"] = "DRILL DOWN: This avenue is profitable - test more filter combinations and numeric ranges to optimize"
+        elif best_roi > 0:
+            parsed["next_recommendation"] = "VARY: Try different brackets, add DRIFT filter, or combine with categorical exclusions"
+        else:
+            parsed["next_recommendation"] = "PIVOT: Move to next avenue - this direction isn't yielding results"
     
     # Backward compatibility
     if not parsed.get("detailed_reasoning"):
-        parsed["detailed_reasoning"] = parsed.get("situation_assessment", "")
+        parsed["detailed_reasoning"] = parsed.get("situation_assessment", f"Analysis of {avenue.get('avenue', 'avenue')} complete")
     if not parsed.get("should_continue_avenue"):
-        parsed["should_continue_avenue"] = parsed.get("decision", {}).get("should_continue_avenue", False)
+        parsed["should_continue_avenue"] = parsed.get("decision", {}).get("should_continue_avenue", best_roi > 0.01)
     
     return parsed
 
@@ -3466,88 +4293,343 @@ def run_agent(is_new_run: bool = True):
         st.markdown(f"#### Iteration {iteration}: {avenue_name}")
         st.markdown(f"*{current_avenue.get('market_inefficiency_hypothesis', current_avenue.get('why_promising', ''))}*")
         
-        # Explore avenue
-        with st.status(f"Testing avenue {iteration}...", expanded=True) as status:
-            avenue_results = _explore_avenue(current_avenue, pl_column, bible, exploration_analysis)
-            status.update(label=f"Avenue {iteration} complete", state="complete")
+        # ============================================================
+        # WORLD-CLASS QUANT APPROACH: DEEP PERSISTENT EXPLORATION
+        # ============================================================
         
-        # Display results
-        analysis = avenue_results.get("analysis", {})
-        best_roi = analysis.get('best_test_roi', 0)
-        recommendation = analysis.get('recommendation', 'N/A')
+        # Track avenue-specific state
+        avenue_iteration = 0
+        avenue_tests_total = 0
+        avenue_best_roi = 0
+        avenue_strategies = []
+        avenue_learnings = []
+        should_continue_avenue = True
         
-        _research_log(f"  → Best Test ROI: {best_roi:.2%}, Recommendation: {recommendation}", "info")
+        # Keep exploring this avenue until exhausted (or max iterations)
+        MAX_AVENUE_ITERATIONS = 5
+        MIN_TESTS_BEFORE_MOVING_ON = 50
         
-        st.markdown(f"**Results:** {analysis.get('summary', 'N/A')}")
-        st.markdown(f"**Best Test ROI:** {best_roi:.4f}")
-        st.markdown(f"**Recommendation:** {recommendation}")
-        
-        with st.expander(f"Avenue {iteration} Details", expanded=False):
-            st.code(_safe_json(avenue_results, 3000), language="json")
-        
-        # Deep analysis
-        st.markdown("**🧠 Analysis:**")
-        iteration_analysis = _deep_analyze_iteration(
-            current_avenue,
-            avenue_results,
-            st.session_state.accumulated_learnings,
-            len(avenues_remaining)
-        )
-        
-        detailed = iteration_analysis.get("detailed_reasoning", "")
-        if detailed:
-            st.markdown(detailed[:600] + "..." if len(detailed) > 600 else detailed)
-        
-        st.markdown(f"*Key learning: {iteration_analysis.get('key_learning', 'N/A')}*")
-        _add_learning(iteration_analysis.get("key_learning", f"Iteration {iteration} complete"))
-        
-        # ====== AI DECIDES NEXT STEPS ======
-        # Use AI's recommendations to adjust strategy
-        
-        # 1. If AI suggests refinements, add them as new avenues
-        refinement_ideas = iteration_analysis.get("refinement_ideas", [])
-        if refinement_ideas and iteration_analysis.get("should_continue_avenue", False):
-            st.markdown("**🔧 AI suggests refinements:**")
-            for idea in refinement_ideas[:3]:
-                filter_to_add = idea.get("filter_to_add", {})
-                reasoning = idea.get("reasoning", "")
-                if filter_to_add:
-                    new_avenue = {
-                        "avenue": f"Refinement: {current_avenue.get('avenue', '')} + {filter_to_add.get('col')}={filter_to_add.get('value')}",
-                        "base_filters": current_avenue.get("base_filters", []) + [filter_to_add],
-                        "market_inefficiency_hypothesis": reasoning,
-                        "source": "ai_refinement",
-                    }
-                    avenues_remaining.insert(0, new_avenue)  # Add to front of queue
-                    st.markdown(f"- Added: {filter_to_add.get('col')}={filter_to_add.get('value')} ({reasoning[:50]}...)")
-        
-        # 2. Check AI's confidence and adjust
-        confidence = iteration_analysis.get("confidence_in_direction", "medium")
-        next_rec = iteration_analysis.get("next_recommendation", "")
-        if next_rec:
-            st.markdown(f"*AI recommends: {next_rec}*")
-        
-        # 3. If AI says don't continue with this avenue, remove similar ones
-        if not iteration_analysis.get("should_continue_avenue", True):
-            current_base = current_avenue.get("avenue", "").split(",")[0] if current_avenue.get("avenue") else ""
-            if current_base:
-                removed = 0
-                new_remaining = []
-                for av in avenues_remaining:
-                    if current_base in av.get("avenue", ""):
-                        removed += 1
+        while should_continue_avenue and avenue_iteration < MAX_AVENUE_ITERATIONS:
+            avenue_iteration += 1
+            
+            st.markdown(f"##### 🔬 Avenue Deep Dive - Round {avenue_iteration}")
+            
+            # ============================================================
+            # FULL FEATURE VISIBILITY (Quant Research Engine)
+            # ============================================================
+            
+            base_filters = current_avenue.get("base_filters", [])
+            
+            # On first round, get full feature distribution analysis
+            if avenue_iteration == 1:
+                with st.expander("📊 Feature Distribution Analysis (Bot's Data View)", expanded=False):
+                    st.markdown("*Analyzing numeric features to find optimal brackets...*")
+                    
+                    # Get comprehensive feature analysis
+                    feature_analysis = _get_full_feature_analysis(base_filters, pl_column)
+                    
+                    if feature_analysis.get("features_analyzed"):
+                        # Show summary
+                        st.markdown(feature_analysis.get("summary", ""))
+                        
+                        # Show best opportunities
+                        if feature_analysis.get("best_opportunities"):
+                            st.markdown("**🎯 Best Bracket Opportunities:**")
+                            for opp in feature_analysis["best_opportunities"][:8]:
+                                st.markdown(f"• **{opp['feature']}** {opp['bracket']}: {opp['roi']} ({opp['rows']} rows)")
+                        
+                        # Show detailed bucket view for top features
+                        st.markdown("**📈 Detailed Bucket Analysis:**")
+                        for feat_data in feature_analysis["features_analyzed"][:5]:
+                            with st.expander(f"{feat_data['feature']} - {feat_data['total_rows']} rows", expanded=False):
+                                st.markdown(feat_data.get("analysis", ""))
+                                
+                                # Show bucket table
+                                bucket_df_data = []
+                                for b in feat_data.get("bucket_summary", []):
+                                    roi_val = float(b["roi"].replace("%", ""))
+                                    emoji = "🟢" if roi_val > 2 else "🟡" if roi_val > 0 else "🔴"
+                                    bucket_df_data.append({
+                                        "Range": b["range"],
+                                        "Count": b["count"],
+                                        "ROI": f"{emoji} {b['roi']}",
+                                    })
+                                
+                                if bucket_df_data:
+                                    st.table(bucket_df_data)
+                        
+                        # Store for hypothesis generation
+                        st.session_state.feature_analysis = feature_analysis
+            
+            # ============================================================
+            # HYPOTHESIS-DRIVEN TESTING (Quant Research Engine)
+            # ============================================================
+            
+            # Generate hypotheses for this round
+            all_avenue_results = []  # Collect all results for this avenue
+            accumulated_learning_texts = [l.get("learning", "") if isinstance(l, dict) else str(l) 
+                                         for l in st.session_state.accumulated_learnings]
+            
+            hypotheses = _generate_hypotheses_for_avenue(
+                current_avenue, 
+                all_avenue_results,  # Empty for round 1, grows with iterations
+                accumulated_learning_texts,
+                avenue_iteration
+            )
+            
+            # ADD HYPOTHESES FROM FEATURE ANALYSIS
+            feature_analysis = st.session_state.get("feature_analysis", {})
+            if feature_analysis.get("best_opportunities"):
+                for opp in feature_analysis["best_opportunities"][:5]:
+                    hypotheses.append({
+                        "name": f"Data-Driven: {opp['feature']} {opp['bracket']}",
+                        "filter": opp["filter"],
+                        "reasoning": f"Bucket analysis shows {opp['roi']} ROI on {opp['rows']} rows",
+                        "expected_effect": "High probability of success - data-validated bracket",
+                        "category": "data_driven",
+                    })
+            
+            if hypotheses:
+                st.markdown(f"**🧪 Testing {len(hypotheses)} hypotheses:**")
+                for h in hypotheses[:5]:
+                    st.caption(f"• {h['name']}: {h['reasoning'][:60]}...")
+            
+            # Explore avenue
+            with st.status(f"Testing avenue {iteration} (round {avenue_iteration})...", expanded=True) as status:
+                if avenue_iteration == 1:
+                    # First round: standard exploration + hypothesis testing
+                    avenue_results = _explore_avenue(current_avenue, pl_column, bible, exploration_analysis)
+                    
+                    # ALSO test hypotheses that weren't covered
+                    hypothesis_results = []
+                    base_filters = current_avenue.get("base_filters", [])
+                    gates = bible.get("gates", DEFAULT_GATES)
+                    
+                    for hyp in hypotheses[:15]:  # Test up to 15 hypotheses
+                        hyp_filter = hyp.get("filter")
+                        if not hyp_filter:
+                            continue
+                        
+                        test_filters = base_filters + [hyp_filter]
+                        
+                        result = _run_tool("test_filter", {
+                            "filters": test_filters,
+                            "pl_column": pl_column,
+                            "enforcement": gates,
+                        })
+                        
+                        if result and not result.get("error"):
+                            hyp_result = {
+                                "hypothesis": hyp["name"],
+                                "reasoning": hyp.get("reasoning", ""),
+                                "category": hyp.get("category", "unknown"),
+                                "filter": hyp_filter,
+                                "filters": test_filters,
+                                "train_roi": result.get("train", {}).get("roi", 0),
+                                "val_roi": result.get("val", {}).get("roi", 0),
+                                "test_roi": result.get("test", {}).get("roi", 0),
+                                "train_rows": result.get("train", {}).get("rows", 0),
+                                "val_rows": result.get("val", {}).get("rows", 0),
+                                "test_rows": result.get("test", {}).get("rows", 0),
+                                "gates_passed": result.get("gates_passed", False),
+                                "is_consistent": _is_consistent(result),
+                            }
+                            hypothesis_results.append(hyp_result)
+                            all_avenue_results.append(hyp_result)
+                            
+                            # Update hypothesis count
+                            st.session_state.hypothesis_count = st.session_state.get("hypothesis_count", 0) + 1
+                    
+                    # Merge hypothesis results with standard results
+                    if hypothesis_results:
+                        existing_results = avenue_results.get("results", [])
+                        avenue_results["results"] = existing_results + hypothesis_results
+                        
+                        # Show hypothesis testing results
+                        passing_hyp = [h for h in hypothesis_results if h.get("gates_passed")]
+                        consistent_hyp = [h for h in hypothesis_results if h.get("is_consistent")]
+                        st.success(f"✅ Tested {len(hypothesis_results)} hypotheses: {len(passing_hyp)} passing, {len(consistent_hyp)} consistent")
+                        
+                        # Show best hypothesis results
+                        sorted_hyp = sorted(hypothesis_results, key=lambda x: x.get("test_roi", 0), reverse=True)
+                        for h in sorted_hyp[:5]:
+                            consistency_icon = "🟢" if h.get("is_consistent") else "🔴"
+                            gates_icon = "✅" if h.get("gates_passed") else "⚠️"
+                            st.markdown(
+                                f"• **{h['hypothesis']}**: Train {h['train_roi']:.1%} → Val {h['val_roi']:.1%} → "
+                                f"Test {h['test_roi']:.1%} [{h['test_rows']} rows] {gates_icon} {consistency_icon}"
+                            )
+                else:
+                    # Subsequent rounds: drill down on best results
+                    if avenue_strategies:
+                        # Use best strategy filters as new base
+                        drill_base = avenue_strategies[0].get("filters", current_avenue.get("base_filters", []))
                     else:
-                        new_remaining.append(av)
-                if removed > 0:
-                    avenues_remaining[:] = new_remaining
-                    st.markdown(f"*AI: Skipping {removed} similar avenues - this direction isn't promising*")
+                        drill_base = current_avenue.get("base_filters", [])
+                    
+                    avenue_results = {"results": [], "analysis": {}}
+                    drill_results = _deep_drill_down(drill_base, pl_column, bible)
+                    
+                    # Convert drill results to avenue format
+                    avenue_results["results"] = drill_results.get("individual_tests", [])
+                    avenue_results["analysis"] = {
+                        "summary": f"Drill down tested {len(drill_results.get('individual_tests', []))} variations",
+                        "truly_passing": [r for r in drill_results.get("individual_tests", []) 
+                                         if r.get("gates_passed") and _is_consistent(r)],
+                        "recommendation": "CONTINUE" if drill_results.get("recommended_additions") else "EXPLORE",
+                        "best_test_roi": max([r.get("test_roi", 0) for r in drill_results.get("individual_tests", [])] or [0]),
+                    }
+                
+                status.update(label=f"Avenue {iteration} round {avenue_iteration} complete", state="complete")
+            
+            # Display results
+            analysis = avenue_results.get("analysis", {})
+            best_roi = analysis.get('best_test_roi', 0)
+            recommendation = analysis.get('recommendation', 'N/A')
+            truly_passing = analysis.get("truly_passing", [])
+            
+            if best_roi > avenue_best_roi:
+                avenue_best_roi = best_roi
+            
+            _research_log(f"  → Round {avenue_iteration}: Best ROI {best_roi:.2%}, {len(truly_passing)} passing", "info")
+            
+            st.markdown(f"**Results:** {analysis.get('summary', 'N/A')}")
+            st.markdown(f"**Best Test ROI:** {best_roi:.4f}")
+            st.markdown(f"**Passing Strategies:** {len(truly_passing)}")
+            
+            # Count tests
+            results_count = len(avenue_results.get("results", []))
+            avenue_tests_total += results_count
+            
+            with st.expander(f"Round {avenue_iteration} Details", expanded=False):
+                st.code(_safe_json(avenue_results, 3000), language="json")
+            
+            # Deep analysis with ACTUAL REASONING
+            st.markdown("**🧠 Analysis:**")
+            iteration_analysis = _deep_analyze_iteration(
+                current_avenue,
+                avenue_results,
+                st.session_state.accumulated_learnings,
+                len(avenues_remaining)
+            )
+            
+            detailed = iteration_analysis.get("detailed_reasoning", "")
+            if detailed:
+                st.markdown(detailed[:600] + "..." if len(detailed) > 600 else detailed)
+            
+            # Make key learning PROMINENT
+            key_learning = iteration_analysis.get('key_learning', 'Analysis complete')
+            st.info(f"💡 **Key Learning:** {key_learning}")
+            _add_learning(key_learning)
+            avenue_learnings.append(key_learning)
+            
+            # Show CLEAR next steps
+            next_rec = iteration_analysis.get("next_recommendation", "")
+            confidence = iteration_analysis.get("confidence_in_direction", "medium")
+            if next_rec:
+                confidence_emoji = "🟢" if confidence == "high" else "🟡" if confidence == "medium" else "🔴"
+                st.markdown(f"**➡️ NEXT STEP ({confidence_emoji} {confidence} confidence):** {next_rec}")
+            
+            # ============================================================
+            # USE QUANT ENGINE FOR DEEP ANALYSIS
+            # ============================================================
+            all_results = avenue_results.get("results", [])
+            deep_analysis = _analyze_results_deeply(all_results, current_avenue.get("base_filters", []), hypotheses if 'hypotheses' in dir() else [])
+            
+            if deep_analysis.get("patterns_found"):
+                st.markdown("**🔍 Patterns Discovered:**")
+                for pattern in deep_analysis["patterns_found"][:3]:
+                    st.markdown(f"• {pattern.get('pattern', '')} → {pattern.get('implication', '')}")
+            
+            if deep_analysis.get("hypotheses_supported"):
+                st.markdown("**✅ Hypotheses Supported:**")
+                for h in deep_analysis["hypotheses_supported"][:3]:
+                    st.markdown(f"• {h['hypothesis']}: {h['evidence']}")
+            
+            # ====== DECISION: Continue avenue or move on? ======
+            
+            # Collect any passing strategies from this round
+            for tp in truly_passing:
+                if tp not in avenue_strategies:
+                    avenue_strategies.append(tp)
+            
+            # Use quant engine decision function
+            should_continue_decision, continue_reason = _should_continue_avenue(
+                current_avenue, all_results, avenue_tests_total, 
+                avenue_iteration, avenue_best_roi
+            )
+            
+            # Also consider AI recommendation
+            should_ai_continue = iteration_analysis.get("should_continue_avenue", False)
+            
+            # Combined decision logic
+            if should_continue_decision or (should_ai_continue and avenue_iteration < MAX_AVENUE_ITERATIONS):
+                should_continue_avenue = True
+                st.markdown(f"*🔄 CONTINUING: {continue_reason}*")
+            else:
+                should_continue_avenue = False
+                if avenue_strategies:
+                    st.markdown(f"*✅ AVENUE COMPLETE: Found {len(avenue_strategies)} strategies after {avenue_tests_total} tests*")
+                else:
+                    st.markdown(f"*➡️ MOVING ON: {continue_reason}*")
+            
+            # If AI suggests refinements, add them for next round
+            refinement_ideas = iteration_analysis.get("refinement_ideas", [])
+            if refinement_ideas and should_continue_avenue:
+                st.markdown("**🔧 AI suggests refinements for next round:**")
+                for idea in refinement_ideas[:3]:
+                    filter_to_add = idea.get("filter_to_add", {})
+                    reasoning = idea.get("reasoning", "")
+                    if filter_to_add and filter_to_add.get("col"):
+                        st.markdown(f"- Try: {filter_to_add.get('col')}={filter_to_add.get('value')} ({reasoning[:50] if reasoning else 'AI suggested'}...)")
+            
+            # Test intelligent combinations if we have successful results
+            if should_continue_avenue and avenue_iteration >= 2:
+                successful_results = [r for r in all_results if r.get("test_roi", 0) > 0.01 and r.get("is_consistent")]
+                if len(successful_results) >= 2:
+                    tested_combos = st.session_state.get("tested_combinations", set())
+                    combinations = _generate_intelligent_combinations(successful_results, tested_combos)
+                    st.session_state.tested_combinations = tested_combos
+                    
+                    if combinations:
+                        st.markdown(f"**🔗 Testing {len(combinations)} intelligent combinations:**")
+                        for combo in combinations[:3]:
+                            st.caption(f"• {combo['name']}: {combo['reasoning'][:50]}...")
+            
+            # Check for pause
+            if st.session_state.agent_phase == "paused":
+                st.warning("⏸️ Research paused")
+                _research_log("Research paused by user", "warning")
+                return
         
-        # Handle results
+        # END OF AVENUE WHILE LOOP
+        # ============================================================
+        
+        # Process results from the complete avenue exploration
+        analysis = avenue_results.get("analysis", {})
         recommendation = analysis.get("recommendation", "").upper()
-        truly_passing = analysis.get("truly_passing", [])
+        truly_passing = avenue_strategies  # Use accumulated strategies
         
-        if "SUCCESS" in recommendation and truly_passing:
-            st.success("🎉 **Strategy Found!**")
+        # Log avenue summary
+        _research_log(f"Avenue complete: {avenue_tests_total} tests, {len(truly_passing)} strategies, best ROI {avenue_best_roi:.2%}", "info")
+        
+        if truly_passing:
+            st.success(f"🎉 **{len(truly_passing)} Strategies Found from this Avenue!**")
+            
+            # Show avenue summary
+            st.markdown(f"""
+**📊 Avenue Summary:**
+- Total tests: {avenue_tests_total}
+- Deep dive rounds: {avenue_iteration}
+- Strategies found: {len(truly_passing)}
+- Best ROI: {avenue_best_roi:.2%}
+- Key learnings: {len(avenue_learnings)}
+            """)
+            
+            if avenue_learnings:
+                with st.expander("📚 Learnings from this Avenue", expanded=False):
+                    for i, learning in enumerate(avenue_learnings, 1):
+                        st.markdown(f"{i}. {learning}")
             
             best_result = truly_passing[0]
             
@@ -3569,6 +4651,48 @@ def run_agent(is_new_run: bool = True):
             col1.metric("Train Rows", best_result.get("train_rows", 0))
             col2.metric("Val Rows", best_result.get("val_rows", 0))
             col3.metric("Test Rows", best_result.get("test_rows", 0))
+            
+            # ===== CHECK IF BRACKET EXPANSION WOULD HELP =====
+            test_rows = best_result.get("test_rows", 0)
+            if test_rows < 100:
+                st.warning(f"⚠️ Only {test_rows} test rows - considering bracket expansion...")
+                
+                # Find numeric filters that could be expanded
+                filters = best_result.get("filters", [])
+                expandable_filters = [f for f in filters if f.get("op") == "between"]
+                
+                if expandable_filters:
+                    st.markdown("**🔧 Bracket Expansion Options:**")
+                    
+                    for exp_filter in expandable_filters[:3]:
+                        expansion_result = _expand_bracket_for_volume(
+                            [f for f in filters if f != exp_filter],  # Other filters
+                            exp_filter,
+                            pl_column,
+                            target_rows=150
+                        )
+                        
+                        if expansion_result.get("success") and expansion_result.get("expanded_rows", 0) > test_rows:
+                            orig = expansion_result.get("original_filter", {})
+                            expanded = expansion_result.get("expanded_filter", {})
+                            
+                            st.markdown(f"""
+**{exp_filter.get('col')}**: 
+- Original: {orig.get('min')}-{orig.get('max')} ({expansion_result.get('original_rows')} rows, {expansion_result.get('original_roi')*100:.1f}% ROI)
+- Expanded: {expanded.get('min'):.2f}-{expanded.get('max'):.2f} ({expansion_result.get('expanded_rows')} rows, {expansion_result.get('expanded_roi')*100:.1f}% ROI)
+- Direction: {expansion_result.get('expansion_direction')}
+                            """)
+                            
+                            # Test expanded strategy
+                            if st.button(f"Test Expanded Bracket", key=f"expand_{iteration}_{exp_filter.get('col')}"):
+                                expanded_filters = [f if f != exp_filter else expanded for f in filters]
+                                expanded_test = _run_tool("test_filter", {
+                                    "filters": expanded_filters,
+                                    "pl_column": pl_column,
+                                    "enforcement": bible.get("gates", DEFAULT_GATES),
+                                })
+                                if expanded_test and not expanded_test.get("error"):
+                                    st.json(expanded_test)
             
             st.code(json.dumps(best_result.get("filters", []), indent=2), language="json")
             
@@ -3608,6 +4732,7 @@ def run_agent(is_new_run: bool = True):
                     "result": best_result,
                     "filter_hash": save_result.get("filter_hash"),
                     "is_consistent": is_strategy_consistent,
+                    "avenue_learnings": avenue_learnings,  # Store learnings with strategy
                 })
                 
                 # Log to research log
