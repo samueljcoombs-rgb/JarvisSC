@@ -1,9 +1,26 @@
-import os, json, time
+# app.py
+"""
+Jarvis AI Dashboard - Main Application
+Multi-page Streamlit app with Google Sheets persistence
+"""
+import os
+import json
+import time
 from datetime import datetime
 from pathlib import Path
 import importlib.util
 import streamlit as st
 from openai import OpenAI
+
+# Import sheets memory for persistent storage
+try:
+    from modules import sheets_memory as sm
+    from modules import global_styles as gs
+    SHEETS_AVAILABLE = True
+except ImportError:
+    SHEETS_AVAILABLE = False
+
+# Legacy memory import for backwards compatibility
 import memory
 
 BASE_DIR = Path(__file__).parent
@@ -11,7 +28,7 @@ MODULES_DIR = BASE_DIR / "modules"
 TEMP_CHAT_FILE = BASE_DIR / "temp_chat.json"
 CHAT_SESSIONS_FILE = BASE_DIR / "chat_sessions.json"
 
-# ----- Model selection: prefer best available automatically -----
+# ----- Model selection -----
 PREFERRED_ENV = os.getenv("PREFERRED_OPENAI_MODEL", "").strip()
 
 def _init_client() -> OpenAI:
@@ -29,26 +46,11 @@ def _init_client() -> OpenAI:
 client = _init_client()
 
 def _select_best_model(client: OpenAI) -> str:
-    """
-    Picks the best available chat model without hardcoding to 4o-mini.
-    Preference order:
-      1) PREFERRED_OPENAI_MODEL (env)
-      2) gpt-5.1
-      3) gpt-latest
-      4) gpt-4.1, gpt-4o, gpt-4.1-mini
-      5) gpt-4o (fallback)
-    """
     if PREFERRED_ENV:
         return PREFERRED_ENV
     try:
-        names = {m.id for m in client.models.list().data}  # may fail depending on perms
-        for candidate in [
-            "gpt-5",
-            "gpt-latest",
-            "gpt-4.1",
-            "gpt-4o",
-            "gpt-4.1-mini",
-        ]:
+        names = {m.id for m in client.models.list().data}
+        for candidate in ["gpt-5", "gpt-latest", "gpt-4.1", "gpt-4o", "gpt-4.1-mini"]:
             if candidate in names:
                 return candidate
     except Exception:
@@ -57,7 +59,7 @@ def _select_best_model(client: OpenAI) -> str:
 
 JARVIS_MODEL = _select_best_model(client)
 
-# ----- JSON helpers (atomic saves) -----
+# ----- JSON helpers -----
 def safe_load_json(path: Path, default):
     if path.exists():
         try:
@@ -76,7 +78,7 @@ def safe_save_json(path: Path, data):
     except Exception as e:
         st.warning(f"⚠️ Could not save {path.name}: {e}")
 
-# ----- Module hot-loader + guarded writer -----
+# ----- Module hot-loader -----
 def backup_module(name: str):
     src = MODULES_DIR / f"{name}.py"
     dst = MODULES_DIR / f"{name}_backup.py"
@@ -105,91 +107,325 @@ def load_module(name: str):
         path = MODULES_DIR / f"{name}.py"
         spec = importlib.util.spec_from_file_location(name, path)
         mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)  # type: ignore[attr-defined]
+        spec.loader.exec_module(mod)
         return mod
     except Exception as e:
         st.error(f"⚠️ Failed to load {name}: {e}")
         return None
 
+# ----- Memory Functions -----
+def get_memory_text():
+    """Get memory summary from sheets or local."""
+    if SHEETS_AVAILABLE:
+        try:
+            return sm.get_memory_summary()
+        except Exception:
+            pass
+    return memory.recent_summary()
+
+def save_chat_to_sheets(role: str, content: str):
+    """Save chat message to Google Sheets."""
+    if SHEETS_AVAILABLE:
+        try:
+            session_id = st.session_state.get("session_id", str(int(time.time())))
+            sm.save_chat_message(role, content, session_id)
+        except Exception as e:
+            pass  # Silently fail, local backup exists
+
 # ----- OpenAI call -----
 def call_jarvis(chat_history, mem_text):
     sys = (
-        "You are Jarvis inside a Streamlit app. "
-        "Edit only /modules/*.py. Do not touch app.py or memory.py. "
-        "Always output full valid Python code inside one ```python block when editing. "
-        f"Memory summary:\n{mem_text}"
+        "You are Jarvis, a sophisticated AI assistant inside a Streamlit dashboard. "
+        "You help with daily planning, health tracking, goal setting, entertainment, travel, and more. "
+        "You have access to the user's data stored in Google Sheets including their health logs, "
+        "workout history, bucket list, yearly goals, and travel plans. "
+        "Be helpful, proactive, and personalized. "
+        f"\n\nMemory summary:\n{mem_text}"
     )
     msgs = [{"role": "system", "content": sys}, *chat_history]
     resp = client.chat.completions.create(model=JARVIS_MODEL, messages=msgs)
     return resp.choices[0].message.content
 
-# ----- App -----
+# ----- Page Config -----
 st.set_page_config(
-    page_title="Jarvis Modular AI",
+    page_title="Jarvis Dashboard",
+    page_icon="🤖",
     layout="wide",
-    initial_sidebar_state="collapsed",   # auto-collapse the sidebar on load
+    initial_sidebar_state="collapsed",
 )
 
+# Inject global styles
+if SHEETS_AVAILABLE:
+    gs.inject_global_styles()
+
+# ----- Session State -----
 if "chat" not in st.session_state:
     st.session_state.chat = safe_load_json(TEMP_CHAT_FILE, [])
 if "last_processed_index" not in st.session_state:
     st.session_state.last_processed_index = -1
+if "session_id" not in st.session_state:
+    st.session_state.session_id = str(int(time.time()))
 
+# ----- Custom CSS for Main Page -----
+st.markdown("""
+<style>
+.main-header {
+    background: linear-gradient(135deg, #1e3a5f 0%, #0f1f3a 100%);
+    padding: 1.5rem 2rem;
+    border-radius: 16px;
+    margin-bottom: 1.5rem;
+    border: 1px solid rgba(59, 130, 246, 0.3);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+}
+.main-header h1 {
+    color: white;
+    margin: 0;
+    font-size: 2.5rem;
+    font-weight: 800;
+    background: linear-gradient(135deg, #60a5fa 0%, #a78bfa 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+.main-header p {
+    color: rgba(255,255,255,0.7);
+    margin: 0.5rem 0 0 0;
+    font-size: 1.1rem;
+}
+.nav-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1rem;
+    margin-bottom: 2rem;
+}
+.nav-card {
+    background: linear-gradient(135deg, rgba(255,255,255,0.08) 0%, rgba(255,255,255,0.03) 100%);
+    backdrop-filter: blur(20px);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 16px;
+    padding: 1.5rem;
+    text-align: center;
+    transition: all 0.3s ease;
+    cursor: pointer;
+    text-decoration: none;
+}
+.nav-card:hover {
+    background: rgba(255,255,255,0.12);
+    border-color: rgba(59, 130, 246, 0.5);
+    transform: translateY(-4px);
+    box-shadow: 0 12px 40px rgba(59, 130, 246, 0.2);
+}
+.nav-card .icon {
+    font-size: 2.5rem;
+    margin-bottom: 0.75rem;
+}
+.nav-card .title {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: white;
+    margin-bottom: 0.25rem;
+}
+.nav-card .desc {
+    font-size: 0.85rem;
+    color: rgba(255,255,255,0.6);
+}
+.quick-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+}
+.stat-mini {
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 12px;
+    padding: 1rem;
+    text-align: center;
+}
+.stat-mini .value {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: #60a5fa;
+}
+.stat-mini .label {
+    font-size: 0.8rem;
+    color: rgba(255,255,255,0.6);
+}
+</style>
+""", unsafe_allow_html=True)
+
+# ----- Header -----
+current_time = datetime.now().strftime("%A, %d %B %Y")
+st.markdown(f"""
+<div class="main-header">
+    <h1>🤖 Jarvis Dashboard</h1>
+    <p>{current_time} • Your AI-powered life assistant</p>
+</div>
+""", unsafe_allow_html=True)
+
+# ----- Navigation Cards -----
+st.markdown("### Quick Navigation")
+
+# Create navigation using columns and buttons
+col1, col2, col3, col4, col5 = st.columns(5)
+
+with col1:
+    st.markdown("""
+    <div class="nav-card">
+        <div class="icon">🏋️</div>
+        <div class="title">Health & Fitness</div>
+        <div class="desc">Track workouts, weight, nutrition</div>
+    </div>
+    """, unsafe_allow_html=True)
+    if st.button("Open Health", key="nav_health", use_container_width=True):
+        st.switch_page("pages/1_🏋️_Health_Fitness.py")
+
+with col2:
+    st.markdown("""
+    <div class="nav-card">
+        <div class="icon">🎬</div>
+        <div class="title">Entertainment</div>
+        <div class="desc">Movies, TV, watchlist</div>
+    </div>
+    """, unsafe_allow_html=True)
+    if st.button("Open Entertainment", key="nav_ent", use_container_width=True):
+        st.switch_page("pages/2_🎬_Entertainment.py")
+
+with col3:
+    st.markdown("""
+    <div class="nav-card">
+        <div class="icon">🎯</div>
+        <div class="title">Goals</div>
+        <div class="desc">Bucket list & yearly goals</div>
+    </div>
+    """, unsafe_allow_html=True)
+    if st.button("Open Goals", key="nav_goals", use_container_width=True):
+        st.switch_page("pages/3_🎯_Goals.py")
+
+with col4:
+    st.markdown("""
+    <div class="nav-card">
+        <div class="icon">✈️</div>
+        <div class="title">Travel</div>
+        <div class="desc">Trips, flights, alerts</div>
+    </div>
+    """, unsafe_allow_html=True)
+    if st.button("Open Travel", key="nav_travel", use_container_width=True):
+        st.switch_page("pages/4_✈️_Travel.py")
+
+with col5:
+    st.markdown("""
+    <div class="nav-card">
+        <div class="icon">📰</div>
+        <div class="title">News</div>
+        <div class="desc">Personalized news feed</div>
+    </div>
+    """, unsafe_allow_html=True)
+    if st.button("Open News", key="nav_news", use_container_width=True):
+        st.switch_page("pages/5_📰_News.py")
+
+st.markdown("---")
+
+# ----- Quick Stats -----
+if SHEETS_AVAILABLE:
+    try:
+        # Fetch quick stats
+        health_logs = sm.read_all_rows("health_logs")
+        workout_logs = sm.read_all_rows("workout_logs")
+        bucket_list = sm.read_all_rows("bucket_list")
+        travel_plans = sm.read_all_rows("travel_plans")
+        
+        recent_workouts = len([w for w in workout_logs if w.get("date", "")[:7] == datetime.now().strftime("%Y-%m")])
+        bucket_completed = len([b for b in bucket_list if b.get("status") == "completed"])
+        upcoming_trips = len([t for t in travel_plans if t.get("status") in ["planning", "booked"]])
+        
+        st.markdown("### Quick Stats")
+        st.markdown(f"""
+        <div class="quick-stats">
+            <div class="stat-mini">
+                <div class="value">{recent_workouts}</div>
+                <div class="label">Workouts This Month</div>
+            </div>
+            <div class="stat-mini">
+                <div class="value">{len(health_logs)}</div>
+                <div class="label">Health Logs</div>
+            </div>
+            <div class="stat-mini">
+                <div class="value">{bucket_completed}/{len(bucket_list)}</div>
+                <div class="label">Bucket List</div>
+            </div>
+            <div class="stat-mini">
+                <div class="value">{upcoming_trips}</div>
+                <div class="label">Upcoming Trips</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    except Exception as e:
+        st.caption(f"Stats loading... {e}")
+
+st.markdown("---")
+
+# ----- Main Dashboard Content -----
+# Load modules
+layout_mod = load_module("layout_manager")
+chat_mod = load_module("chat_ui")
+weather_mod = load_module("weather_panel")
+podcasts_mod = load_module("podcasts_panel")
+athletic_mod = load_module("athletic_feed")
+todos_mod = load_module("todos_panel")
+
+# Sidebar with memory and sessions
 with st.sidebar:
-    # Collapsed expander for Memory & Sessions
+    st.markdown("### 🤖 Jarvis")
+    st.caption(f"Model: {JARVIS_MODEL}")
+    
     with st.expander("🧠 Memory & Sessions", expanded=False):
-        long_term = memory._load()
-        mem_text = memory.recent_summary()
+        mem_text = get_memory_text()
         sessions = safe_load_json(CHAT_SESSIONS_FILE, [])
-
-        st.caption(f"Model: {JARVIS_MODEL}")
+        
         st.caption(f"Messages: {len(st.session_state.chat)}")
-        st.caption(f"Memories: {len(long_term)}")
         st.caption(f"Sessions: {len(sessions)}")
-
+        
         st.divider()
-        st.subheader("Memory (preview)")
+        st.subheader("Memory Preview")
         preview = (mem_text or "").strip()
-        if preview and len(preview) > 220:
-            st.write(preview[:220] + "…")
-            with st.expander("Show full recent memory"):
-                st.write(preview)
+        if preview:
+            st.write(preview[:300] + "..." if len(preview) > 300 else preview)
         else:
-            st.write(preview or "No memories yet.")
-
+            st.write("No memories yet.")
+        
         new_mem = st.text_input("Add to memory:")
         if new_mem:
+            if SHEETS_AVAILABLE:
+                sm.add_memory(new_mem, "fact", "manual")
             memory.add_fact(new_mem, "manual")
             st.success("Saved.")
             st.rerun()
-
+        
         st.divider()
         if st.button("💾 Save chat"):
-            sessions.append({"id": int(time.time()), "ts": int(time.time()), "messages": st.session_state.chat})
+            sessions.append({
+                "id": int(time.time()),
+                "ts": int(time.time()),
+                "messages": st.session_state.chat
+            })
             safe_save_json(CHAT_SESSIONS_FILE, sessions)
             st.success("Saved.")
             st.rerun()
+        
         if st.button("🗑️ New chat"):
             st.session_state.chat = []
+            st.session_state.session_id = str(int(time.time()))
             safe_save_json(TEMP_CHAT_FILE, [])
             st.session_state.last_processed_index = -1
             st.success("Cleared.")
             st.rerun()
 
-# No big title — layout_manager draws a slim top bar.
-
-# Load modules
-layout_mod   = load_module("layout_manager")
-chat_mod     = load_module("chat_ui")
-weather_mod  = load_module("weather_panel")
-podcasts_mod = load_module("podcasts_panel")
-athletic_mod = load_module("athletic_feed")    # Man Utd news
-todos_mod    = load_module("todos_panel")      # NEW: Google Sheets To-Do
-
+# Render the main layout
 if layout_mod:
     layout_mod.render(
         chat=st.session_state.chat,
-        mem_text=memory.recent_summary(),
+        mem_text=get_memory_text(),
         call_jarvis=call_jarvis,
         safe_write_module=safe_write_module,
         safe_save_json=safe_save_json,
@@ -199,5 +435,5 @@ if layout_mod:
         weather_module=weather_mod,
         podcasts_module=podcasts_mod,
         athletic_module=athletic_mod,
-        todos_module=todos_mod,   # pass To-Do module into layout
+        todos_module=todos_mod,
     )
