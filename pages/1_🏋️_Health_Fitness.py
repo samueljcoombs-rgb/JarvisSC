@@ -143,12 +143,21 @@ with tab1:
         summary = {}
         st.warning(f"Could not load health data: {e}")
     
+    # Extract values from nested structure
+    weight_data = summary.get("weight", {})
+    nutrition_data = summary.get("nutrition", {})
+    workout_data = summary.get("workouts", {})
+    
+    avg_weight = weight_data.get("average") or 0
+    weight_change = weight_data.get("change") or 0
+    workout_count = workout_data.get("strength_sessions", 0) + workout_data.get("cardio_sessions", 0)
+    avg_calories = nutrition_data.get("avg_calories") or 0
+    avg_protein = nutrition_data.get("avg_protein") or 0
+    
     # Stats cards
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        avg_weight = summary.get("avg_weight", 0)
-        weight_change = summary.get("weight_change", 0)
         change_text = f"({'+' if weight_change > 0 else ''}{weight_change:.1f})" if weight_change != 0 else ""
         st.markdown(f"""
         <div class="stat-card">
@@ -158,7 +167,6 @@ with tab1:
         """, unsafe_allow_html=True)
     
     with col2:
-        workout_count = summary.get("workout_count", 0)
         st.markdown(f"""
         <div class="stat-card">
             <div class="value">{workout_count}</div>
@@ -167,7 +175,6 @@ with tab1:
         """, unsafe_allow_html=True)
     
     with col3:
-        avg_calories = summary.get("avg_calories", 0)
         st.markdown(f"""
         <div class="stat-card">
             <div class="value">{avg_calories:,.0f}</div>
@@ -176,7 +183,6 @@ with tab1:
         """, unsafe_allow_html=True)
     
     with col4:
-        avg_protein = summary.get("avg_protein", 0)
         st.markdown(f"""
         <div class="stat-card">
             <div class="value">{avg_protein:.0f}g</div>
@@ -670,20 +676,30 @@ with st.sidebar:
     try:
         summary = ht.get_health_summary(days=7)
         
-        st.metric("Workouts This Week", summary.get("workout_count", 0))
+        weight_data = summary.get("weight", {})
+        nutrition_data = summary.get("nutrition", {})
+        workout_data = summary.get("workouts", {})
         
-        if summary.get("avg_weight", 0) > 0:
+        workout_count = workout_data.get("strength_sessions", 0) + workout_data.get("cardio_sessions", 0)
+        avg_weight = weight_data.get("average") or 0
+        weight_change = weight_data.get("change") or 0
+        avg_calories = nutrition_data.get("avg_calories") or 0
+        avg_protein = nutrition_data.get("avg_protein") or 0
+        
+        st.metric("Workouts This Week", workout_count)
+        
+        if avg_weight > 0:
             st.metric(
                 "Current Weight",
-                f"{summary.get('avg_weight', 0):.1f} st",
-                delta=f"{summary.get('weight_change', 0):.1f} st" if summary.get('weight_change') else None
+                f"{avg_weight:.1f} st",
+                delta=f"{weight_change:.1f} st" if weight_change else None
             )
         
-        if summary.get("avg_calories", 0) > 0:
-            st.metric("Avg Calories", f"{summary.get('avg_calories', 0):,.0f}")
+        if avg_calories > 0:
+            st.metric("Avg Calories", f"{avg_calories:,.0f}")
         
-        if summary.get("avg_protein", 0) > 0:
-            st.metric("Avg Protein", f"{summary.get('avg_protein', 0):.0f}g")
+        if avg_protein > 0:
+            st.metric("Avg Protein", f"{avg_protein:.0f}g")
     except Exception:
         st.info("Log your first health data to see stats!")
     
