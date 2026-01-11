@@ -24,6 +24,19 @@ except ImportError:
 TZ = ZoneInfo("Europe/London")
 
 # ============================================================
+# User Profile - Edit this to personalize AI coaching
+# ============================================================
+
+USER_PROFILE = """
+- Age: 30 years old
+- Gender: Male
+- Location: UK
+- Height: 5ft 9in (175cm)
+- Occupation: Office job (sedentary during work hours)
+- Training Experience: ~6 months of gym training (beginner/intermediate)
+"""
+
+# ============================================================
 # Page Config
 # ============================================================
 
@@ -251,6 +264,9 @@ def get_coach_analysis():
     exercise_progress = summary.get("exercise_progress", {})
     
     context = f"""
+USER PROFILE:
+{USER_PROFILE}
+
 USER'S FITNESS DATA (Last 30 days):
 
 WEIGHT SUMMARY:
@@ -329,7 +345,7 @@ IMPORTANT: Use their ACTUAL logged data. Don't say data is missing if it's there
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "You are a knowledgeable, supportive fitness coach. Give specific, data-driven advice based on the actual logged data provided. Don't say tracking is inconsistent if there are multiple log entries."},
+                {"role": "system", "content": "You are a knowledgeable, supportive fitness coach working with a 30-year-old male beginner (6 months training) who has an office job. Give specific, data-driven advice tailored to his experience level. Don't suggest advanced techniques - focus on progressive overload fundamentals. Don't say tracking is inconsistent if there are multiple log entries."},
                 {"role": "user", "content": prompt}
             ],
             max_tokens=1000
@@ -365,7 +381,10 @@ def chat_with_coach(question: str):
     except:
         goals = []
     
-    context = f"""User's recent fitness data (last 14 days):
+    context = f"""USER PROFILE:
+{USER_PROFILE}
+
+User's recent fitness data (last 14 days):
 - Current Weight: {summary.get('weight', {}).get('current', 'N/A')} stone
 - Weight Change: {summary.get('weight', {}).get('change', 'N/A')} stone
 - Avg Calories: {summary.get('nutrition', {}).get('avg_calories', 'N/A')} kcal
@@ -387,7 +406,7 @@ Recent Daily Logs:
         context += f"- {g.get('goal')} ({g.get('progress', 0)}% done)\n"
     
     messages = [
-        {"role": "system", "content": f"You are a helpful fitness coach. Be concise and actionable. Reference specific numbers from the user's data.\n\nUser's Data:\n{context}"},
+        {"role": "system", "content": f"You are a helpful fitness coach for a 30yo male beginner who works an office job. Be concise and actionable. Reference specific numbers from the user's data. Tailor advice to their experience level.\n\nUser's Data:\n{context}"},
     ]
     
     # Add chat history
