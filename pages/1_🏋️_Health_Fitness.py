@@ -419,7 +419,7 @@ Recent Daily Logs:
         response = client.chat.completions.create(
             model="gpt-5.1",
             messages=messages,
-            max_completion_tokens=500
+            max_completion_tokens=1500
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -579,10 +579,20 @@ with mid_col:
     st.markdown("### 🤖 AI Fitness Coach")
     
     # Big Analyze Button
+    analyze_prompt = """Please give me a comprehensive analysis of my fitness journey:
+1. Performance Summary - How am I doing overall? Be specific with my numbers.
+2. Progress on Goals - Am I on track? What needs attention?
+3. Motivation - Acknowledge my wins, be encouraging but honest.
+4. Actionable Advice:
+   - Should I increase any weights? Which exercises and by how much?
+   - Do I need to adjust my calories or protein?
+   - What should I focus on this week?"""
+    
     if st.button("📊 Analyze My Performance & Give Advice", use_container_width=True, type="primary"):
+        st.session_state.health_chat.append({"role": "user", "content": "Analyze my fitness performance and give me advice"})
         with st.spinner("Analyzing your fitness data..."):
-            analysis = get_coach_analysis()
-            st.session_state.health_chat.append({"role": "assistant", "content": analysis})
+            response = chat_with_coach(analyze_prompt)
+            st.session_state.health_chat.append({"role": "assistant", "content": response})
         st.rerun()
     
     st.markdown("---")
