@@ -253,23 +253,41 @@ def get_coach_analysis():
     context = f"""
 USER'S FITNESS DATA (Last 30 days):
 
-WEIGHT:
+WEIGHT SUMMARY:
 - Current: {weight_data.get('current', 'Not logged')} stone
 - Average: {weight_data.get('average', 'N/A')} stone  
 - Change: {weight_data.get('change', 'N/A')} stone
 - Entries: {weight_data.get('entries', 0)}
 
-NUTRITION (Daily Averages):
-- Calories: {nutrition_data.get('avg_calories', 'Not logged')} kcal
-- Protein: {nutrition_data.get('avg_protein', 'Not logged')}g
+NUTRITION SUMMARY:
+- Average Calories: {nutrition_data.get('avg_calories', 'Not logged')} kcal
+- Average Protein: {nutrition_data.get('avg_protein', 'Not logged')}g
 - Days tracked: {nutrition_data.get('entries', 0)}
 
-WORKOUTS:
+DAILY HEALTH LOGS (most recent):
+"""
+    # Add actual daily health log entries
+    for log in health_logs[-10:]:
+        date = log.get("date", "Unknown")
+        w_st = log.get("weight_stone", "")
+        w_lb = log.get("weight_lbs", "")
+        cal = log.get("calories", "")
+        prot = log.get("protein_g", "")
+        notes = log.get("notes", "")
+        
+        weight_str = f"{w_st}st {w_lb}lb" if w_st else "Not logged"
+        cal_str = f"{cal} kcal" if cal else "N/A"
+        prot_str = f"{prot}g protein" if prot else "N/A"
+        
+        context += f"- {date}: Weight: {weight_str}, Calories: {cal_str}, Protein: {prot_str}\n"
+    
+    context += f"""
+WORKOUT SUMMARY:
 - Strength sessions: {workout_data.get('strength_sessions', 0)}
 - Cardio sessions: {workout_data.get('cardio_sessions', 0)}
 - Total running distance: {workout_data.get('total_distance_km', 0)} km
 
-EXERCISE PROGRESS:
+EXERCISE PROGRESS (weight lifted over time):
 """
     
     for exercise, data in exercise_progress.items():
@@ -279,24 +297,31 @@ EXERCISE PROGRESS:
                 context += f"- {exercise}: Started at {weights[0]}kg, now at {weights[-1]}kg\n"
     
     context += "\nACTIVE GOALS:\n"
-    for g in goals:
-        context += f"- {g.get('goal', 'Unknown')} (Progress: {g.get('progress', 0)}%, Target: {g.get('target_date', 'No date')})\n"
+    if goals:
+        for g in goals:
+            context += f"- {g.get('goal', 'Unknown')} (Progress: {g.get('progress', 0)}%, Target: {g.get('target_date', 'No date')})\n"
+    else:
+        context += "- No active goals set\n"
     
-    context += f"\nRECENT WORKOUTS (last 7):\n"
-    for w in workout_logs[-7:]:
-        context += f"- {w.get('date')}: {w.get('exercise')} - {w.get('sets')}x{w.get('reps')} @ {w.get('weight_kg')}kg\n"
+    context += f"\nRECENT WORKOUTS (detailed):\n"
+    for w in workout_logs[-10:]:
+        wtype = w.get('type', 'strength')
+        if wtype == 'strength':
+            context += f"- {w.get('date')}: {w.get('exercise')} - {w.get('sets')}x{w.get('reps')} @ {w.get('weight_kg')}kg\n"
+        else:
+            context += f"- {w.get('date')}: {w.get('exercise')} - {w.get('distance_km')}km in {w.get('duration_mins')}min\n"
     
-    prompt = f"""You are a supportive but direct fitness coach. Analyze this user's data and provide:
+    prompt = f"""You are a supportive but direct fitness coach. Analyze this user's ACTUAL logged data and provide:
 
-1. **Performance Summary** - How are they doing overall? Be specific with numbers.
+1. **Performance Summary** - How are they doing overall? Reference their SPECIFIC numbers from the logs.
 2. **Progress on Goals** - Are they on track? What needs attention?
-3. **Motivation** - Acknowledge wins, be encouraging but honest
+3. **Motivation** - Acknowledge wins (be specific about what they've achieved), be encouraging but honest
 4. **Actionable Advice**:
    - Should they increase any weights? Which exercises and by how much?
-   - Nutrition adjustments needed? (calories/protein recommendations)
+   - Based on their logged calories ({nutrition_data.get('avg_calories', 'N/A')}) and protein ({nutrition_data.get('avg_protein', 'N/A')}g), do they need adjustments?
    - What should they focus on this week?
 
-Keep it conversational but actionable. Use their actual data.
+IMPORTANT: Use their ACTUAL logged data. Don't say data is missing if it's there. Be specific with numbers.
 
 {context}"""
 
@@ -304,7 +329,7 @@ Keep it conversational but actionable. Use their actual data.
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "You are a knowledgeable, supportive fitness coach. Give specific, data-driven advice."},
+                {"role": "system", "content": "You are a knowledgeable, supportive fitness coach. Give specific, data-driven advice based on the actual logged data provided. Don't say tracking is inconsistent if there are multiple log entries."},
                 {"role": "user", "content": prompt}
             ],
             max_tokens=1000
@@ -325,15 +350,44 @@ def chat_with_coach(question: str):
     except:
         summary = {}
     
-    context = f"""User's recent fitness data:
-- Weight: {summary.get('weight', {}).get('current', 'N/A')} stone
-- Avg calories: {summary.get('nutrition', {}).get('avg_calories', 'N/A')}
-- Avg protein: {summary.get('nutrition', {}).get('avg_protein', 'N/A')}g
-- Workouts this period: {summary.get('workouts', {}).get('strength_sessions', 0)} strength, {summary.get('workouts', {}).get('cardio_sessions', 0)} cardio
+    try:
+        health_logs = sm.get_health_logs(days=7)
+    except:
+        health_logs = []
+    
+    try:
+        workout_logs = sm.get_workout_logs(days=7)
+    except:
+        workout_logs = []
+    
+    try:
+        goals = sm.get_fitness_goals(status="active")
+    except:
+        goals = []
+    
+    context = f"""User's recent fitness data (last 14 days):
+- Current Weight: {summary.get('weight', {}).get('current', 'N/A')} stone
+- Weight Change: {summary.get('weight', {}).get('change', 'N/A')} stone
+- Avg Calories: {summary.get('nutrition', {}).get('avg_calories', 'N/A')} kcal
+- Avg Protein: {summary.get('nutrition', {}).get('avg_protein', 'N/A')}g
+- Strength sessions: {summary.get('workouts', {}).get('strength_sessions', 0)}
+- Cardio sessions: {summary.get('workouts', {}).get('cardio_sessions', 0)}
+
+Recent Daily Logs:
 """
+    for log in health_logs[-5:]:
+        context += f"- {log.get('date')}: {log.get('weight_stone', '')}st {log.get('weight_lbs', '')}lb, {log.get('calories', '')}cal, {log.get('protein_g', '')}g protein\n"
+    
+    context += "\nRecent Workouts:\n"
+    for w in workout_logs[-5:]:
+        context += f"- {w.get('date')}: {w.get('exercise')} - {w.get('sets')}x{w.get('reps')} @ {w.get('weight_kg')}kg\n"
+    
+    context += "\nActive Goals:\n"
+    for g in goals[:3]:
+        context += f"- {g.get('goal')} ({g.get('progress', 0)}% done)\n"
     
     messages = [
-        {"role": "system", "content": f"You are a helpful fitness coach. Be concise and actionable. User context:\n{context}"},
+        {"role": "system", "content": f"You are a helpful fitness coach. Be concise and actionable. Reference specific numbers from the user's data.\n\nUser's Data:\n{context}"},
     ]
     
     # Add chat history
