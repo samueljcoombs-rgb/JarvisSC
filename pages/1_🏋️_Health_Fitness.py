@@ -34,6 +34,7 @@ USER_PROFILE = """
 - Height: 5ft 9in (175cm)
 - Occupation: Office job (sedentary during work hours)
 - Training Experience: ~6 months of gym training (beginner/intermediate)
+- Current Goal: Reach 12 stone by March 23rd 2026
 """
 
 # ============================================================
@@ -578,77 +579,78 @@ with left_col:
 with mid_col:
     st.markdown("### 🤖 AI Fitness Coach")
     
-    # Big Analyze Button
-    analyze_prompt = """Please give me a comprehensive analysis of my fitness journey:
-1. Performance Summary - How am I doing overall? Be specific with my numbers.
-2. Progress on Goals - Am I on track? What needs attention?
-3. Motivation - Acknowledge my wins, be encouraging but honest.
-4. Actionable Advice:
-   - Should I increase any weights? Which exercises and by how much?
-   - Do I need to adjust my calories or protein?
-   - What should I focus on this week?"""
-    
-    if st.button("📊 Analyze My Performance & Give Advice", use_container_width=True, type="primary"):
-        st.session_state.health_chat.append({"role": "user", "content": "Analyze my fitness performance and give me advice"})
-        with st.spinner("Analyzing your fitness data..."):
-            response = chat_with_coach(analyze_prompt)
-            st.session_state.health_chat.append({"role": "assistant", "content": response})
-        st.rerun()
-    
-    st.markdown("---")
-    
-    # Chat display
+    # Chat display FIRST (so it shows before input)
     chat_container = st.container()
-    
     with chat_container:
         if not st.session_state.health_chat:
-            st.markdown("""
-            <div style="text-align: center; padding: 2rem; color: rgba(255,255,255,0.5);">
-                <p>👋 I'm your AI fitness coach!</p>
-                <p style="font-size: 0.9rem;">Hit the button above for a full analysis, or ask me anything about your training.</p>
-            </div>
-            """, unsafe_allow_html=True)
+            st.info("👋 I'm your AI fitness coach! Ask me anything about your training, or use the buttons below.")
         else:
             for msg in st.session_state.health_chat:
                 with st.chat_message(msg["role"]):
                     st.write(msg["content"])
     
-    # Chat input
-    user_input = st.chat_input("Ask your coach anything...", key="coach_input")
+    st.markdown("---")
     
-    if user_input:
-        st.session_state.health_chat.append({"role": "user", "content": user_input})
-        with st.spinner("Thinking..."):
+    # Chat input using form to prevent double submissions
+    with st.form(key="chat_form", clear_on_submit=True):
+        user_input = st.text_input("Ask your coach anything...", key="coach_text_input", label_visibility="collapsed", placeholder="Ask your coach anything...")
+        submitted = st.form_submit_button("Send", use_container_width=True)
+        
+        if submitted and user_input:
+            st.session_state.health_chat.append({"role": "user", "content": user_input})
             response = chat_with_coach(user_input)
             st.session_state.health_chat.append({"role": "assistant", "content": response})
+            st.rerun()
+    
+    st.markdown("---")
+    
+    # Quick action buttons
+    st.markdown("#### Quick Analysis")
+    
+    # Full Analysis Button
+    if st.button("📊 Full Performance Analysis", use_container_width=True, type="primary"):
+        analyze_prompt = """Give me a comprehensive analysis:
+1. Performance Summary - specific numbers from my logs
+2. Progress on Goals - am I on track for my March 23rd target of 12 stone?
+3. Review my exercise selection and weights - am I progressing?
+4. Nutrition check - are my calories/protein right for my goals?
+5. Specific advice for this week"""
+        
+        st.session_state.health_chat.append({"role": "user", "content": "Full performance analysis please"})
+        with st.spinner("Analyzing..."):
+            response = chat_with_coach(analyze_prompt)
+        st.session_state.health_chat.append({"role": "assistant", "content": response})
         st.rerun()
     
-    # Quick question buttons
-    st.markdown("#### Quick Questions")
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("💪 Should I increase weights?", use_container_width=True):
-            st.session_state.health_chat.append({"role": "user", "content": "Based on my recent workouts, should I increase any weights? Which exercises and by how much?"})
+        if st.button("💪 Weight progression?", use_container_width=True):
+            q = "Review my exercise weights from recent workouts. Should I increase any? Which ones and by how much?"
+            st.session_state.health_chat.append({"role": "user", "content": q})
             with st.spinner("Analyzing..."):
-                response = chat_with_coach("Based on my recent workouts, should I increase any weights? Which exercises and by how much?")
-                st.session_state.health_chat.append({"role": "assistant", "content": response})
+                response = chat_with_coach(q)
+            st.session_state.health_chat.append({"role": "assistant", "content": response})
             st.rerun()
+    
     with col2:
-        if st.button("🍽️ Nutrition advice", use_container_width=True):
-            st.session_state.health_chat.append({"role": "user", "content": "Based on my goals and current data, should I adjust my calories or protein intake?"})
+        if st.button("🍽️ Nutrition check", use_container_width=True):
+            q = "Check my calories and protein intake. Am I eating right for my 12 stone goal by March 23rd?"
+            st.session_state.health_chat.append({"role": "user", "content": q})
             with st.spinner("Analyzing..."):
-                response = chat_with_coach("Based on my goals and current data, should I adjust my calories or protein intake?")
-                st.session_state.health_chat.append({"role": "assistant", "content": response})
+                response = chat_with_coach(q)
+            st.session_state.health_chat.append({"role": "assistant", "content": response})
             st.rerun()
     
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("🎯 Am I on track?", use_container_width=True):
-            st.session_state.health_chat.append({"role": "user", "content": "Am I on track with my fitness goals? What should I focus on?"})
-            with st.spinner("Analyzing..."):
-                response = chat_with_coach("Am I on track with my fitness goals? What should I focus on?")
-                st.session_state.health_chat.append({"role": "assistant", "content": response})
+        if st.button("📅 Will I hit my goal?", use_container_width=True):
+            q = "Mathematically, based on my current rate of progress, will I reach 12 stone by March 23rd 2026? Show me the calculation."
+            st.session_state.health_chat.append({"role": "user", "content": q})
+            with st.spinner("Calculating..."):
+                response = chat_with_coach(q)
+            st.session_state.health_chat.append({"role": "assistant", "content": response})
             st.rerun()
+    
     with col2:
         if st.button("🗑️ Clear Chat", use_container_width=True):
             st.session_state.health_chat = []
