@@ -347,14 +347,14 @@ def get_workout_logs(days: int = 30, workout_type: Optional[str] = None) -> List
         logs = [l for l in logs if l.get("type") == workout_type]
     return logs
 
-def add_fitness_goal(goal: str, target_date: str = "", status: str = "active") -> Dict[str, Any]:
+def add_fitness_goal(goal: str, target_date: str = "", status: str = "active", progress: int = 0) -> Dict[str, Any]:
     """Add a fitness goal."""
     return append_row(TAB_FITNESS_GOALS, {
         "goal_id": _gen_id(),
         "goal": goal,
         "target_date": target_date,
         "status": status,
-        "progress": "0",
+        "progress": str(progress),
         "created": _now_iso(),
         "updated": _now_iso()
     })
