@@ -348,7 +348,7 @@ IMPORTANT: Use their ACTUAL logged data. Don't say data is missing if it's there
                 {"role": "system", "content": "You are a knowledgeable, supportive fitness coach working with a 30-year-old male beginner (6 months training) who has an office job. Give specific, data-driven advice tailored to his experience level. Don't suggest advanced techniques - focus on progressive overload fundamentals. Don't say tracking is inconsistent if there are multiple log entries."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=1000
+            max_completion_tokens=1000
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -419,7 +419,7 @@ Recent Daily Logs:
         response = client.chat.completions.create(
             model="gpt-5.1",
             messages=messages,
-            max_tokens=500
+            max_completion_tokens=500
         )
         return response.choices[0].message.content
     except Exception as e:
