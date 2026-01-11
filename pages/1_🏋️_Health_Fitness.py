@@ -583,6 +583,7 @@ with mid_col:
         with st.spinner("Analyzing your fitness data..."):
             analysis = get_coach_analysis()
             st.session_state.health_chat.append({"role": "assistant", "content": analysis})
+        st.rerun()
     
     st.markdown("---")
     
