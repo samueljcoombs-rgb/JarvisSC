@@ -356,7 +356,7 @@ IMPORTANT: Use their ACTUAL logged data. Don't say data is missing if it's there
         return f"❌ Error getting analysis: {e}"
 
 def chat_with_coach(question: str):
-    """Chat with the AI fitness coach."""
+    """Chat with the AI fitness coach using GPT-5.1 Responses API."""
     try:
         client = get_openai_client()
         if not client:
@@ -407,26 +407,52 @@ Recent Daily Logs:
         for g in goals[:3]:
             context += f"- {g.get('goal')} ({g.get('progress', 0)}% done, target: {g.get('target_date', 'N/A')})\n"
         
-        messages = [
-            {"role": "system", "content": f"You are a helpful fitness coach for a 30yo male beginner who works an office job. Be concise and actionable. Reference specific numbers from the user's data. Tailor advice to their experience level.\n\nUser's Data:\n{context}"},
-        ]
+        system_prompt = "You are a helpful fitness coach for a 30yo male beginner who works an office job. Be concise and actionable. Reference specific numbers from the user's data. Tailor advice to their experience level."
         
-        # Add chat history (only assistant messages to avoid duplication)
-        for msg in st.session_state.health_chat[-4:]:
-            messages.append({"role": msg["role"], "content": msg["content"]})
+        user_text = f"{context}\n\n---\nQuestion: {question}"
         
-        messages.append({"role": "user", "content": question})
-        
-        response = client.chat.completions.create(
-            model="gpt-5.1",
-            messages=messages,
-            max_completion_tokens=1500
-        )
-        
-        result = response.choices[0].message.content
-        if not result:
-            return "❌ Empty response from AI"
-        return result
+        # GPT-5.1 uses the Responses API (not Chat Completions)
+        if hasattr(client, "responses"):
+            # Use Responses API for GPT-5 models
+            resp = client.responses.create(
+                model="gpt-5.1",
+                input=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_text},
+                ],
+                max_output_tokens=1500,
+            )
+            
+            # Extract text from response
+            content = getattr(resp, "output_text", None)
+            if content is None:
+                # Try to assemble from output items
+                content_parts = []
+                for item in getattr(resp, "output", []) or []:
+                    if getattr(item, "type", None) == "message":
+                        for c in getattr(item, "content", []) or []:
+                            if getattr(c, "type", None) in ("output_text", "text"):
+                                content_parts.append(getattr(c, "text", "") or "")
+                content = "".join(content_parts).strip()
+            
+            if not content:
+                return "❌ Empty response from AI (Responses API)"
+            return content
+        else:
+            # Fallback to Chat Completions API
+            response = client.chat.completions.create(
+                model="gpt-5.1",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_text},
+                ],
+                max_completion_tokens=1500
+            )
+            
+            result = response.choices[0].message.content
+            if not result:
+                return "❌ Empty response from AI (Chat API)"
+            return result
         
     except Exception as e:
         return f"❌ Error: {str(e)}"
