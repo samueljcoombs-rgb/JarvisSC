@@ -374,7 +374,7 @@ def chat_with_coach(question: str):
             health_logs = []
         
         try:
-            workout_logs = sm.get_workout_logs(days=7)
+            workout_logs = sm.get_workout_logs(days=14)  # Get 2 weeks of workouts
         except Exception as e:
             workout_logs = []
         
@@ -391,23 +391,37 @@ User's recent fitness data (last 14 days):
 - Weight Change: {summary.get('weight', {}).get('change', 'N/A')} stone
 - Avg Calories: {summary.get('nutrition', {}).get('avg_calories', 'N/A')} kcal
 - Avg Protein: {summary.get('nutrition', {}).get('avg_protein', 'N/A')}g
-- Strength sessions: {summary.get('workouts', {}).get('strength_sessions', 0)}
-- Cardio sessions: {summary.get('workouts', {}).get('cardio_sessions', 0)}
 
-Recent Daily Logs:
+WORKOUT SUMMARY:
+- Strength exercises logged: {len([w for w in workout_logs if w.get('type') == 'strength'])}
+- Cardio/Running sessions: {len([w for w in workout_logs if w.get('type') in ('running', 'cardio')])}
+- Total distance run: {sum(float(w.get('distance_km', 0) or 0) for w in workout_logs if w.get('type') in ('running', 'cardio')):.1f} km
+
+Recent Daily Health Logs:
 """
         for log in health_logs[-5:]:
             context += f"- {log.get('date')}: {log.get('weight_stone', '')}st {log.get('weight_lbs', '')}lb, {log.get('calories', '')}cal, {log.get('protein_g', '')}g protein\n"
         
-        context += "\nRecent Workouts:\n"
-        for w in workout_logs[-5:]:
-            context += f"- {w.get('date')}: {w.get('exercise')} - {w.get('sets')}x{w.get('reps')} @ {w.get('weight_kg')}kg\n"
+        context += "\nRecent Workouts (ALL exercises):\n"
+        for w in workout_logs[-10:]:  # Show more workouts
+            wtype = w.get('type', 'strength')
+            if wtype in ('running', 'cardio'):
+                context += f"- {w.get('date')}: {w.get('exercise', 'Cardio')} - {w.get('distance_km', 0)}km in {w.get('duration_mins', 0)} mins\n"
+            else:
+                context += f"- {w.get('date')}: {w.get('exercise')} - {w.get('sets')}x{w.get('reps')} @ {w.get('weight_kg')}kg\n"
         
         context += "\nActive Goals:\n"
         for g in goals[:3]:
             context += f"- {g.get('goal')} ({g.get('progress', 0)}% done, target: {g.get('target_date', 'N/A')})\n"
         
-        system_prompt = "You are a helpful fitness coach for a 30yo male beginner who works an office job. Be concise and actionable. Reference specific numbers from the user's data. Tailor advice to their experience level."
+        system_prompt = """You are a helpful fitness coach for a 30yo male beginner (6 months training) who works an office job. 
+
+IMPORTANT DATA NOTES:
+- Each workout log entry is a SEPARATE exercise (e.g., 4 strength entries = 4 different exercises in one gym session)
+- Running entries include distance and time
+- Review ALL exercises listed - don't say there's only 1 session if there are multiple exercises
+
+Be concise and actionable. Reference specific numbers from the user's data. Tailor advice to their experience level."""
         
         user_text = f"{context}\n\n---\nQuestion: {question}"
         
