@@ -400,23 +400,39 @@ def get_gym_workout(day_name: str = None):
         todo_url = st.secrets.get("TODO_SHEET_URL") or os.getenv("TODO_SHEET_URL")
         if todo_url:
             sh = gc.open_by_url(todo_url)
-            try:
-                ws = sh.worksheet("Gym Workout")
-                rows = ws.get_all_values()
-                if len(rows) > 1:
-                    headers = [h.lower().strip() for h in rows[0]]
-                    exercises = []
-                    for row in rows[1:]:
-                        if row and len(row) > 0:
-                            row_day = row[0].strip() if row[0] else ""
-                            if row_day.lower() == day_name.lower():
-                                ex = {}
-                                for i, h in enumerate(headers):
-                                    ex[h] = row[i] if i < len(row) else ""
-                                exercises.append(ex)
-                    return exercises
-            except Exception as e:
-                st.error(f"Error reading Gym Workout sheet: {e}")
+            
+            # Try different possible sheet names
+            sheet_names_to_try = ["Gym Workout", "gym workout", "Gym", "gym", "Workout", "workout"]
+            ws = None
+            
+            for sheet_name in sheet_names_to_try:
+                try:
+                    ws = sh.worksheet(sheet_name)
+                    break
+                except:
+                    continue
+            
+            if ws is None:
+                # List available sheets for debugging
+                available = [s.title for s in sh.worksheets()]
+                return []
+            
+            rows = ws.get_all_values()
+            if len(rows) > 1:
+                headers = [h.lower().strip() for h in rows[0]]
+                exercises = []
+                for row in rows[1:]:
+                    if row and len(row) > 0:
+                        row_day = row[0].strip() if row[0] else ""
+                        # Case-insensitive match
+                        if row_day.lower() == day_name.lower():
+                            ex = {}
+                            for i, h in enumerate(headers):
+                                ex[h] = row[i] if i < len(row) else ""
+                            exercises.append(ex)
+                return exercises
+        return []
+    except Exception as e:
         return []
     except Exception as e:
         return []
@@ -612,6 +628,44 @@ with left_col:
         if IS_TOMORROW_GYM:
             with st.expander(f"📅 Tomorrow's Workout ({TOMORROW_NAME})", expanded=False):
                 tomorrow_exercises = get_gym_workout(TOMORROW_NAME)
+                
+                # Debug info (can remove later)
+                if not tomorrow_exercises:
+                    st.caption(f"Looking for day: '{TOMORROW_NAME}'")
+                    # Try to show what days are in the sheet
+                    try:
+                        import gspread
+                        from google.oauth2.service_account import Credentials
+                        import json
+                        raw = st.secrets.get("GOOGLE_SERVICE_ACCOUNT_JSON") or os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+                        if raw:
+                            data = json.loads(raw) if isinstance(raw, str) else raw
+                            creds = Credentials.from_service_account_info(data, scopes=[
+                                "https://www.googleapis.com/auth/spreadsheets",
+                                "https://www.googleapis.com/auth/drive.readonly",
+                            ])
+                            gc = gspread.authorize(creds)
+                            todo_url = st.secrets.get("TODO_SHEET_URL") or os.getenv("TODO_SHEET_URL")
+                            if todo_url:
+                                sh = gc.open_by_url(todo_url)
+                                # Show available sheets
+                                available_sheets = [s.title for s in sh.worksheets()]
+                                st.caption(f"Available sheets: {available_sheets}")
+                                
+                                # Try to find the gym sheet
+                                for sheet_name in ["Gym Workout", "gym workout", "Gym", "gym"]:
+                                    try:
+                                        ws = sh.worksheet(sheet_name)
+                                        rows = ws.get_all_values()
+                                        if rows:
+                                            days_in_sheet = set(row[0].strip() for row in rows[1:] if row and row[0])
+                                            st.caption(f"Days in sheet: {days_in_sheet}")
+                                        break
+                                    except:
+                                        continue
+                    except Exception as e:
+                        st.caption(f"Debug error: {e}")
+                
                 if tomorrow_exercises:
                     for ex in tomorrow_exercises:
                         name = ex.get("exercise", "Exercise")
