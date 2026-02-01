@@ -54,6 +54,11 @@ RUN_DAYS = ["Tuesday", "Thursday", "Sunday"]
 IS_GYM_DAY = DAY_NAME in GYM_DAYS
 IS_RUN_DAY = DAY_NAME in RUN_DAYS
 
+# Tomorrow's day for preview
+TOMORROW = TODAY + timedelta(days=1)
+TOMORROW_NAME = TOMORROW.strftime("%A")
+IS_TOMORROW_GYM = TOMORROW_NAME in GYM_DAYS
+
 # ============================================================
 # Motivational Quotes
 # ============================================================
@@ -581,6 +586,20 @@ with left_col:
             <p>Time to hit the road! Log your run below.</p>
         </div>
         """, unsafe_allow_html=True)
+        
+        # Tomorrow's workout preview (collapsed)
+        if IS_TOMORROW_GYM:
+            with st.expander(f"📅 Tomorrow's Workout ({TOMORROW_NAME})", expanded=False):
+                tomorrow_exercises = get_gym_workout(TOMORROW_NAME)
+                if tomorrow_exercises:
+                    for ex in tomorrow_exercises:
+                        name = ex.get("exercise", "Exercise")
+                        sets = ex.get("sets", "")
+                        reps = ex.get("reps", "")
+                        is_finisher = "finisher" in name.lower()
+                        st.markdown(f"{'🔥' if is_finisher else '💪'} **{name}** - {sets} sets × {reps} reps")
+                else:
+                    st.caption(f"No workout found for {TOMORROW_NAME}")
     
     st.markdown("---")
     
@@ -780,9 +799,10 @@ Be specific with my actual numbers!"""
     
     st.markdown("---")
     
-    # Chat history BELOW
+    # Chat history - REVERSED so newest at top (no scrolling needed)
     if st.session_state.health_chat:
-        for msg in st.session_state.health_chat:
+        # Show newest first
+        for msg in reversed(st.session_state.health_chat):
             with st.chat_message(msg["role"]):
                 st.write(msg["content"])
     else:
@@ -941,4 +961,4 @@ with right_col:
 st.markdown("---")
 c1, c2, c3 = st.columns([1, 1, 1])
 with c2:
-    st.page_link("app.py", label="🏠 Back to Home", icon="🏠")
+    st.page_link("app.py", label="Back to Home", icon="🏠")
