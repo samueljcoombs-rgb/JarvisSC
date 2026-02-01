@@ -332,7 +332,16 @@ def _filter_by_day(episodes: List[dict], day_ymd: str) -> List[dict]:
 
 # ---------------- Public render ----------------
 def render():
-    st.header("🎧 New Podcast Episodes")
+    # Premium header
+    st.markdown("""
+    <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem;">
+        <span style="font-size: 1.8rem; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.3));">🎧</span>
+        <span style="font-weight: 800; font-size: 1.2rem; 
+                     background: linear-gradient(135deg, #1DB954 0%, #1ed760 100%);
+                     -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+                     background-clip: text;">New Podcast Episodes</span>
+    </div>
+    """, unsafe_allow_html=True)
     _inject_css_once()
 
     choices = _day_choices(7)
