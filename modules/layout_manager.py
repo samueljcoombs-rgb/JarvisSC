@@ -19,66 +19,6 @@ def _find_last_user_index(messages):
             return i
     return -1
 
-def _top_bar():
-    """Render the compact top bar with date and quick links."""
-    today_str = datetime.now().strftime("%A, %B %d, %Y")
-    st.markdown(
-        f"""
-        <div style="display:flex;justify-content:space-between;align-items:center;margin:0 0 0.5rem 0;
-                    padding: 0.75rem 1rem; background: rgba(255,255,255,0.03); border-radius: 12px;
-                    border: 1px solid rgba(255,255,255,0.08);">
-            <div style="font-weight:700;font-size:1.1rem;color:#60a5fa;">🤖 Jarvis Assistant</div>
-            <div style="color:rgba(255,255,255,0.6);font-size:0.9rem;">{today_str}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-def _quick_links():
-    """Render quick navigation links to other pages."""
-    st.markdown("""
-    <style>
-    .quick-links {
-        display: flex;
-        gap: 0.5rem;
-        flex-wrap: wrap;
-        margin-bottom: 1rem;
-    }
-    .quick-link {
-        background: rgba(255,255,255,0.05);
-        border: 1px solid rgba(255,255,255,0.1);
-        border-radius: 8px;
-        padding: 0.4rem 0.8rem;
-        font-size: 0.85rem;
-        color: rgba(255,255,255,0.8);
-        text-decoration: none;
-        transition: all 0.2s ease;
-    }
-    .quick-link:hover {
-        background: rgba(59, 130, 246, 0.2);
-        border-color: rgba(59, 130, 246, 0.4);
-        color: #93c5fd;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-    
-    col1, col2, col3, col4, col5 = st.columns(5)
-    with col1:
-        if st.button("🏋️ Health", key="ql_health", use_container_width=True):
-            st.switch_page("pages/1_🏋️_Health_Fitness.py")
-    with col2:
-        if st.button("🎬 Entertainment", key="ql_ent", use_container_width=True):
-            st.switch_page("pages/2_🎬_Entertainment.py")
-    with col3:
-        if st.button("🎯 Goals", key="ql_goals", use_container_width=True):
-            st.switch_page("pages/3_🎯_Goals.py")
-    with col4:
-        if st.button("✈️ Travel", key="ql_travel", use_container_width=True):
-            st.switch_page("pages/4_✈️_Travel.py")
-    with col5:
-        if st.button("📰 News", key="ql_news", use_container_width=True):
-            st.switch_page("pages/5_📰_News.py")
-
 def render(
     chat,
     mem_text,
@@ -94,25 +34,11 @@ def render(
     todos_module=None,
 ):
     """Render the main dashboard layout."""
-    
-    _top_bar()
-    _quick_links()
-    
-    st.markdown("---")
 
-    # 3-column layout: Left (To-Do/Gym/Health + Man Utd) | Mid (Chat) | Right (Weather + Podcasts)
+    # 3-column layout: Left (To-Do + Man Utd) | Mid (Chat) | Right (Weather + Podcasts)
     left_col, mid_col, right_col = st.columns([3, 4, 3], gap="large")
 
     with left_col:
-        # Football Research Link
-        st.markdown("### ⚽ Football Research")
-        try:
-            st.page_link("pages/football_researcher.py", label="Open Football Researcher")
-        except Exception:
-            st.caption("Football Researcher page not available")
-        
-        st.divider()
-        
         # To-Do / Gym / Health Panel
         if todos_module:
             try:
@@ -138,7 +64,7 @@ def render(
     with mid_col:
         st.markdown("### 💬 Chat with Jarvis")
         
-        # Chat container with custom styling
+        # Chat styling
         st.markdown("""
         <style>
         .chat-container {
@@ -151,8 +77,61 @@ def render(
         </style>
         """, unsafe_allow_html=True)
         
-        if chat_module:
-            chat_module.render()
+        # Buttons at TOP (like Health page)
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if st.button("🗑️ Clear Chat", key="layout_clear_btn", use_container_width=True):
+                st.session_state["chat"] = []
+                st.session_state["last_processed_index"] = -1
+                safe_save_json(temp_chat_file, [])
+                st.rerun()
+        
+        with col2:
+            msg_count = len(st.session_state.get("chat", []))
+            st.caption(f"💬 {msg_count} messages")
+        
+        with col3:
+            if SHEETS_AVAILABLE:
+                st.caption("☁️ Synced")
+            else:
+                st.caption("💾 Local only")
+        
+        # Chat input at TOP (below buttons)
+        user_input = st.chat_input("Talk to Jarvis...", key="layout_chat_input")
+        
+        if user_input:
+            # Add user message
+            st.session_state["chat"].append({"role": "user", "content": user_input})
+            
+            # Save to sheets if available
+            if SHEETS_AVAILABLE:
+                try:
+                    session_id = st.session_state.get("session_id", "default")
+                    sm.save_chat_message("user", user_input, session_id)
+                except Exception:
+                    pass
+            
+            st.rerun()
+        
+        st.markdown("---")
+        
+        # Chat history in scrollable container (longer than health page)
+        messages = st.session_state.get("chat", [])
+        if messages:
+            chat_container = st.container(height=550)
+            with chat_container:
+                # Show newest first
+                for msg in reversed(messages):
+                    with st.chat_message(msg.get("role", "assistant")):
+                        st.write(msg.get("content", ""))
+        else:
+            st.markdown("""
+            <div style="text-align: center; padding: 2rem; color: rgba(255,255,255,0.5);">
+                <p>👋 Hi! I'm Jarvis, your AI assistant.</p>
+                <p style="font-size: 0.9rem;">Ask me anything about your health goals, travel plans, entertainment, or just chat!</p>
+            </div>
+            """, unsafe_allow_html=True)
 
         # Process any pending user messages
         lst = st.session_state.get("chat", [])
@@ -184,15 +163,13 @@ def render(
         safe_save_json(temp_chat_file, lst)
 
     with right_col:
-        # Weather Widget
+        # Weather Widget (module has its own header, so don't add another)
         if weather_module:
-            st.markdown("### 🌤️ Weather")
             weather_module.render()
             st.divider()
         
-        # Podcasts Widget
+        # Podcasts Widget (module has its own header, so don't add another)
         if podcasts_module:
-            st.markdown("### 🎧 Podcasts")
             podcasts_module.render()
         
         # Quick Actions
