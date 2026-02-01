@@ -284,6 +284,27 @@ st.markdown("""
     padding: 1.5rem;
 }
 
+/* Scrollable Chat Container */
+.chat-container {
+    max-height: 400px;
+    overflow-y: auto;
+    padding-right: 0.5rem;
+}
+.chat-container::-webkit-scrollbar {
+    width: 6px;
+}
+.chat-container::-webkit-scrollbar-track {
+    background: rgba(255,255,255,0.05);
+    border-radius: 3px;
+}
+.chat-container::-webkit-scrollbar-thumb {
+    background: rgba(16, 185, 129, 0.4);
+    border-radius: 3px;
+}
+.chat-container::-webkit-scrollbar-thumb:hover {
+    background: rgba(16, 185, 129, 0.6);
+}
+
 /* Activity Item */
 .activity-item {
     background: rgba(255,255,255,0.03);
@@ -799,12 +820,15 @@ Be specific with my actual numbers!"""
     
     st.markdown("---")
     
-    # Chat history - REVERSED so newest at top (no scrolling needed)
+    # Chat history in scrollable container
     if st.session_state.health_chat:
-        # Show newest first
-        for msg in reversed(st.session_state.health_chat):
-            with st.chat_message(msg["role"]):
-                st.write(msg["content"])
+        # Create scrollable container
+        chat_container = st.container(height=400)
+        with chat_container:
+            # Show newest first
+            for msg in reversed(st.session_state.health_chat):
+                with st.chat_message(msg["role"]):
+                    st.write(msg["content"])
     else:
         st.info("👋 Ask me anything! I'll analyze your data and give specific advice.")
 
