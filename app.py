@@ -326,45 +326,6 @@ with col5:
 
 st.markdown("---")
 
-# ----- Quick Stats -----
-if SHEETS_AVAILABLE:
-    try:
-        # Fetch quick stats
-        health_logs = sm.read_all_rows("health_logs")
-        workout_logs = sm.read_all_rows("workout_logs")
-        bucket_list = sm.read_all_rows("bucket_list")
-        travel_plans = sm.read_all_rows("travel_plans")
-        
-        recent_workouts = len([w for w in workout_logs if w.get("date", "")[:7] == datetime.now().strftime("%Y-%m")])
-        bucket_completed = len([b for b in bucket_list if b.get("status") == "completed"])
-        upcoming_trips = len([t for t in travel_plans if t.get("status") in ["planning", "booked"]])
-        
-        st.markdown("### Quick Stats")
-        st.markdown(f"""
-        <div class="quick-stats">
-            <div class="stat-mini">
-                <div class="value">{recent_workouts}</div>
-                <div class="label">Workouts This Month</div>
-            </div>
-            <div class="stat-mini">
-                <div class="value">{len(health_logs)}</div>
-                <div class="label">Health Logs</div>
-            </div>
-            <div class="stat-mini">
-                <div class="value">{bucket_completed}/{len(bucket_list)}</div>
-                <div class="label">Bucket List</div>
-            </div>
-            <div class="stat-mini">
-                <div class="value">{upcoming_trips}</div>
-                <div class="label">Upcoming Trips</div>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-    except Exception as e:
-        st.caption(f"Stats loading... {e}")
-
-st.markdown("---")
-
 # ----- Main Dashboard Content -----
 # Load modules
 layout_mod = load_module("layout_manager")
