@@ -195,6 +195,15 @@ st.markdown("""
     background: rgba(251, 191, 36, 0.2);
     color: #fbbf24;
 }
+.workout-card .detail-chip.time {
+    background: rgba(139, 92, 246, 0.2);
+    color: #a78bfa;
+}
+.workout-card .detail-chip.weight {
+    background: rgba(59, 130, 246, 0.2);
+    color: #60a5fa;
+    font-weight: 700;
+}
 .workout-card.finisher {
     border-left: 4px solid #f59e0b;
     background: linear-gradient(145deg, rgba(251, 191, 36, 0.1) 0%, rgba(255,255,255,0.02) 100%);
@@ -434,6 +443,45 @@ def get_gym_workout(day_name: str = None):
     except Exception as e:
         return []
 
+def get_last_weight_for_exercise(exercise_name: str) -> dict:
+    """Get the last logged weight for a specific exercise."""
+    try:
+        # Get all workout logs and find the most recent one for this exercise
+        workout_logs = sm.get_workout_logs(days=90)  # Look back 90 days
+        
+        # Filter for this exercise (case-insensitive partial match)
+        exercise_lower = exercise_name.lower().strip()
+        matching_logs = []
+        
+        for log in workout_logs:
+            log_exercise = (log.get("exercise") or "").lower().strip()
+            # Match if the exercise names are similar
+            if exercise_lower in log_exercise or log_exercise in exercise_lower:
+                weight = log.get("weight_kg")
+                if weight and float(weight) > 0:
+                    matching_logs.append({
+                        "date": log.get("date", ""),
+                        "weight": float(weight),
+                        "sets": log.get("sets", ""),
+                        "reps": log.get("reps", ""),
+                    })
+        
+        # Sort by date (most recent first) and return the latest
+        if matching_logs:
+            matching_logs.sort(key=lambda x: x["date"], reverse=True)
+            return matching_logs[0]
+        
+        return {}
+    except Exception as e:
+        return {}
+
+def is_time_based(reps_str: str) -> bool:
+    """Check if the reps value is time-based (seconds, steps, etc.)."""
+    if not reps_str:
+        return False
+    reps_lower = str(reps_str).lower()
+    return any(keyword in reps_lower for keyword in ["second", "sec", "step", "max", "minute", "min", "/side"])
+
 # ============================================================
 # AI Coach Function
 # ============================================================
@@ -597,15 +645,33 @@ with left_col:
                 rpe = ex.get("rpe", "")
                 
                 is_finisher = "finisher" in name.lower()
+                is_time = is_time_based(reps)
                 card_class = "finisher" if is_finisher else ""
+                
+                # Get last weight for this exercise
+                last_data = get_last_weight_for_exercise(name)
+                last_weight = last_data.get("weight", 0) if last_data else 0
+                last_date = last_data.get("date", "") if last_data else ""
+                
+                # Format the reps/time display
+                if is_time:
+                    reps_display = f'<span class="detail-chip time">{reps}</span>'
+                else:
+                    reps_display = f'<span class="detail-chip">{reps} reps</span>'
+                
+                # Last weight badge (only for non-time exercises)
+                weight_badge = ""
+                if last_weight > 0 and not is_time:
+                    weight_badge = f'<span class="detail-chip weight">Last: {last_weight}kg</span>'
                 
                 st.markdown(f"""
                 <div class="workout-card {card_class}">
-                    <div class="exercise-name">{'🔥 ' if is_finisher else ''}{name}</div>
+                    <div class="exercise-name">{'🔥 ' if is_finisher else ''}{'⏱️ ' if is_time else ''}{name}</div>
                     <div class="exercise-details">
                         <span class="detail-chip">{sets} sets</span>
-                        <span class="detail-chip">{reps} reps</span>
+                        {reps_display}
                         {f'<span class="detail-chip rpe">RPE {rpe}</span>' if rpe else ''}
+                        {weight_badge}
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
@@ -632,7 +698,12 @@ with left_col:
                         sets = ex.get("sets", "")
                         reps = ex.get("reps", "")
                         is_finisher = "finisher" in name.lower()
-                        st.markdown(f"{'🔥' if is_finisher else '💪'} **{name}** - {sets} sets × {reps} reps")
+                        is_time = is_time_based(reps)
+                        
+                        if is_time:
+                            st.markdown(f"{'🔥' if is_finisher else '⏱️'} **{name}** - {sets} sets × {reps}")
+                        else:
+                            st.markdown(f"{'🔥' if is_finisher else '💪'} **{name}** - {sets} sets × {reps} reps")
                 else:
                     st.caption(f"No workout found for {TOMORROW_NAME}")
     
@@ -693,34 +764,82 @@ with left_col:
                     exercise_name = st.text_input("Exercise Name", key="wl_custom")
                     default_sets = 3
                     default_reps = "10"
+                    default_weight = 0.0
+                    is_time_exercise = False
                 else:
                     exercise_name = selected_ex
                     # Get defaults from workout plan
                     ex_data = next((e for e in exercises if e.get("exercise") == selected_ex), {})
                     default_sets = int(ex_data.get("sets", "3").split("-")[0]) if ex_data.get("sets") else 3
                     default_reps = ex_data.get("reps", "10")
+                    is_time_exercise = is_time_based(default_reps)
+                    
+                    # Get last weight for this exercise
+                    last_data = get_last_weight_for_exercise(selected_ex)
+                    default_weight = last_data.get("weight", 0.0) if last_data else 0.0
+                    
+                    # Show last weight info
+                    if default_weight > 0:
+                        last_date = last_data.get("date", "")
+                        st.info(f"💡 Last time: **{default_weight}kg** (on {last_date})")
                 
                 with st.form("workout_log_form"):
-                    c1, c2, c3 = st.columns(3)
-                    with c1:
-                        sets = st.number_input("Sets", min_value=1, max_value=10, value=default_sets, key="wl_sets")
-                    with c2:
-                        reps = st.number_input("Reps", min_value=1, max_value=100, value=int(default_reps.split("-")[0]) if "-" in str(default_reps) else int(default_reps) if str(default_reps).isdigit() else 10, key="wl_reps")
-                    with c3:
-                        weight = st.number_input("Weight (kg)", min_value=0.0, max_value=500.0, value=0.0, step=2.5, key="wl_weight")
+                    if is_time_exercise:
+                        # Time-based exercise - different UI
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            sets = st.number_input("Sets", min_value=1, max_value=10, value=default_sets, key="wl_sets")
+                        with c2:
+                            time_input = st.text_input("Duration/Reps", value=str(default_reps), key="wl_time", help="e.g., 60 seconds, 20 steps")
+                        
+                        # Some time exercises still have weight (like weighted planks)
+                        weight = st.number_input("Weight (kg, if any)", min_value=0.0, max_value=500.0, value=default_weight, step=2.5, key="wl_weight")
+                        reps = 0  # Will store time_input in notes
+                    else:
+                        # Rep-based exercise
+                        c1, c2, c3 = st.columns(3)
+                        with c1:
+                            sets = st.number_input("Sets", min_value=1, max_value=10, value=default_sets, key="wl_sets")
+                        with c2:
+                            # Parse default reps from string like "8-10"
+                            try:
+                                if "-" in str(default_reps):
+                                    reps_val = int(default_reps.split("-")[0])
+                                elif str(default_reps).isdigit():
+                                    reps_val = int(default_reps)
+                                else:
+                                    reps_val = 10
+                            except:
+                                reps_val = 10
+                            reps = st.number_input("Reps", min_value=1, max_value=100, value=reps_val, key="wl_reps")
+                        with c3:
+                            weight = st.number_input("Weight (kg)", min_value=0.0, max_value=500.0, value=default_weight, step=2.5, key="wl_weight")
+                        time_input = None
                     
                     if st.form_submit_button("💾 Log Exercise", use_container_width=True, type="primary"):
                         ex_to_log = exercise_name if selected_ex != "➕ Custom Exercise" else exercise_name
                         if ex_to_log:
                             try:
-                                sm.log_workout(
-                                    date=TODAY.date().isoformat(),
-                                    exercise=ex_to_log,
-                                    sets=sets,
-                                    reps=reps,
-                                    weight_kg=weight,
-                                    workout_type="strength"
-                                )
+                                if is_time_exercise:
+                                    # Log time-based exercise with duration in notes
+                                    sm.log_workout(
+                                        date=TODAY.date().isoformat(),
+                                        exercise=ex_to_log,
+                                        sets=sets,
+                                        reps=0,
+                                        weight_kg=weight if weight > 0 else None,
+                                        workout_type="strength",
+                                        notes=f"Duration: {time_input}"
+                                    )
+                                else:
+                                    sm.log_workout(
+                                        date=TODAY.date().isoformat(),
+                                        exercise=ex_to_log,
+                                        sets=sets,
+                                        reps=reps,
+                                        weight_kg=weight,
+                                        workout_type="strength"
+                                    )
                                 st.success(f"✅ {ex_to_log} logged!")
                                 st.rerun()
                             except Exception as e:
