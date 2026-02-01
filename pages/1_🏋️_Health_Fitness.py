@@ -733,17 +733,7 @@ with left_col:
 with mid_col:
     st.markdown("### 🤖 AI Fitness Coach")
     
-    # Display chat
-    if st.session_state.health_chat:
-        for msg in st.session_state.health_chat:
-            with st.chat_message(msg["role"]):
-                st.write(msg["content"])
-    else:
-        st.info("👋 Ask me anything! I'll analyze your data and give specific advice.")
-    
-    st.markdown("---")
-    
-    # Action buttons
+    # Action buttons at TOP
     c1, c2, c3 = st.columns(3)
     with c1:
         if st.button("📊 Full Analysis", use_container_width=True, type="primary"):
@@ -779,7 +769,7 @@ Be specific with my actual numbers!"""
             st.session_state.health_chat = []
             st.rerun()
     
-    # Text input
+    # Text input at TOP (below buttons)
     user_q = st.text_input("Ask a question:", placeholder="e.g., Am I eating enough protein?", key="coach_q", label_visibility="collapsed")
     if st.button("Send", key="send_q", use_container_width=True) and user_q:
         st.session_state.health_chat.append({"role": "user", "content": user_q})
@@ -787,6 +777,16 @@ Be specific with my actual numbers!"""
             response = chat_with_coach(user_q)
         st.session_state.health_chat.append({"role": "assistant", "content": response})
         st.rerun()
+    
+    st.markdown("---")
+    
+    # Chat history BELOW
+    if st.session_state.health_chat:
+        for msg in st.session_state.health_chat:
+            with st.chat_message(msg["role"]):
+                st.write(msg["content"])
+    else:
+        st.info("👋 Ask me anything! I'll analyze your data and give specific advice.")
 
 # ============================================================
 # RIGHT COLUMN: Stats & Goals
