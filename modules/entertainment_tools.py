@@ -24,6 +24,24 @@ TMDB_BASE = "https://api.themoviedb.org/3"
 TMDB_IMG_BASE = "https://image.tmdb.org/t/p"
 
 # ============================================================
+# Image/Poster Helpers
+# ============================================================
+
+def get_poster_url(poster_path: str, size: str = "w500") -> Optional[str]:
+    """Get full poster URL from TMDB poster path.
+    
+    Args:
+        poster_path: The poster path from TMDB (e.g., "/abc123.jpg")
+        size: Image size - w92, w154, w185, w342, w500, w780, original
+    
+    Returns:
+        Full URL to the poster image, or None if no path provided
+    """
+    if not poster_path:
+        return None
+    return f"{TMDB_IMG_BASE}/{size}{poster_path}"
+
+# ============================================================
 # API Helpers
 # ============================================================
 
