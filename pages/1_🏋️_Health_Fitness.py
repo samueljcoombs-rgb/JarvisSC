@@ -286,7 +286,7 @@ st.markdown("""
 
 /* Scrollable Chat Container */
 .chat-container {
-    max-height: 400px;
+    max-height: 500px;
     overflow-y: auto;
     padding-right: 0.5rem;
 }
@@ -837,7 +837,7 @@ Be specific with my actual numbers!"""
     # Chat history in scrollable container
     if st.session_state.health_chat:
         # Create scrollable container
-        chat_container = st.container(height=400)
+        chat_container = st.container(height=500)
         with chat_container:
             # Show newest first
             for msg in reversed(st.session_state.health_chat):
