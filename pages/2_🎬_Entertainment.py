@@ -35,84 +35,204 @@ st.set_page_config(
 gs.inject_global_styles()
 
 # ============================================================
-# Custom Styling
+# Custom Styling - Premium Design
 # ============================================================
 
 st.markdown("""
 <style>
-.ent-header {
-    background: linear-gradient(135deg, #ec4899 0%, #8b5cf6 50%, #6366f1 100%);
-    padding: 1.5rem 2rem;
-    border-radius: 16px;
-    margin-bottom: 1.5rem;
-    box-shadow: 0 8px 32px rgba(139, 92, 246, 0.3);
+/* Animated gradient background */
+@keyframes gradientShift {
+    0% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
 }
+
+@keyframes shimmer {
+    0% { background-position: -200% center; }
+    100% { background-position: 200% center; }
+}
+
+@keyframes float {
+    0%, 100% { transform: translateY(0px); }
+    50% { transform: translateY(-5px); }
+}
+
+.ent-header {
+    background: linear-gradient(-45deg, #ec4899, #8b5cf6, #6366f1, #a855f7);
+    background-size: 400% 400%;
+    animation: gradientShift 15s ease infinite;
+    padding: 2rem 2.5rem;
+    border-radius: 24px;
+    margin-bottom: 1.5rem;
+    box-shadow: 0 20px 60px rgba(139, 92, 246, 0.4);
+    position: relative;
+    overflow: hidden;
+}
+
+.ent-header::before {
+    content: '';
+    position: absolute;
+    top: -50%;
+    right: -50%;
+    width: 100%;
+    height: 200%;
+    background: radial-gradient(circle, rgba(255,255,255,0.15) 0%, transparent 60%);
+    animation: float 6s ease-in-out infinite;
+}
+
 .ent-header h1 {
     color: white;
     margin: 0;
-    font-size: 2rem;
-    font-weight: 800;
+    font-size: 2.5rem;
+    font-weight: 900;
+    text-shadow: 0 4px 20px rgba(0,0,0,0.3);
+    position: relative;
+    z-index: 1;
 }
+
 .ent-header p {
-    color: rgba(255,255,255,0.85);
-    margin: 0.25rem 0 0 0;
+    color: rgba(255,255,255,0.9);
+    margin: 0.5rem 0 0 0;
+    font-size: 1.1rem;
+    font-weight: 500;
+    position: relative;
+    z-index: 1;
 }
+
+/* Movie/TV Cards - Premium Glassmorphism */
 .movie-card {
-    background: linear-gradient(135deg, rgba(255,255,255,0.08) 0%, rgba(255,255,255,0.03) 100%);
-    border: 1px solid rgba(255,255,255,0.1);
-    border-radius: 16px;
+    background: linear-gradient(145deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.02) 100%);
+    backdrop-filter: blur(20px);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 20px;
     padding: 1rem;
     margin-bottom: 1rem;
-    transition: all 0.3s ease;
+    transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    position: relative;
+    overflow: hidden;
 }
+
+.movie-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent);
+    transition: left 0.5s;
+}
+
+.movie-card:hover::before {
+    left: 100%;
+}
+
 .movie-card:hover {
-    border-color: rgba(139, 92, 246, 0.5);
-    transform: translateY(-2px);
+    border-color: rgba(139, 92, 246, 0.6);
+    transform: translateY(-8px) scale(1.02);
+    box-shadow: 0 20px 40px rgba(139, 92, 246, 0.3);
 }
+
 .movie-poster {
     width: 100%;
-    border-radius: 8px;
+    border-radius: 12px;
     margin-bottom: 0.75rem;
+    box-shadow: 0 8px 25px rgba(0,0,0,0.4);
 }
+
 .movie-title {
     font-size: 1rem;
     font-weight: 700;
     color: white;
     margin-bottom: 0.25rem;
 }
+
 .movie-meta {
     font-size: 0.85rem;
     color: rgba(255,255,255,0.6);
 }
+
 .rating-badge {
     display: inline-block;
     background: linear-gradient(135deg, #f59e0b, #d97706);
     color: white;
-    padding: 2px 8px;
-    border-radius: 12px;
+    padding: 4px 10px;
+    border-radius: 20px;
     font-size: 0.8rem;
     font-weight: 700;
+    box-shadow: 0 4px 15px rgba(245, 158, 11, 0.4);
 }
+
+/* Watchlist Card */
 .watchlist-card {
-    background: rgba(255,255,255,0.05);
+    background: linear-gradient(145deg, rgba(255,255,255,0.08) 0%, rgba(255,255,255,0.02) 100%);
     border: 1px solid rgba(255,255,255,0.1);
-    border-radius: 12px;
+    border-radius: 16px;
     padding: 1rem;
     margin-bottom: 0.75rem;
+    transition: all 0.3s ease;
 }
+
+.watchlist-card:hover {
+    border-color: rgba(59, 130, 246, 0.4);
+    box-shadow: 0 8px 25px rgba(59, 130, 246, 0.2);
+}
+
+/* Letterboxd Card - Orange/Green gradient (Letterboxd colors) */
 .letterboxd-card {
-    background: linear-gradient(135deg, rgba(255, 128, 0, 0.15) 0%, rgba(0, 224, 0, 0.15) 100%);
-    border: 1px solid rgba(255, 128, 0, 0.3);
-    border-radius: 12px;
-    padding: 1rem;
-    margin-bottom: 0.75rem;
+    background: linear-gradient(135deg, rgba(255, 128, 0, 0.2) 0%, rgba(0, 224, 0, 0.15) 100%);
+    border: 1px solid rgba(255, 128, 0, 0.4);
+    border-radius: 16px;
+    padding: 1.25rem;
+    margin-bottom: 1rem;
+    transition: all 0.3s ease;
 }
+
+.letterboxd-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 25px rgba(255, 128, 0, 0.3);
+}
+
+.letterboxd-card a {
+    color: #ff8000;
+    text-decoration: none;
+    font-weight: 600;
+}
+
+.letterboxd-card a:hover {
+    text-decoration: underline;
+}
+
+/* News Card */
 .news-card {
-    background: rgba(255,255,255,0.05);
+    background: linear-gradient(145deg, rgba(255,255,255,0.06) 0%, rgba(255,255,255,0.02) 100%);
     border: 1px solid rgba(255,255,255,0.1);
-    border-radius: 12px;
-    padding: 1rem;
+    border-radius: 16px;
+    padding: 1.25rem;
     margin-bottom: 0.75rem;
+    transition: all 0.3s ease;
+}
+
+.news-card:hover {
+    border-color: rgba(236, 72, 153, 0.4);
+    box-shadow: 0 8px 25px rgba(236, 72, 153, 0.2);
+}
+
+/* Tab styling */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 8px;
+}
+
+.stTabs [data-baseweb="tab"] {
+    background: rgba(255,255,255,0.05);
+    border-radius: 12px;
+    padding: 0.5rem 1rem;
+    border: 1px solid rgba(255,255,255,0.1);
+}
+
+.stTabs [aria-selected="true"] {
+    background: linear-gradient(135deg, rgba(139, 92, 246, 0.3), rgba(236, 72, 153, 0.3));
+    border-color: rgba(139, 92, 246, 0.5);
 }
 </style>
 """, unsafe_allow_html=True)
@@ -124,7 +244,7 @@ st.markdown("""
 st.markdown("""
 <div class="ent-header">
     <h1>🎬 Entertainment</h1>
-    <p>Movies, TV shows, gaming news, and your watchlist</p>
+    <p>✨ Movies, TV shows, gaming news, and your watchlist</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -496,30 +616,49 @@ with tab4:
         st.write(f"**User:** @{letterboxd_user}")
         
         try:
-            activity = et.get_letterboxd_activity(letterboxd_user)
+            data = et.get_letterboxd_activity(letterboxd_user)
+            
+            # Get the activity list from the dict
+            activity = data.get("activity", []) if isinstance(data, dict) else []
             
             if activity:
                 st.write("**Recent Activity:**")
                 for item in activity[:10]:
                     title = item.get("title", "Unknown")
-                    rating = item.get("rating", "")
-                    date = item.get("date", "")
-                    
-                    rating_stars = rating if rating else ""
+                    link = item.get("link", "")
+                    published = item.get("published", "")
+                    has_rating = item.get("has_rating", False)
                     
                     st.markdown(f"""
                     <div class="letterboxd-card">
-                        <strong>{title}</strong> {rating_stars}
-                        <br><small>{date}</small>
+                        <strong>{title}</strong>
+                        <br><small>{published}</small>
+                        {f'<a href="{link}" target="_blank">View on Letterboxd</a>' if link else ''}
                     </div>
                     """, unsafe_allow_html=True)
                     
+                    # Extract film title from full title (remove rating stars etc)
+                    film_title = title.split(" - ")[0] if " - " in title else title
+                    
                     # Add to watchlist button
-                    if st.button(f"➕ Add to Watchlist", key=f"lb_{hash(title)}"):
-                        sm.add_to_watchlist(title=title, content_type="movie", status="to_watch")
+                    if st.button(f"➕ Add to Watchlist", key=f"lb_{hash(title[:50])}"):
+                        sm.add_to_watchlist(title=film_title, content_type="movie", status="to_watch")
                         st.success("Added!")
             else:
-                st.info("No recent activity found")
+                if data.get("activity_error"):
+                    st.warning(f"Could not fetch activity: {data.get('activity_error')}")
+                else:
+                    st.info("No recent activity found")
+                    
+            # Also show watchlist if available
+            watchlist = data.get("watchlist", []) if isinstance(data, dict) else []
+            if watchlist:
+                with st.expander(f"📋 Letterboxd Watchlist ({len(watchlist)} films)"):
+                    for item in watchlist[:20]:
+                        title = item.get("title", "Unknown")
+                        year = item.get("year", "")
+                        st.write(f"• {title} ({year})" if year else f"• {title}")
+                        
         except Exception as e:
             st.error(f"Error loading Letterboxd: {e}")
     
