@@ -166,90 +166,160 @@ if "last_processed_index" not in st.session_state:
 if "session_id" not in st.session_state:
     st.session_state.session_id = str(int(time.time()))
 
-# ----- Custom CSS for Main Page -----
+# ----- Custom CSS for Main Page - PREMIUM DESIGN -----
 st.markdown("""
 <style>
-.main-header {
-    background: linear-gradient(135deg, #1e3a5f 0%, #0f1f3a 100%);
-    padding: 1.5rem 2rem;
-    border-radius: 16px;
-    margin-bottom: 1.5rem;
-    border: 1px solid rgba(59, 130, 246, 0.3);
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+/* Animated gradient background for header */
+@keyframes gradientShift {
+    0% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
 }
+
+@keyframes float {
+    0%, 100% { transform: translateY(0px); }
+    50% { transform: translateY(-5px); }
+}
+
+@keyframes pulse-glow {
+    0%, 100% { box-shadow: 0 8px 32px rgba(99, 102, 241, 0.4); }
+    50% { box-shadow: 0 8px 48px rgba(139, 92, 246, 0.6); }
+}
+
+@keyframes shimmer {
+    0% { background-position: -200% center; }
+    100% { background-position: 200% center; }
+}
+
+.main-header {
+    background: linear-gradient(-45deg, #0f0c29, #302b63, #24243e, #1a1a2e);
+    background-size: 400% 400%;
+    animation: gradientShift 15s ease infinite;
+    padding: 2rem 2.5rem;
+    border-radius: 24px;
+    margin-bottom: 1.5rem;
+    border: 1px solid rgba(139, 92, 246, 0.3);
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5), 
+                inset 0 1px 0 rgba(255,255,255,0.1);
+    position: relative;
+    overflow: hidden;
+}
+
+.main-header::before {
+    content: '';
+    position: absolute;
+    top: -50%;
+    right: -50%;
+    width: 100%;
+    height: 200%;
+    background: radial-gradient(circle, rgba(139, 92, 246, 0.15) 0%, transparent 60%);
+    animation: float 6s ease-in-out infinite;
+}
+
+.main-header::after {
+    content: '';
+    position: absolute;
+    bottom: -50%;
+    left: -50%;
+    width: 100%;
+    height: 200%;
+    background: radial-gradient(circle, rgba(59, 130, 246, 0.1) 0%, transparent 60%);
+    animation: float 8s ease-in-out infinite reverse;
+}
+
 .main-header h1 {
     color: white;
     margin: 0;
-    font-size: 2.5rem;
-    font-weight: 800;
-    background: linear-gradient(135deg, #60a5fa 0%, #a78bfa 100%);
+    font-size: 2.8rem;
+    font-weight: 900;
+    background: linear-gradient(135deg, #60a5fa 0%, #a78bfa 50%, #f472b6 100%);
+    background-size: 200% auto;
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
+    animation: shimmer 3s linear infinite;
+    position: relative;
+    z-index: 1;
+    text-shadow: 0 0 40px rgba(139, 92, 246, 0.5);
 }
+
 .main-header p {
-    color: rgba(255,255,255,0.7);
+    color: rgba(255,255,255,0.8);
     margin: 0.5rem 0 0 0;
     font-size: 1.1rem;
+    font-weight: 500;
+    letter-spacing: 0.5px;
+    position: relative;
+    z-index: 1;
 }
-.nav-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 1rem;
-    margin-bottom: 2rem;
-}
+
+/* Navigation Cards - Glassmorphism Premium */
 .nav-card {
-    background: linear-gradient(135deg, rgba(255,255,255,0.08) 0%, rgba(255,255,255,0.03) 100%);
+    background: linear-gradient(145deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.02) 100%);
     backdrop-filter: blur(20px);
-    border: 1px solid rgba(255,255,255,0.1);
-    border-radius: 16px;
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 20px;
     padding: 1.5rem;
     text-align: center;
-    transition: all 0.3s ease;
+    transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
     cursor: pointer;
     text-decoration: none;
+    position: relative;
+    overflow: hidden;
 }
+
+.nav-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent);
+    transition: left 0.5s;
+}
+
+.nav-card:hover::before {
+    left: 100%;
+}
+
 .nav-card:hover {
-    background: rgba(255,255,255,0.12);
-    border-color: rgba(59, 130, 246, 0.5);
-    transform: translateY(-4px);
-    box-shadow: 0 12px 40px rgba(59, 130, 246, 0.2);
+    background: linear-gradient(145deg, rgba(255,255,255,0.15) 0%, rgba(255,255,255,0.05) 100%);
+    border-color: rgba(139, 92, 246, 0.5);
+    transform: translateY(-8px) scale(1.02);
+    box-shadow: 0 20px 40px rgba(139, 92, 246, 0.3),
+                0 0 0 1px rgba(139, 92, 246, 0.2);
 }
+
 .nav-card .icon {
-    font-size: 2.5rem;
+    font-size: 2.8rem;
     margin-bottom: 0.75rem;
+    filter: drop-shadow(0 4px 8px rgba(0,0,0,0.3));
+    transition: transform 0.3s ease;
 }
+
+.nav-card:hover .icon {
+    transform: scale(1.15);
+}
+
 .nav-card .title {
     font-size: 1.1rem;
-    font-weight: 600;
+    font-weight: 700;
     color: white;
     margin-bottom: 0.25rem;
+    letter-spacing: 0.3px;
 }
+
 .nav-card .desc {
     font-size: 0.85rem;
     color: rgba(255,255,255,0.6);
+    font-weight: 400;
 }
-.quick-stats {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-    gap: 1rem;
-    margin-bottom: 1.5rem;
-}
-.stat-mini {
-    background: rgba(255,255,255,0.05);
-    border: 1px solid rgba(255,255,255,0.1);
-    border-radius: 12px;
-    padding: 1rem;
-    text-align: center;
-}
-.stat-mini .value {
-    font-size: 1.5rem;
-    font-weight: 700;
-    color: #60a5fa;
-}
-.stat-mini .label {
-    font-size: 0.8rem;
-    color: rgba(255,255,255,0.6);
+
+/* Section styling */
+section[data-testid="stVerticalBlock"] > div:has(.nav-card) {
+    transition: all 0.3s ease;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -259,7 +329,7 @@ current_time = datetime.now().strftime("%A, %d %B %Y")
 st.markdown(f"""
 <div class="main-header">
     <h1>🤖 Jarvis Dashboard</h1>
-    <p>{current_time} • Your AI-powered life assistant</p>
+    <p>✨ {current_time} • Your AI-powered life assistant</p>
 </div>
 """, unsafe_allow_html=True)
 
