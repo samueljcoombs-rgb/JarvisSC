@@ -114,14 +114,14 @@ with st.expander("📰🎮 Entertainment & Gaming News", expanded=True):
             else:
                 filtered = news
             
-            # Sleek scrollable news with cards
-            st.markdown("""
+            # Build complete HTML with embedded styles
+            html_content = '''
             <style>
             .news-scroll {
                 display: flex;
                 overflow-x: auto;
                 gap: 1rem;
-                padding: 1rem 0;
+                padding: 0.5rem;
                 scroll-behavior: smooth;
             }
             .news-scroll::-webkit-scrollbar {
@@ -136,32 +136,32 @@ with st.expander("📰🎮 Entertainment & Gaming News", expanded=True):
                 border-radius: 4px;
             }
             .news-card {
-                flex: 0 0 280px;
+                flex: 0 0 260px;
                 border-radius: 12px;
                 overflow: hidden;
-                background: rgba(128,128,128,0.1);
-                border: 1px solid rgba(128,128,128,0.2);
+                background: #1e1e2e;
+                border: 1px solid rgba(128,128,128,0.3);
                 transition: transform 0.2s, box-shadow 0.2s;
             }
             .news-card:hover {
                 transform: translateY(-4px);
-                box-shadow: 0 8px 24px rgba(0,0,0,0.2);
+                box-shadow: 0 8px 24px rgba(0,0,0,0.3);
             }
             .news-card img {
                 width: 100%;
-                height: 140px;
+                height: 130px;
                 object-fit: cover;
             }
             .news-card-body {
-                padding: 0.8rem;
+                padding: 0.7rem;
             }
             .news-badge {
                 display: inline-block;
                 padding: 2px 8px;
                 border-radius: 4px;
-                font-size: 0.7rem;
+                font-size: 0.65rem;
                 font-weight: 600;
-                margin-bottom: 0.5rem;
+                margin-bottom: 0.4rem;
             }
             .news-badge.gaming {
                 background: linear-gradient(135deg, #10b981, #059669);
@@ -172,28 +172,29 @@ with st.expander("📰🎮 Entertainment & Gaming News", expanded=True):
                 color: white;
             }
             .news-title {
-                font-size: 0.85rem;
+                font-size: 0.8rem;
                 line-height: 1.3;
                 margin: 0;
+                color: #e0e0e0;
                 display: -webkit-box;
                 -webkit-line-clamp: 3;
                 -webkit-box-orient: vertical;
                 overflow: hidden;
             }
             .news-title a {
-                color: inherit;
+                color: #e0e0e0;
                 text-decoration: none;
             }
             .news-title a:hover {
+                color: #8b5cf6;
                 text-decoration: underline;
             }
             </style>
-            """, unsafe_allow_html=True)
+            <div class="news-scroll">
+            '''
             
-            # Build HTML cards
-            cards_html = '<div class="news-scroll">'
             for article in filtered[:news_count]:
-                title = article.get("title", "")
+                title = article.get("title", "").replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
                 source = article.get("source", "")
                 link = article.get("link", "")
                 image = article.get("image", "")
@@ -202,22 +203,24 @@ with st.expander("📰🎮 Entertainment & Gaming News", expanded=True):
                 badge_class = "gaming" if is_gaming else "entertainment"
                 badge_icon = "🎮" if is_gaming else "🎬"
                 
-                # Placeholder image if none
                 if not image:
-                    image = "https://placehold.co/280x140/1a1a2e/8b5cf6?text=News"
+                    image = "https://placehold.co/260x130/1a1a2e/8b5cf6?text=News"
                 
-                cards_html += f'''
+                html_content += f'''
                 <div class="news-card">
-                    <img src="{image}" alt="" onerror="this.src='https://placehold.co/280x140/1a1a2e/8b5cf6?text=News'">
+                    <img src="{image}" alt="" onerror="this.src='https://placehold.co/260x130/1a1a2e/8b5cf6?text=News'">
                     <div class="news-card-body">
                         <span class="news-badge {badge_class}">{badge_icon} {source}</span>
                         <p class="news-title"><a href="{link}" target="_blank">{title}</a></p>
                     </div>
                 </div>
                 '''
-            cards_html += '</div>'
             
-            st.markdown(cards_html, unsafe_allow_html=True)
+            html_content += '</div>'
+            
+            # Use components.html for proper rendering
+            import streamlit.components.v1 as components
+            components.html(html_content, height=220, scrolling=True)
         else:
             st.info("No news available")
     except Exception as e:
