@@ -358,22 +358,22 @@ with right_col:
         activity = lb_data.get("activity", [])
         watchlist = lb_data.get("watchlist", [])
         
-    # ALWAYS show debug for now to diagnose issue
-    with st.expander("🔧 Debug Info", expanded=True):
-        st.write(f"**Activity:** {len(activity)} items (status: {lb_data.get('activity_status', 'N/A')})")
-        st.write(f"**Watchlist URL:** {lb_data.get('watchlist_url', 'N/A')}")
-        st.write(f"**Watchlist status:** {lb_data.get('watchlist_status', 'N/A')}")
-        st.write(f"**Posters found:** {lb_data.get('posters_found', 0)}")
-        st.write(f"**Watchlist items:** {len(watchlist)}")
-        
-        if lb_data.get('alt_posters_found'):
-            st.write(f"Alt posters: {lb_data.get('alt_posters_found')}")
-        if lb_data.get('watchlist_error'):
-            st.error(f"Error: {lb_data.get('watchlist_error')}")
-        
-        if watchlist:
-            st.success(f"✅ Got {len(watchlist)} films!")
-            st.write("First:", watchlist[0])
+        # ALWAYS show debug for now to diagnose issue
+        with st.expander("🔧 Debug Info", expanded=True):
+            st.write(f"**Activity:** {len(activity)} items (status: {lb_data.get('activity_status', 'N/A')})")
+            st.write(f"**Watchlist URL:** {lb_data.get('watchlist_url', 'N/A')}")
+            st.write(f"**Watchlist status:** {lb_data.get('watchlist_status', 'N/A')}")
+            st.write(f"**Posters found:** {lb_data.get('posters_found', 0)}")
+            st.write(f"**Watchlist items:** {len(watchlist)}")
+            
+            if lb_data.get('alt_posters_found'):
+                st.write(f"Alt posters: {lb_data.get('alt_posters_found')}")
+            if lb_data.get('watchlist_error'):
+                st.error(f"Error: {lb_data.get('watchlist_error')}")
+            
+            if watchlist:
+                st.success(f"✅ Got {len(watchlist)} films!")
+                st.write("First:", watchlist[0])
         
         tab1, tab2 = st.tabs(["📋 Watchlist", "🎬 Activity"])
         
