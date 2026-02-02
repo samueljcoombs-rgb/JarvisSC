@@ -1,6 +1,6 @@
 # pages/2_🎬_Entertainment.py
 """
-Entertainment Dashboard - Letterboxd, Cinema Releases, AI Recommendations.
+Entertainment Dashboard - Letterboxd, Cinema Releases, Games, AI Recommendations.
 """
 import streamlit as st
 from datetime import datetime
@@ -59,37 +59,33 @@ st.markdown("""
     <h1 style="margin: 0; font-size: 2.5rem; font-weight: 900; 
                background: linear-gradient(135deg, #ec4899, #8b5cf6, #60a5fa);
                -webkit-background-clip: text; -webkit-text-fill-color: transparent;">🎬 Entertainment Hub</h1>
-    <p style="color: rgba(255,255,255,0.8); margin: 0.5rem 0 0 0;">✨ Cinema releases, Letterboxd, and AI recommendations</p>
+    <p style="color: rgba(255,255,255,0.8); margin: 0.5rem 0 0 0;">✨ Cinema, Letterboxd, Games & AI recommendations</p>
 </div>
 """, unsafe_allow_html=True)
 
 # ============================================================
-# Entertainment News (Top Row)
+# Entertainment News (Top Row) - Better Display
 # ============================================================
 
-st.markdown("### 📰 Entertainment News")
-
-try:
-    news = et.get_entertainment_news()
-    if news:
-        news_cols = st.columns(4)
-        for i, article in enumerate(news[:8]):
-            with news_cols[i % 4]:
+with st.expander("📰 **Entertainment News**", expanded=True):
+    try:
+        news = et.get_entertainment_news()
+        if news:
+            for i, article in enumerate(news[:6]):
                 title = article.get("title", "No title")
                 source = article.get("source", "")
                 link = article.get("link", "")
                 
-                # Truncate title
-                display_title = title[:55] + "..." if len(title) > 55 else title
-                
-                with st.container():
+                col1, col2 = st.columns([1, 8])
+                with col1:
                     st.caption(f"**{source}**")
+                with col2:
                     if link:
-                        st.markdown(f"[{display_title}]({link})")
+                        st.markdown(f"[{title}]({link})")
                     else:
-                        st.write(display_title)
-except Exception as e:
-    st.caption(f"News unavailable: {e}")
+                        st.write(title)
+    except Exception as e:
+        st.caption(f"News unavailable")
 
 st.divider()
 
@@ -100,12 +96,12 @@ st.divider()
 left_col, mid_col, right_col = st.columns([3, 4, 3], gap="large")
 
 # ============================================================
-# LEFT COLUMN: Letterboxd + Vue Cinema
+# LEFT COLUMN: Letterboxd + Games
 # ============================================================
 
 with left_col:
     # Letterboxd Section
-    st.markdown(f"### 🎭 Letterboxd")
+    st.subheader("🎭 Letterboxd")
     st.caption(f"@{LETTERBOXD_USER}")
     
     if LETTERBOXD_USER:
@@ -114,65 +110,123 @@ with left_col:
             activity = lb_data.get("activity", []) if isinstance(lb_data, dict) else []
             lb_watchlist = lb_data.get("watchlist", []) if isinstance(lb_data, dict) else []
             
-            # Tabs for Watchlist and Activity
+            # Debug info
+            if lb_data.get("watchlist_error"):
+                st.caption(f"⚠️ Watchlist error: {lb_data.get('watchlist_error')}")
+            
+            # Tabs
             lb_tab1, lb_tab2 = st.tabs(["📋 Watchlist", "🎬 Activity"])
             
             with lb_tab1:
                 if lb_watchlist:
-                    st.caption(f"{len(lb_watchlist)} films to watch")
-                    for item in lb_watchlist[:12]:
+                    st.success(f"{len(lb_watchlist)} films to watch")
+                    for item in lb_watchlist[:15]:
                         title = item.get("title", "Unknown")
                         year = item.get("year", "")
-                        st.markdown(f"• **{title}** ({year})" if year else f"• **{title}**")
+                        year_str = f" ({year})" if year else ""
+                        st.write(f"🎬 {title}{year_str}")
                 else:
-                    st.info("Watchlist empty or not public")
+                    st.warning("No watchlist found. Make sure your Letterboxd watchlist is public!")
+                    st.caption(f"Checking: letterboxd.com/{LETTERBOXD_USER}/watchlist/rss/")
             
             with lb_tab2:
                 if activity:
                     for item in activity[:8]:
                         title = item.get("title", "")
                         has_rating = item.get("has_rating", False)
-                        star = " ★" if has_rating else ""
-                        st.markdown(f"• {title}{star}")
+                        star = " ⭐" if has_rating else ""
+                        st.write(f"🎬 {title}{star}")
                 else:
                     st.caption("No recent activity")
                     
         except Exception as e:
-            st.warning(f"Letterboxd error: {e}")
+            st.error(f"Letterboxd error: {e}")
     
     st.divider()
     
-    # In Cinemas Now
-    st.markdown("### 🎥 In Cinemas Now")
+    # Games To Play Section
+    st.subheader("🎮 Games To Play")
     
+    # Get games from sheets (we'll add this functionality)
+    if "games_list" not in st.session_state:
+        st.session_state.games_list = []
+    
+    # Try to load from sheets
     try:
-        # Use TMDb now_playing for UK cinemas
-        now_playing = et.get_now_playing("GB")
-        
-        if now_playing:
-            for film in now_playing[:8]:
-                title = film.get("title", "Unknown")
-                rating = film.get("vote_average", 0)
-                st.markdown(f"**{title}** ⭐ {rating:.1f}")
-        else:
-            st.caption("No films found")
-    except Exception as e:
-        st.caption(f"Cinema error: {e}")
+        games_data = sm.get_watchlist(status="to_watch")
+        games = [g for g in games_data if g.get("type") == "game"] if games_data else []
+    except:
+        games = []
+    
+    if games:
+        for game in games[:8]:
+            col1, col2 = st.columns([5, 1])
+            with col1:
+                st.write(f"🎮 {game.get('title', '?')}")
+            with col2:
+                if st.button("✓", key=f"game_done_{game.get('id', game.get('title'))}"):
+                    try:
+                        sm.update_watchlist_item(game.get("id"), {"status": "completed"})
+                        st.rerun()
+                    except:
+                        pass
+    else:
+        st.caption("No games in your list yet")
+    
+    # Add game form
+    with st.expander("➕ Add Game"):
+        new_game = st.text_input("Game title", key="new_game_title")
+        if st.button("Add Game", key="add_game_btn"):
+            if new_game:
+                try:
+                    sm.add_to_watchlist(title=new_game, media_type="game")
+                    st.success(f"Added {new_game}!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: {e}")
 
 # ============================================================
-# MIDDLE COLUMN: Coming Soon + AI Coach
+# MIDDLE COLUMN: In Cinemas + Coming Soon + AI Coach
 # ============================================================
 
 with mid_col:
-    # Coming to Cinemas
-    st.markdown("### 🗓️ Coming Soon")
+    # In Cinemas Now - Sorted by Rating
+    st.subheader("🎥 In Cinemas Now")
+    
+    try:
+        now_playing = et.get_now_playing("GB")
+        
+        if now_playing:
+            # Sort by rating (highest first)
+            sorted_films = sorted(now_playing, key=lambda x: x.get("vote_average", 0), reverse=True)
+            
+            for film in sorted_films[:8]:
+                title = film.get("title", "Unknown")
+                rating = film.get("vote_average", 0)
+                release = film.get("release_date", "")
+                
+                col1, col2 = st.columns([4, 1])
+                with col1:
+                    st.write(f"**{title}**")
+                with col2:
+                    st.write(f"⭐ {rating:.1f}")
+        else:
+            st.caption("No films found")
+    except Exception as e:
+        st.caption(f"Error: {e}")
+    
+    st.divider()
+    
+    # Coming Soon
+    st.subheader("🗓️ Coming Soon")
     
     try:
         upcoming = et.get_upcoming_movies("GB", pages=3)
         
         if upcoming:
-            # Filter to major releases
-            major = [m for m in upcoming if m.get("popularity", 0) > 15][:10]
+            # Filter to major releases and sort by date
+            major = sorted([m for m in upcoming if m.get("popularity", 0) > 10], 
+                          key=lambda x: x.get("release_date", "9999"))[:8]
             
             for movie in major:
                 title = movie.get("title", "Unknown")
@@ -183,19 +237,20 @@ with mid_col:
                 if release_date:
                     try:
                         dt = datetime.strptime(release_date, "%Y-%m-%d")
-                        date_str = dt.strftime("%b %d")
+                        date_str = dt.strftime("%d %b")
                     except:
                         date_str = "TBA"
                 else:
                     date_str = "TBA"
                 
-                # Display with columns
-                c1, c2 = st.columns([1, 4])
-                with c1:
-                    st.markdown(f"**{date_str}**")
-                with c2:
-                    rating_str = f" ⭐ {rating:.1f}" if rating > 0 else ""
-                    st.markdown(f"{title}{rating_str}")
+                col1, col2, col3 = st.columns([1, 4, 1])
+                with col1:
+                    st.write(f"**{date_str}**")
+                with col2:
+                    st.write(title)
+                with col3:
+                    if rating > 0:
+                        st.write(f"⭐{rating:.1f}")
         else:
             st.caption("No upcoming releases")
     except Exception as e:
@@ -204,7 +259,7 @@ with mid_col:
     st.divider()
     
     # AI Movie Coach
-    st.markdown("### 🤖 AI Movie Coach")
+    st.subheader("🤖 AI Movie Coach")
     
     # Initialize chat
     if "ent_chat" not in st.session_state:
@@ -272,13 +327,13 @@ Give personalized recommendations. Be specific about WHY they'd like each film. 
     
     # Display chat
     if st.session_state.ent_chat:
-        chat_box = st.container(height=280)
+        chat_box = st.container(height=200)
         with chat_box:
             for msg in reversed(st.session_state.ent_chat):
                 with st.chat_message(msg["role"]):
                     st.write(msg["content"])
     else:
-        st.info("Ask for recommendations based on your Letterboxd!")
+        st.info("💡 Ask for recommendations based on your Letterboxd!")
 
 # ============================================================
 # RIGHT COLUMN: Trending + Search
@@ -286,7 +341,7 @@ Give personalized recommendations. Be specific about WHY they'd like each film. 
 
 with right_col:
     # Trending
-    st.markdown("### 🔥 Trending Now")
+    st.subheader("🔥 Trending Now")
     
     try:
         trending = et.get_trending_movies()
@@ -311,9 +366,9 @@ with right_col:
     st.divider()
     
     # Search
-    st.markdown("### 🔍 Search")
+    st.subheader("🔍 Search")
     
-    search_q = st.text_input("Movie or TV show...", key="ent_search", label_visibility="collapsed")
+    search_q = st.text_input("Movie or TV show...", key="ent_search", label_visibility="collapsed", placeholder="Search...")
     
     if search_q:
         search_type = st.radio("", ["Movies", "TV"], horizontal=True, key="search_type", label_visibility="collapsed")
@@ -326,7 +381,12 @@ with right_col:
                     title = item.get("title") or item.get("name", "?")
                     year = (item.get("release_date") or item.get("first_air_date") or "")[:4]
                     rating = item.get("vote_average", 0)
-                    st.markdown(f"**{title}** ({year}) ⭐ {rating:.1f}")
+                    
+                    col1, col2 = st.columns([4, 1])
+                    with col1:
+                        st.write(f"**{title}** ({year})")
+                    with col2:
+                        st.write(f"⭐{rating:.1f}")
             else:
                 st.caption("No results")
         except Exception as e:
