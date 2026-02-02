@@ -258,6 +258,7 @@ def get_letterboxd_activity(username: str = None) -> Dict[str, List[Dict]]:
     # WATCHLIST - Scrape HTML pages with PAGINATION (RSS returns 403)
     try:
         result["pages_scraped"] = 0
+        result["page_debug"] = []
         
         for page_num in range(1, 11):  # Up to 10 pages
             # Build URL for this page
@@ -268,21 +269,26 @@ def get_letterboxd_activity(username: str = None) -> Dict[str, List[Dict]]:
             
             resp = requests.get(watchlist_url, headers=headers, timeout=10)
             
-            # Store debug info from first page
+            # Debug info for each page
+            page_info = {"page": page_num, "status": resp.status_code, "url": watchlist_url}
+            
+            # Store main debug info from first page
             if page_num == 1:
                 result["watchlist_url"] = watchlist_url
                 result["watchlist_status"] = resp.status_code
                 result["watchlist_length"] = len(resp.text) if resp.text else 0
             
-            # Stop if page doesn't exist
+            # Stop if page doesn't exist (404 means end of pages)
             if resp.status_code != 200:
+                page_info["reason"] = "non-200 status"
+                result["page_debug"].append(page_info)
                 break
             
             soup = BeautifulSoup(resp.text, 'html.parser')
             
             # Letterboxd watchlist uses poster-container with data attributes
-            # Find all film posters
             posters = soup.select('li.poster-container')
+            page_info["posters"] = len(posters)
             
             # Store count from first page
             if page_num == 1:
@@ -295,9 +301,12 @@ def get_letterboxd_activity(username: str = None) -> Dict[str, List[Dict]]:
             
             # No posters = end of watchlist
             if not posters:
+                page_info["reason"] = "no posters found"
+                result["page_debug"].append(page_info)
                 break
             
             result["pages_scraped"] = page_num
+            result["page_debug"].append(page_info)
             
             for poster in posters:
                 # Get the div with data attributes
