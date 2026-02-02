@@ -259,18 +259,17 @@ def get_letterboxd_activity(username: str = None) -> Dict[str, List[Dict]]:
     try:
         result["pages_scraped"] = 0
         
-        for page_num in range(1, 6):  # Scrape up to 5 pages (280 films max)
+        # Scrape up to 10 pages
+        for page_num in range(1, 11):
             if page_num == 1:
                 watchlist_url = f"https://letterboxd.com/{username}/watchlist/"
             else:
                 watchlist_url = f"https://letterboxd.com/{username}/watchlist/page/{page_num}/"
             
-            result["watchlist_url"] = watchlist_url
-            
             resp = requests.get(watchlist_url, headers=headers, timeout=10)
-            result["watchlist_status"] = resp.status_code
             
             if resp.status_code != 200:
+                # Page doesn't exist, stop
                 break
                 
             soup = BeautifulSoup(resp.text, 'html.parser')
@@ -279,7 +278,7 @@ def get_letterboxd_activity(username: str = None) -> Dict[str, List[Dict]]:
             posters = soup.select('li.poster-container')
             
             if not posters:
-                # No more films, stop paginating
+                # No more films on this page, stop
                 break
             
             result["pages_scraped"] = page_num
@@ -302,15 +301,11 @@ def get_letterboxd_activity(username: str = None) -> Dict[str, List[Dict]]:
                             "year": "",
                             "link": link
                         })
-            
-            # Check if there's a next page
-            next_link = soup.select_one('.paginate-nextprev a.next')
-            if not next_link:
-                break
                         
     except Exception as e:
         result["watchlist_error"] = str(e)
     
+    result["watchlist_status"] = 200 if result["watchlist"] else 404
     result["posters_found"] = len(result["watchlist"])
     return result
 
