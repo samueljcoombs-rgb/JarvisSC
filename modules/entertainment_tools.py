@@ -205,14 +205,14 @@ def get_tv_season(tv_id: int, season_num: int) -> Optional[Dict]:
     return _tmdb_get(f"/tv/{tv_id}/season/{season_num}")
 
 # ============================================================
-# Letterboxd Integration (via RSS)
+# Letterboxd Integration (via RSS + HTML scraping fallback)
 # ============================================================
 
 @st.cache_data(ttl=600)
 def get_letterboxd_activity(username: str = None) -> Dict[str, List[Dict]]:
-    """Get Letterboxd activity and watchlist via RSS feeds."""
+    """Get Letterboxd activity and watchlist."""
     import requests
-    import xml.etree.ElementTree as ET
+    from bs4 import BeautifulSoup
     
     username = username or _letterboxd_username()
     if not username:
@@ -221,10 +221,12 @@ def get_letterboxd_activity(username: str = None) -> Dict[str, List[Dict]]:
     result = {"activity": [], "watchlist": [], "username": username}
     
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
     }
     
-    # Activity feed
+    # Activity feed via RSS (this works)
     try:
         activity_url = f"https://letterboxd.com/{username}/rss/"
         resp = requests.get(activity_url, headers=headers, timeout=10)
@@ -253,62 +255,57 @@ def get_letterboxd_activity(username: str = None) -> Dict[str, List[Dict]]:
     except Exception as e:
         result["activity_error"] = str(e)
     
-    # WATCHLIST feed - fetch directly and parse manually
+    # WATCHLIST - Scrape HTML page directly (RSS returns 403)
     try:
-        watchlist_url = f"https://letterboxd.com/{username}/watchlist/rss/"
+        watchlist_url = f"https://letterboxd.com/{username}/watchlist/"
         result["watchlist_url"] = watchlist_url
         
         resp = requests.get(watchlist_url, headers=headers, timeout=10)
         result["watchlist_status"] = resp.status_code
-        result["watchlist_length"] = len(resp.text)
+        result["watchlist_length"] = len(resp.text) if resp.text else 0
         
-        if resp.status_code == 200 and len(resp.text) > 100:
-            # Try feedparser first
-            wfeed = feedparser.parse(resp.text)
-            result["watchlist_entries_raw"] = len(wfeed.entries) if wfeed.entries else 0
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.text, 'html.parser')
             
-            if wfeed.entries:
-                for entry in wfeed.entries[:50]:
-                    film_title = getattr(entry, 'letterboxd_filmtitle', None)
-                    film_year = getattr(entry, 'letterboxd_filmyear', None)
-                    
-                    if not film_title:
-                        film_title = entry.get("title", "")
-                    
-                    link = entry.get("link", "")
-                    
-                    if film_title:
-                        result["watchlist"].append({
-                            "title": str(film_title).strip(),
-                            "year": str(film_year).strip() if film_year else "",
-                            "link": link
-                        })
+            # Letterboxd watchlist uses poster-container with data attributes
+            # Find all film posters
+            posters = soup.select('li.poster-container')
+            result["posters_found"] = len(posters)
             
-            # If feedparser failed, try manual XML parsing
-            if not result["watchlist"]:
-                result["trying_manual_parse"] = True
-                try:
-                    # Parse XML manually
-                    root = ET.fromstring(resp.text)
-                    ns = {'letterboxd': 'https://letterboxd.com'}
-                    
-                    for item in root.findall('.//item'):
-                        title_el = item.find('letterboxd:filmTitle', ns)
-                        year_el = item.find('letterboxd:filmYear', ns)
-                        link_el = item.find('link')
-                        
-                        # Fallback to regular title
-                        if title_el is None:
-                            title_el = item.find('title')
-                        
-                        if title_el is not None and title_el.text:
-                            result["watchlist"].append({
-                                "title": title_el.text.strip(),
-                                "year": year_el.text.strip() if year_el is not None and year_el.text else "",
-                                "link": link_el.text if link_el is not None and link_el.text else ""
-                            })
-                except ET.ParseError as pe:
-                    result["xml_parse_error"] = str(pe)
+            if not posters:
+                # Try alternative selectors
+                posters = soup.select('.film-poster') or soup.select('[data-film-slug]')
+                result["alt_posters_found"] = len(posters)
+            
+            for poster in posters[:50]:
+                # Get the div with data attributes
+                film_div = poster.select_one('div.film-poster') or poster
+                
+                # Extract film name from data-film-slug or img alt
+                film_slug = film_div.get('data-film-slug', '') if film_div else ''
+                
+                # Get image for alt text (film title)
+                img = poster.select_one('img')
+                title = img.get('alt', '') if img else ''
+                
+                # If no title from img, try to make one from slug
+                if not title and film_slug:
+                    title = film_slug.replace('-', ' ').title()
+                
+                # Get link
+                link = ""
+                link_el = poster.select_one('a')
+                if link_el:
+                    href = link_el.get('href', '')
+                    if href:
+                        link = f"https://letterboxd.com{href}" if href.startswith('/') else href
+                
+                if title:
+                    result["watchlist"].append({
+                        "title": title.strip(),
+                        "year": "",
+                        "link": link
+                    })
         else:
             result["watchlist_error"] = f"HTTP {resp.status_code}"
             
