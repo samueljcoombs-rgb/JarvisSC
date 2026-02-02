@@ -234,14 +234,27 @@ def get_letterboxd_activity(username: str = None) -> Dict[str, List[Dict]]:
     except Exception as e:
         result["activity_error"] = str(e)
     
-    # Watchlist feed
+    # Watchlist feed - try multiple field names
     try:
         watchlist_feed = feedparser.parse(f"https://letterboxd.com/{username}/watchlist/rss/")
-        for entry in watchlist_feed.entries[:20]:
+        for entry in watchlist_feed.entries[:30]:
+            # Try different field names that Letterboxd might use
+            title = (entry.get("letterboxd_filmtitle") or 
+                    entry.get("title") or 
+                    entry.get("letterboxd_filmname") or
+                    "Unknown")
+            year = (entry.get("letterboxd_filmyear") or 
+                   entry.get("year") or 
+                   "")
+            
+            # Clean title - remove any "- Watchlist" suffix
+            if " - " in title:
+                title = title.split(" - ")[0]
+            
             item = {
-                "title": entry.get("letterboxd_filmtitle", entry.get("title", "")),
+                "title": title,
                 "link": entry.get("link", ""),
-                "year": entry.get("letterboxd_filmyear", "")
+                "year": str(year) if year else ""
             }
             result["watchlist"].append(item)
     except Exception as e:
