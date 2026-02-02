@@ -208,7 +208,7 @@ def get_tv_season(tv_id: int, season_num: int) -> Optional[Dict]:
 # Letterboxd Integration (via RSS)
 # ============================================================
 
-@st.cache_data(ttl=1800)
+@st.cache_data(ttl=600)  # Shorter cache for testing
 def get_letterboxd_activity(username: str = None) -> Dict[str, List[Dict]]:
     """Get Letterboxd activity and watchlist via RSS feeds."""
     username = username or _letterboxd_username()
@@ -217,76 +217,62 @@ def get_letterboxd_activity(username: str = None) -> Dict[str, List[Dict]]:
     
     result = {"activity": [], "watchlist": [], "username": username}
     
-    # Activity feed (diary/reviews)
+    # Activity feed
     try:
         activity_url = f"https://letterboxd.com/{username}/rss/"
         feed = feedparser.parse(activity_url)
-        result["activity_url"] = activity_url
         result["activity_count"] = len(feed.entries) if feed.entries else 0
         
         for entry in feed.entries[:25]:
             # feedparser converts letterboxd:filmTitle -> letterboxd_filmtitle
             film_title = getattr(entry, 'letterboxd_filmtitle', '') or ''
             film_year = getattr(entry, 'letterboxd_filmyear', '') or ''
-            rating = getattr(entry, 'letterboxd_memberrating', '') or ''
             
-            # Fallback: parse from title "Film Name, Year - ★★★"
             if not film_title:
                 raw_title = entry.get("title", "")
                 if ", " in raw_title:
-                    parts = raw_title.split(", ")
-                    film_title = parts[0]
-                    if len(parts) > 1 and " - " in parts[1]:
-                        film_year = parts[1].split(" - ")[0]
+                    film_title = raw_title.split(", ")[0]
                 else:
                     film_title = raw_title
             
-            item = {
-                "title": str(film_title).strip(),
-                "year": str(film_year).strip() if film_year else "",
-                "link": entry.get("link", ""),
-                "has_rating": bool(rating) or "★" in entry.get("title", "")
-            }
-            if item["title"]:
-                result["activity"].append(item)
-                
+            if film_title:
+                result["activity"].append({
+                    "title": str(film_title).strip(),
+                    "year": str(film_year).strip() if film_year else "",
+                    "link": entry.get("link", ""),
+                    "has_rating": "★" in entry.get("title", "")
+                })
     except Exception as e:
         result["activity_error"] = str(e)
     
-    # Watchlist feed - DIFFERENT URL
+    # WATCHLIST feed - Same endpoint pattern but /watchlist/
     try:
         watchlist_url = f"https://letterboxd.com/{username}/watchlist/rss/"
         wfeed = feedparser.parse(watchlist_url)
-        result["watchlist_url"] = watchlist_url
         result["watchlist_count"] = len(wfeed.entries) if wfeed.entries else 0
+        result["watchlist_url"] = watchlist_url
         
-        # Debug: get bozo error if any
         if wfeed.bozo:
-            result["watchlist_bozo"] = str(wfeed.bozo_exception)
-        
-        # Debug: sample entry structure
-        if wfeed.entries:
-            first = wfeed.entries[0]
-            result["watchlist_first_keys"] = [k for k in first.keys()]
-            result["watchlist_first_title_raw"] = first.get("title", "NO_TITLE_KEY")
+            result["watchlist_parse_error"] = str(wfeed.bozo_exception)
         
         for entry in wfeed.entries[:50]:
-            # Try letterboxd namespace fields
+            # Try the letterboxd namespace field first
             film_title = getattr(entry, 'letterboxd_filmtitle', None)
             film_year = getattr(entry, 'letterboxd_filmyear', None)
             
-            # Fallback to regular title
+            # If namespace didn't work, try regular title
             if not film_title:
-                film_title = entry.get("title", "Unknown")
+                film_title = entry.get("title", "")
             
-            item = {
-                "title": str(film_title).strip() if film_title else "Unknown",
-                "year": str(film_year).strip() if film_year else "",
-                "link": entry.get("link", "")
-            }
-            if item["title"] and item["title"] != "Unknown":
-                result["watchlist"].append(item)
-                
+            # Get link
+            link = entry.get("link", "")
+            
+            if film_title:
+                result["watchlist"].append({
+                    "title": str(film_title).strip(),
+                    "year": str(film_year).strip() if film_year else "",
+                    "link": link
+                })
     except Exception as e:
         result["watchlist_error"] = str(e)
     
