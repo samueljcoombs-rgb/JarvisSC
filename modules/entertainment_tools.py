@@ -217,80 +217,67 @@ def get_letterboxd_activity(username: str = None) -> Dict[str, List[Dict]]:
     
     result = {"activity": [], "watchlist": [], "username": username}
     
-    # Activity feed (diary/reviews)
+    # Activity feed (diary/reviews) - uses letterboxd:filmTitle namespace
     try:
         feed = feedparser.parse(f"https://letterboxd.com/{username}/rss/")
-        result["activity_feed_status"] = feed.get("status", "unknown")
         result["activity_entries_count"] = len(feed.entries) if feed.entries else 0
         
-        for entry in feed.entries[:20]:
+        for entry in feed.entries[:30]:
+            # Letterboxd uses namespaced fields: letterboxd:filmTitle -> letterboxd_filmtitle
+            title = getattr(entry, 'letterboxd_filmtitle', None) or entry.get('letterboxd_filmtitle', '')
+            year = getattr(entry, 'letterboxd_filmyear', None) or entry.get('letterboxd_filmyear', '')
+            rating = getattr(entry, 'letterboxd_memberrating', None) or entry.get('letterboxd_memberrating', '')
+            
+            # Fall back to title field if namespace didn't work
+            if not title:
+                title = entry.get("title", "")
+                # Title format: "Film Name, Year - ★★★½"
+                if ", " in title and " - " in title:
+                    title = title.split(", ")[0]
+            
             item = {
-                "title": entry.get("title", ""),
+                "title": title,
+                "year": str(year) if year else "",
                 "link": entry.get("link", ""),
                 "published": entry.get("published", ""),
-                "description": entry.get("description", "")[:200] if entry.get("description") else ""
+                "rating": rating,
+                "has_rating": bool(rating) or "★" in entry.get("title", "")
             }
-            # Try to extract rating if present
-            if "★" in entry.get("title", ""):
-                item["has_rating"] = True
             result["activity"].append(item)
     except Exception as e:
         result["activity_error"] = str(e)
     
-    # Watchlist feed - try multiple approaches
+    # Watchlist feed - different URL, simpler structure
     try:
         watchlist_url = f"https://letterboxd.com/{username}/watchlist/rss/"
         watchlist_feed = feedparser.parse(watchlist_url)
-        
-        result["watchlist_feed_status"] = watchlist_feed.get("status", "unknown")
         result["watchlist_entries_count"] = len(watchlist_feed.entries) if watchlist_feed.entries else 0
         result["watchlist_url"] = watchlist_url
         
-        for entry in watchlist_feed.entries[:30]:
-            # Get all available keys for debugging first entry
-            if len(result["watchlist"]) == 0:
-                result["watchlist_sample_keys"] = list(entry.keys())[:15]
+        # Debug: capture first entry keys
+        if watchlist_feed.entries:
+            first = watchlist_feed.entries[0]
+            result["watchlist_sample_keys"] = [k for k in dir(first) if not k.startswith('_')][:20]
+        
+        for entry in watchlist_feed.entries[:40]:
+            # Try namespaced fields first (letterboxd:filmTitle -> letterboxd_filmtitle)
+            title = getattr(entry, 'letterboxd_filmtitle', None)
+            year = getattr(entry, 'letterboxd_filmyear', None)
             
-            # Try multiple field name variations (feedparser lowercases and replaces : with _)
-            title = None
-            
-            # Try letterboxd namespaced fields first
-            for key in ["letterboxd_filmtitle", "letterboxd_filmname", "letterboxd_title"]:
-                if hasattr(entry, key) and getattr(entry, key):
-                    title = getattr(entry, key)
-                    break
-                if key in entry and entry[key]:
-                    title = entry[key]
-                    break
+            # Also try dict access
+            if not title:
+                title = entry.get('letterboxd_filmtitle', '')
+            if not year:
+                year = entry.get('letterboxd_filmyear', '')
             
             # Fall back to standard title
             if not title:
                 title = entry.get("title", "Unknown")
             
-            # Try to get year
-            year = None
-            for key in ["letterboxd_filmyear", "letterboxd_year", "year"]:
-                if hasattr(entry, key) and getattr(entry, key):
-                    year = getattr(entry, key)
-                    break
-                if key in entry and entry[key]:
-                    year = entry[key]
-                    break
-            
-            # Clean title - Letterboxd sometimes includes year in title like "Film Name (2024)"
-            if title and "(" in title and title.endswith(")"):
-                # Extract year from title if present
-                import re
-                match = re.search(r'\((\d{4})\)$', title)
-                if match:
-                    if not year:
-                        year = match.group(1)
-                    title = re.sub(r'\s*\(\d{4}\)$', '', title)
-            
             item = {
-                "title": title.strip() if title else "Unknown",
-                "link": entry.get("link", ""),
-                "year": str(year) if year else ""
+                "title": str(title).strip() if title else "Unknown",
+                "year": str(year) if year else "",
+                "link": entry.get("link", "")
             }
             result["watchlist"].append(item)
             
@@ -663,3 +650,69 @@ def render_entertainment_news():
             st.divider()
     else:
         st.info("Could not load news")
+
+# ============================================================
+# Vue Cinema Scraping
+# ============================================================
+
+@st.cache_data(ttl=3600)
+def get_vue_cinema_listings(cinema_slug: str = "basingstoke-festival-place") -> List[Dict]:
+    """
+    Scrape Vue cinema listings from their website.
+    Returns list of films with title, link, and image.
+    """
+    import requests
+    from bs4 import BeautifulSoup
+    
+    url = f"https://www.myvue.com/cinema/{cinema_slug}/whats-on"
+    films = []
+    
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Vue uses film cards - look for common patterns
+        # Try multiple selectors
+        film_cards = soup.select('.film-card, .movie-card, [data-film], .film-poster-wrapper, article')
+        
+        for card in film_cards[:20]:
+            film = {}
+            
+            # Try to get title
+            title_el = card.select_one('h2, h3, .film-title, .movie-title, [data-title]')
+            if title_el:
+                film['title'] = title_el.get_text(strip=True)
+            
+            # Try to get link
+            link_el = card.select_one('a[href*="/film/"]')
+            if link_el:
+                href = link_el.get('href', '')
+                if href.startswith('/'):
+                    href = f"https://www.myvue.com{href}"
+                film['link'] = href
+            
+            # Try to get image
+            img_el = card.select_one('img')
+            if img_el:
+                film['image'] = img_el.get('src') or img_el.get('data-src', '')
+            
+            if film.get('title'):
+                films.append(film)
+        
+        # Deduplicate by title
+        seen = set()
+        unique_films = []
+        for f in films:
+            if f['title'] not in seen:
+                seen.add(f['title'])
+                unique_films.append(f)
+        
+        return unique_films
+        
+    except Exception as e:
+        return [{"error": str(e)}]
