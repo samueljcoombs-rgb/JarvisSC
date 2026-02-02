@@ -255,17 +255,30 @@ def get_letterboxd_activity(username: str = None) -> Dict[str, List[Dict]]:
     except Exception as e:
         result["activity_error"] = str(e)
     
-    # WATCHLIST via HTML scraping - SIMPLE VERSION, page 1 only
+    # WATCHLIST via HTML scraping with pagination
     try:
-        watchlist_url = f"https://letterboxd.com/{username}/watchlist/"
-        resp = requests.get(watchlist_url, headers=headers, timeout=10)
-        result["watchlist_status"] = resp.status_code
-        result["watchlist_bytes"] = len(resp.text) if resp.text else 0
+        result["pages_scraped"] = 0
         
-        if resp.status_code == 200:
+        for page_num in range(1, 11):  # Up to 10 pages
+            if page_num == 1:
+                watchlist_url = f"https://letterboxd.com/{username}/watchlist/"
+            else:
+                watchlist_url = f"https://letterboxd.com/{username}/watchlist/page/{page_num}/"
+            
+            resp = requests.get(watchlist_url, headers=headers, timeout=10)
+            
+            if resp.status_code != 200:
+                break
+                
             soup = BeautifulSoup(resp.text, 'html.parser')
+            
+            # Find all film posters
             posters = soup.select('li.poster-container')
-            result["posters_found"] = len(posters)
+            
+            if not posters:
+                break
+            
+            result["pages_scraped"] = page_num
             
             for poster in posters:
                 film_div = poster.select_one('div.film-poster')
@@ -285,9 +298,12 @@ def get_letterboxd_activity(username: str = None) -> Dict[str, List[Dict]]:
                             "year": "",
                             "link": link
                         })
+                        
     except Exception as e:
         result["watchlist_error"] = str(e)
     
+    result["watchlist_status"] = 200 if result["watchlist"] else 404
+    result["posters_found"] = len(result["watchlist"])
     return result
 
 # ============================================================
