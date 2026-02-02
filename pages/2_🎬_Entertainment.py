@@ -114,10 +114,11 @@ with st.expander("📰🎮 Entertainment & Gaming News", expanded=True):
             else:
                 filtered = news
             
-            news_box = st.container(height=380)
+            news_box = st.container(height=350)
             with news_box:
-                for i in range(0, min(len(filtered), news_count), 2):
-                    cols = st.columns(2)
+                # 3 columns for smaller items
+                for i in range(0, min(len(filtered), news_count), 3):
+                    cols = st.columns(3)
                     for j, col in enumerate(cols):
                         idx = i + j
                         if idx < len(filtered) and idx < news_count:
@@ -130,15 +131,24 @@ with st.expander("📰🎮 Entertainment & Gaming News", expanded=True):
                                 
                                 icon = "🎮" if source in ["IGN", "Polygon", "Kotaku", "Eurogamer"] else "🎬"
                                 
+                                # Small image thumbnail
                                 if image:
                                     try:
-                                        st.image(image, use_column_width=True)
+                                        img_col, txt_col = st.columns([1, 2])
+                                        with img_col:
+                                            st.image(image, width=80)
+                                        with txt_col:
+                                            st.caption(f"{icon} {source}")
+                                            short_title = title[:50] + "..." if len(title) > 50 else title
+                                            st.write(f"[{short_title}]({link})")
                                     except:
-                                        pass
-                                
-                                st.caption(f"{icon} **{source}**")
-                                st.write(f"[{title}]({link})")
-                                st.divider()
+                                        st.caption(f"{icon} {source}")
+                                        short_title = title[:60] + "..." if len(title) > 60 else title
+                                        st.write(f"[{short_title}]({link})")
+                                else:
+                                    st.caption(f"{icon} {source}")
+                                    short_title = title[:60] + "..." if len(title) > 60 else title
+                                    st.write(f"[{short_title}]({link})")
         else:
             st.info("No news available")
     except Exception as e:
@@ -374,17 +384,20 @@ with right_col:
         # Debug panel
         if show_debug:
             with st.expander("🔧 Debug Info", expanded=True):
-                st.write(f"Activity count: {lb_data.get('activity_count', 0)}")
-                st.write(f"Watchlist count: {lb_data.get('watchlist_count', 0)}")
+                st.write(f"Activity status: {lb_data.get('activity_status', 'N/A')}")
+                st.write(f"Activity items: {len(activity)}")
                 st.write(f"Watchlist URL: {lb_data.get('watchlist_url', 'N/A')}")
+                st.write(f"Watchlist HTTP status: {lb_data.get('watchlist_status', 'N/A')}")
+                st.write(f"Watchlist response length: {lb_data.get('watchlist_length', 'N/A')} bytes")
+                st.write(f"Watchlist entries raw: {lb_data.get('watchlist_entries_raw', 'N/A')}")
+                st.write(f"Watchlist items parsed: {len(watchlist)}")
                 
-                if lb_data.get('watchlist_parse_error'):
-                    st.error(f"Parse error: {lb_data.get('watchlist_parse_error')}")
+                if lb_data.get('trying_manual_parse'):
+                    st.info("Tried manual XML parsing")
+                if lb_data.get('xml_parse_error'):
+                    st.error(f"XML error: {lb_data.get('xml_parse_error')}")
                 if lb_data.get('watchlist_error'):
                     st.error(f"Error: {lb_data.get('watchlist_error')}")
-                
-                st.write(f"Activity items found: {len(activity)}")
-                st.write(f"Watchlist items found: {len(watchlist)}")
                 
                 if activity:
                     st.write("First activity:", activity[0])
