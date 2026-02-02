@@ -255,29 +255,51 @@ def get_letterboxd_activity(username: str = None) -> Dict[str, List[Dict]]:
     except Exception as e:
         result["activity_error"] = str(e)
     
-    # WATCHLIST - Scrape HTML page directly (RSS returns 403)
+    # WATCHLIST - Scrape HTML pages with PAGINATION (RSS returns 403)
     try:
-        watchlist_url = f"https://letterboxd.com/{username}/watchlist/"
-        result["watchlist_url"] = watchlist_url
+        result["pages_scraped"] = 0
         
-        resp = requests.get(watchlist_url, headers=headers, timeout=10)
-        result["watchlist_status"] = resp.status_code
-        result["watchlist_length"] = len(resp.text) if resp.text else 0
-        
-        if resp.status_code == 200:
+        for page_num in range(1, 11):  # Up to 10 pages
+            # Build URL for this page
+            if page_num == 1:
+                watchlist_url = f"https://letterboxd.com/{username}/watchlist/"
+            else:
+                watchlist_url = f"https://letterboxd.com/{username}/watchlist/page/{page_num}/"
+            
+            resp = requests.get(watchlist_url, headers=headers, timeout=10)
+            
+            # Store debug info from first page
+            if page_num == 1:
+                result["watchlist_url"] = watchlist_url
+                result["watchlist_status"] = resp.status_code
+                result["watchlist_length"] = len(resp.text) if resp.text else 0
+            
+            # Stop if page doesn't exist
+            if resp.status_code != 200:
+                break
+            
             soup = BeautifulSoup(resp.text, 'html.parser')
             
             # Letterboxd watchlist uses poster-container with data attributes
             # Find all film posters
             posters = soup.select('li.poster-container')
-            result["posters_found"] = len(posters)
             
+            # Store count from first page
+            if page_num == 1:
+                result["posters_found"] = len(posters)
+                
+                if not posters:
+                    # Try alternative selectors
+                    posters = soup.select('.film-poster') or soup.select('[data-film-slug]')
+                    result["alt_posters_found"] = len(posters)
+            
+            # No posters = end of watchlist
             if not posters:
-                # Try alternative selectors
-                posters = soup.select('.film-poster') or soup.select('[data-film-slug]')
-                result["alt_posters_found"] = len(posters)
+                break
             
-            for poster in posters[:50]:
+            result["pages_scraped"] = page_num
+            
+            for poster in posters:
                 # Get the div with data attributes
                 film_div = poster.select_one('div.film-poster') or poster
                 
@@ -306,8 +328,6 @@ def get_letterboxd_activity(username: str = None) -> Dict[str, List[Dict]]:
                         "year": "",
                         "link": link
                     })
-        else:
-            result["watchlist_error"] = f"HTTP {resp.status_code}"
             
     except Exception as e:
         result["watchlist_error"] = str(e)
