@@ -220,6 +220,9 @@ def get_letterboxd_activity(username: str = None) -> Dict[str, List[Dict]]:
     # Activity feed (diary/reviews)
     try:
         feed = feedparser.parse(f"https://letterboxd.com/{username}/rss/")
+        result["activity_feed_status"] = feed.get("status", "unknown")
+        result["activity_entries_count"] = len(feed.entries) if feed.entries else 0
+        
         for entry in feed.entries[:20]:
             item = {
                 "title": entry.get("title", ""),
@@ -234,29 +237,63 @@ def get_letterboxd_activity(username: str = None) -> Dict[str, List[Dict]]:
     except Exception as e:
         result["activity_error"] = str(e)
     
-    # Watchlist feed - try multiple field names
+    # Watchlist feed - try multiple approaches
     try:
-        watchlist_feed = feedparser.parse(f"https://letterboxd.com/{username}/watchlist/rss/")
+        watchlist_url = f"https://letterboxd.com/{username}/watchlist/rss/"
+        watchlist_feed = feedparser.parse(watchlist_url)
+        
+        result["watchlist_feed_status"] = watchlist_feed.get("status", "unknown")
+        result["watchlist_entries_count"] = len(watchlist_feed.entries) if watchlist_feed.entries else 0
+        result["watchlist_url"] = watchlist_url
+        
         for entry in watchlist_feed.entries[:30]:
-            # Try different field names that Letterboxd might use
-            title = (entry.get("letterboxd_filmtitle") or 
-                    entry.get("title") or 
-                    entry.get("letterboxd_filmname") or
-                    "Unknown")
-            year = (entry.get("letterboxd_filmyear") or 
-                   entry.get("year") or 
-                   "")
+            # Get all available keys for debugging first entry
+            if len(result["watchlist"]) == 0:
+                result["watchlist_sample_keys"] = list(entry.keys())[:15]
             
-            # Clean title - remove any "- Watchlist" suffix
-            if " - " in title:
-                title = title.split(" - ")[0]
+            # Try multiple field name variations (feedparser lowercases and replaces : with _)
+            title = None
+            
+            # Try letterboxd namespaced fields first
+            for key in ["letterboxd_filmtitle", "letterboxd_filmname", "letterboxd_title"]:
+                if hasattr(entry, key) and getattr(entry, key):
+                    title = getattr(entry, key)
+                    break
+                if key in entry and entry[key]:
+                    title = entry[key]
+                    break
+            
+            # Fall back to standard title
+            if not title:
+                title = entry.get("title", "Unknown")
+            
+            # Try to get year
+            year = None
+            for key in ["letterboxd_filmyear", "letterboxd_year", "year"]:
+                if hasattr(entry, key) and getattr(entry, key):
+                    year = getattr(entry, key)
+                    break
+                if key in entry and entry[key]:
+                    year = entry[key]
+                    break
+            
+            # Clean title - Letterboxd sometimes includes year in title like "Film Name (2024)"
+            if title and "(" in title and title.endswith(")"):
+                # Extract year from title if present
+                import re
+                match = re.search(r'\((\d{4})\)$', title)
+                if match:
+                    if not year:
+                        year = match.group(1)
+                    title = re.sub(r'\s*\(\d{4}\)$', '', title)
             
             item = {
-                "title": title,
+                "title": title.strip() if title else "Unknown",
                 "link": entry.get("link", ""),
                 "year": str(year) if year else ""
             }
             result["watchlist"].append(item)
+            
     except Exception as e:
         result["watchlist_error"] = str(e)
     
@@ -271,30 +308,37 @@ def get_entertainment_news() -> List[Dict]:
     """Get entertainment news from various RSS sources."""
     news = []
     
-    # Entertainment RSS feeds
+    # Entertainment RSS feeds - more sources
     feeds = [
         ("Variety", "https://variety.com/feed/"),
         ("IGN", "https://feeds.feedburner.com/ign/all"),
-        ("The Verge (Entertainment)", "https://www.theverge.com/rss/entertainment/index.xml"),
+        ("The Verge", "https://www.theverge.com/rss/entertainment/index.xml"),
+        ("Polygon", "https://www.polygon.com/rss/index.xml"),
+        ("Kotaku", "https://kotaku.com/rss"),
+        ("Eurogamer", "https://www.eurogamer.net/feed"),
+        ("Screen Rant", "https://screenrant.com/feed/"),
+        ("Collider", "https://collider.com/feed/"),
+        ("AV Club", "https://www.avclub.com/rss"),
+        ("Deadline", "https://deadline.com/feed/"),
     ]
     
     for source, url in feeds:
         try:
             feed = feedparser.parse(url)
-            for entry in feed.entries[:5]:
+            for entry in feed.entries[:8]:  # Get more per source
                 news.append({
                     "source": source,
                     "title": entry.get("title", ""),
                     "link": entry.get("link", ""),
                     "published": entry.get("published", ""),
-                    "summary": (entry.get("summary", "") or "")[:150]
+                    "summary": (entry.get("summary", "") or "")[:200]
                 })
         except Exception:
             continue
     
     # Sort by date (newest first)
     news.sort(key=lambda x: x.get("published", ""), reverse=True)
-    return news[:15]
+    return news[:50]  # Return more articles
 
 # ============================================================
 # Watchlist Management
