@@ -255,41 +255,33 @@ def get_letterboxd_activity(username: str = None) -> Dict[str, List[Dict]]:
     except Exception as e:
         result["activity_error"] = str(e)
     
-    # WATCHLIST via HTML scraping with pagination
+    # WATCHLIST via HTML scraping (RSS returns 403)
     try:
-        result["pages_scraped"] = 0
+        watchlist_url = f"https://letterboxd.com/{username}/watchlist/"
+        result["watchlist_url"] = watchlist_url
         
-        for page_num in range(1, 11):  # Up to 10 pages
-            if page_num == 1:
-                watchlist_url = f"https://letterboxd.com/{username}/watchlist/"
-            else:
-                watchlist_url = f"https://letterboxd.com/{username}/watchlist/page/{page_num}/"
-            
-            resp = requests.get(watchlist_url, headers=headers, timeout=10)
-            
-            if resp.status_code != 200:
-                break
-                
+        resp = requests.get(watchlist_url, headers=headers, timeout=10)
+        result["watchlist_status"] = resp.status_code
+        
+        if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, 'html.parser')
             
-            # Find all film posters
+            # Letterboxd structure: ul.poster-list > li.poster-container
             posters = soup.select('li.poster-container')
+            result["posters_found"] = len(posters)
             
-            if not posters:
-                break
-            
-            result["pages_scraped"] = page_num
-            
-            for poster in posters:
+            for poster in posters[:50]:
+                # Get the div with film data
                 film_div = poster.select_one('div.film-poster')
                 if film_div:
+                    # data-film-slug contains the slug
                     slug = film_div.get('data-film-slug', '')
+                    
+                    # Get image alt for title
                     img = film_div.select_one('img')
                     title = img.get('alt', '') if img else ''
                     
-                    if not title and slug:
-                        title = slug.replace('-', ' ').title()
-                    
+                    # Build link
                     link = f"https://letterboxd.com/film/{slug}/" if slug else ""
                     
                     if title:
@@ -302,8 +294,6 @@ def get_letterboxd_activity(username: str = None) -> Dict[str, List[Dict]]:
     except Exception as e:
         result["watchlist_error"] = str(e)
     
-    result["watchlist_status"] = 200 if result["watchlist"] else 404
-    result["posters_found"] = len(result["watchlist"])
     return result
 
 # ============================================================
