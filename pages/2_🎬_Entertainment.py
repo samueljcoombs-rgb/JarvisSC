@@ -1,6 +1,6 @@
 # pages/2_🎬_Entertainment.py
 """
-Entertainment Dashboard - Letterboxd, Cinema Releases, Games, AI Recommendations.
+Entertainment Dashboard - Cinema, Letterboxd, Games, AI Recommendations.
 """
 import streamlit as st
 from datetime import datetime
@@ -21,6 +21,7 @@ except ImportError:
 
 TZ = ZoneInfo("Europe/London")
 LETTERBOXD_USER = os.getenv("LETTERBOXD_USERNAME") or st.secrets.get("LETTERBOXD_USERNAME", "SamECee")
+VUE_BASINGSTOKE_URL = "https://www.myvue.com/cinema/basingstoke/whats-on"
 
 # ============================================================
 # Page Config
@@ -64,152 +65,96 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ============================================================
-# Entertainment News (Top Row) - Better Display
+# Entertainment News (Scrollable with more articles)
 # ============================================================
 
-with st.expander("📰 **Entertainment News**", expanded=True):
+# News customization in sidebar
+with st.sidebar:
+    st.subheader("📰 News Settings")
+    news_sources = st.multiselect(
+        "Sources",
+        ["IGN", "Variety", "The Verge", "Polygon", "Kotaku"],
+        default=["IGN", "Variety", "The Verge"],
+        key="news_sources"
+    )
+    news_count = st.slider("Articles to show", 5, 25, 15, key="news_count")
+
+with st.expander("📰 **Entertainment News** - Click to expand", expanded=False):
     try:
         news = et.get_entertainment_news()
         if news:
-            for i, article in enumerate(news[:6]):
-                title = article.get("title", "No title")
-                source = article.get("source", "")
-                link = article.get("link", "")
-                
-                col1, col2 = st.columns([1, 8])
-                with col1:
-                    st.caption(f"**{source}**")
-                with col2:
-                    if link:
-                        st.markdown(f"[{title}]({link})")
-                    else:
-                        st.write(title)
+            # Filter by selected sources if any selected
+            if news_sources:
+                filtered_news = [n for n in news if n.get("source") in news_sources]
+                # If filtering removes too many, use all
+                if len(filtered_news) < 3:
+                    filtered_news = news
+            else:
+                filtered_news = news
+            
+            # Create scrollable container
+            news_container = st.container(height=350)
+            with news_container:
+                for article in filtered_news[:news_count]:
+                    title = article.get("title", "No title")
+                    source = article.get("source", "")
+                    link = article.get("link", "")
+                    
+                    col1, col2 = st.columns([1, 6])
+                    with col1:
+                        st.caption(f"**{source}**")
+                    with col2:
+                        if link:
+                            st.markdown(f"[{title}]({link})")
+                        else:
+                            st.write(title)
+        else:
+            st.caption("No news available")
     except Exception as e:
-        st.caption(f"News unavailable")
+        st.caption(f"News unavailable: {e}")
 
 st.divider()
 
 # ============================================================
-# Main 3-Column Layout
+# Main 3-Column Layout (Cinema Left, AI Middle, Letterboxd Right)
 # ============================================================
 
 left_col, mid_col, right_col = st.columns([3, 4, 3], gap="large")
 
 # ============================================================
-# LEFT COLUMN: Letterboxd + Games
+# LEFT COLUMN: In Cinemas + Coming Soon
 # ============================================================
 
 with left_col:
-    # Letterboxd Section
-    st.subheader("🎭 Letterboxd")
-    st.caption(f"@{LETTERBOXD_USER}")
-    
-    if LETTERBOXD_USER:
-        try:
-            lb_data = et.get_letterboxd_activity(LETTERBOXD_USER)
-            activity = lb_data.get("activity", []) if isinstance(lb_data, dict) else []
-            lb_watchlist = lb_data.get("watchlist", []) if isinstance(lb_data, dict) else []
-            
-            # Debug info
-            if lb_data.get("watchlist_error"):
-                st.caption(f"⚠️ Watchlist error: {lb_data.get('watchlist_error')}")
-            
-            # Tabs
-            lb_tab1, lb_tab2 = st.tabs(["📋 Watchlist", "🎬 Activity"])
-            
-            with lb_tab1:
-                if lb_watchlist:
-                    st.success(f"{len(lb_watchlist)} films to watch")
-                    for item in lb_watchlist[:15]:
-                        title = item.get("title", "Unknown")
-                        year = item.get("year", "")
-                        year_str = f" ({year})" if year else ""
-                        st.write(f"🎬 {title}{year_str}")
-                else:
-                    st.warning("No watchlist found. Make sure your Letterboxd watchlist is public!")
-                    st.caption(f"Checking: letterboxd.com/{LETTERBOXD_USER}/watchlist/rss/")
-            
-            with lb_tab2:
-                if activity:
-                    for item in activity[:8]:
-                        title = item.get("title", "")
-                        has_rating = item.get("has_rating", False)
-                        star = " ⭐" if has_rating else ""
-                        st.write(f"🎬 {title}{star}")
-                else:
-                    st.caption("No recent activity")
-                    
-        except Exception as e:
-            st.error(f"Letterboxd error: {e}")
-    
-    st.divider()
-    
-    # Games To Play Section
-    st.subheader("🎮 Games To Play")
-    
-    # Get games from sheets (we'll add this functionality)
-    if "games_list" not in st.session_state:
-        st.session_state.games_list = []
-    
-    # Try to load from sheets
-    try:
-        games_data = sm.get_watchlist(status="to_watch")
-        games = [g for g in games_data if g.get("type") == "game"] if games_data else []
-    except:
-        games = []
-    
-    if games:
-        for game in games[:8]:
-            col1, col2 = st.columns([5, 1])
-            with col1:
-                st.write(f"🎮 {game.get('title', '?')}")
-            with col2:
-                if st.button("✓", key=f"game_done_{game.get('id', game.get('title'))}"):
-                    try:
-                        sm.update_watchlist_item(game.get("id"), {"status": "completed"})
-                        st.rerun()
-                    except:
-                        pass
-    else:
-        st.caption("No games in your list yet")
-    
-    # Add game form
-    with st.expander("➕ Add Game"):
-        new_game = st.text_input("Game title", key="new_game_title")
-        if st.button("Add Game", key="add_game_btn"):
-            if new_game:
-                try:
-                    sm.add_to_watchlist(title=new_game, media_type="game")
-                    st.success(f"Added {new_game}!")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Error: {e}")
-
-# ============================================================
-# MIDDLE COLUMN: In Cinemas + Coming Soon + AI Coach
-# ============================================================
-
-with mid_col:
-    # In Cinemas Now - Sorted by Rating
+    # In Cinemas Now with Posters
     st.subheader("🎥 In Cinemas Now")
+    st.markdown(f"[🎟️ Book at Vue Basingstoke]({VUE_BASINGSTOKE_URL})")
     
     try:
         now_playing = et.get_now_playing("GB")
         
         if now_playing:
             # Sort by rating (highest first)
-            sorted_films = sorted(now_playing, key=lambda x: x.get("vote_average", 0), reverse=True)
+            sorted_films = sorted(now_playing, key=lambda x: x.get("vote_average", 0), reverse=True)[:6]
             
-            for film in sorted_films[:8]:
-                title = film.get("title", "Unknown")
-                rating = film.get("vote_average", 0)
-                release = film.get("release_date", "")
-                
-                col1, col2 = st.columns([4, 1])
-                with col1:
-                    st.write(f"**{title}**")
-                with col2:
-                    st.write(f"⭐ {rating:.1f}")
+            # Display in 2 columns with posters
+            cols = st.columns(2)
+            for i, film in enumerate(sorted_films):
+                with cols[i % 2]:
+                    title = film.get("title", "Unknown")
+                    rating = film.get("vote_average", 0)
+                    poster_path = film.get("poster_path")
+                    tmdb_id = film.get("id")
+                    
+                    # Poster
+                    if poster_path:
+                        poster_url = et.get_poster_url(poster_path, "w342")
+                        st.image(poster_url, use_column_width=True)
+                    
+                    # Title with link to Vue search
+                    vue_search = f"https://www.myvue.com/cinema/basingstoke/film/{title.lower().replace(' ', '-').replace(':', '')}"
+                    st.markdown(f"[**{title}**]({vue_search})")
+                    st.caption(f"⭐ {rating:.1f}")
         else:
             st.caption("No films found")
     except Exception as e:
@@ -232,6 +177,7 @@ with mid_col:
                 title = movie.get("title", "Unknown")
                 release_date = movie.get("release_date", "")
                 rating = movie.get("vote_average", 0)
+                tmdb_id = movie.get("id")
                 
                 # Format date
                 if release_date:
@@ -243,21 +189,24 @@ with mid_col:
                 else:
                     date_str = "TBA"
                 
-                col1, col2, col3 = st.columns([1, 4, 1])
+                col1, col2 = st.columns([1, 4])
                 with col1:
                     st.write(f"**{date_str}**")
                 with col2:
-                    st.write(title)
-                with col3:
-                    if rating > 0:
-                        st.write(f"⭐{rating:.1f}")
+                    if tmdb_id:
+                        st.markdown(f"[{title}](https://www.themoviedb.org/movie/{tmdb_id})")
+                    else:
+                        st.write(title)
         else:
             st.caption("No upcoming releases")
     except Exception as e:
         st.caption(f"Error: {e}")
-    
-    st.divider()
-    
+
+# ============================================================
+# MIDDLE COLUMN: AI Coach + Games
+# ============================================================
+
+with mid_col:
     # AI Movie Coach
     st.subheader("🤖 AI Movie Coach")
     
@@ -327,19 +276,117 @@ Give personalized recommendations. Be specific about WHY they'd like each film. 
     
     # Display chat
     if st.session_state.ent_chat:
-        chat_box = st.container(height=200)
+        chat_box = st.container(height=250)
         with chat_box:
             for msg in reversed(st.session_state.ent_chat):
                 with st.chat_message(msg["role"]):
                     st.write(msg["content"])
     else:
         st.info("💡 Ask for recommendations based on your Letterboxd!")
+    
+    st.divider()
+    
+    # Games To Play Section
+    st.subheader("🎮 Games To Play")
+    
+    # Try to load from sheets
+    try:
+        games_data = sm.get_watchlist(status="to_watch")
+        games = [g for g in games_data if g.get("type") == "game"] if games_data else []
+    except:
+        games = []
+    
+    if games:
+        for game in games[:6]:
+            col1, col2 = st.columns([5, 1])
+            with col1:
+                st.write(f"🎮 {game.get('title', '?')}")
+            with col2:
+                if st.button("✓", key=f"game_done_{game.get('id', game.get('title'))}"):
+                    try:
+                        sm.update_watchlist_item(game.get("id"), {"status": "completed"})
+                        st.rerun()
+                    except:
+                        pass
+    else:
+        st.caption("No games in your list yet")
+    
+    # Add game form
+    with st.expander("➕ Add Game"):
+        new_game = st.text_input("Game title", key="new_game_title")
+        if st.button("Add Game", key="add_game_btn"):
+            if new_game:
+                try:
+                    sm.add_to_watchlist(title=new_game, media_type="game")
+                    st.success(f"Added {new_game}!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: {e}")
 
 # ============================================================
-# RIGHT COLUMN: Trending + Search
+# RIGHT COLUMN: Letterboxd + Trending
 # ============================================================
 
 with right_col:
+    # Letterboxd Section
+    st.subheader("🎭 Letterboxd")
+    st.caption(f"@{LETTERBOXD_USER}")
+    
+    # Quick links to Letterboxd
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown(f"[📋 My Watchlist](https://letterboxd.com/{LETTERBOXD_USER}/watchlist/)")
+    with col2:
+        st.markdown(f"[🎬 My Activity](https://letterboxd.com/{LETTERBOXD_USER}/)")
+    
+    if LETTERBOXD_USER:
+        try:
+            lb_data = et.get_letterboxd_activity(LETTERBOXD_USER)
+            activity = lb_data.get("activity", []) if isinstance(lb_data, dict) else []
+            lb_watchlist = lb_data.get("watchlist", []) if isinstance(lb_data, dict) else []
+            
+            # Tabs
+            lb_tab1, lb_tab2 = st.tabs(["📋 Watchlist", "🎬 Activity"])
+            
+            with lb_tab1:
+                if lb_watchlist:
+                    st.success(f"{len(lb_watchlist)} films to watch")
+                    watchlist_box = st.container(height=200)
+                    with watchlist_box:
+                        for item in lb_watchlist[:20]:
+                            title = item.get("title", "Unknown")
+                            year = item.get("year", "")
+                            link = item.get("link", "")
+                            year_str = f" ({year})" if year else ""
+                            if link:
+                                st.markdown(f"🎬 [{title}]({link}){year_str}")
+                            else:
+                                st.write(f"🎬 {title}{year_str}")
+                else:
+                    st.warning("No watchlist found")
+                    st.caption("Make sure your Letterboxd watchlist is public")
+            
+            with lb_tab2:
+                if activity:
+                    activity_box = st.container(height=200)
+                    with activity_box:
+                        for item in activity[:12]:
+                            title = item.get("title", "")
+                            link = item.get("link", "")
+                            has_rating = item.get("has_rating", False)
+                            star = " ⭐" if has_rating else ""
+                            if link:
+                                st.markdown(f"🎬 [{title}]({link}){star}")
+                            else:
+                                st.write(f"🎬 {title}{star}")
+                else:
+                    st.caption("No recent activity")
+                    
+        except Exception as e:
+            st.error(f"Letterboxd error: {e}")
+    
+    st.divider()
+    
     # Trending
     st.subheader("🔥 Trending Now")
     
@@ -352,13 +399,17 @@ with right_col:
                     poster_path = movie.get("poster_path")
                     title = movie.get("title", "?")
                     rating = movie.get("vote_average", 0)
+                    tmdb_id = movie.get("id")
                     
                     if poster_path:
                         poster_url = et.get_poster_url(poster_path, "w342")
                         st.image(poster_url, use_column_width=True)
                     
                     short_title = title[:12] + "..." if len(title) > 12 else title
-                    st.caption(f"**{short_title}**")
+                    if tmdb_id:
+                        st.markdown(f"[**{short_title}**](https://www.themoviedb.org/movie/{tmdb_id})")
+                    else:
+                        st.caption(f"**{short_title}**")
                     st.caption(f"⭐ {rating:.1f}")
     except Exception as e:
         st.caption(f"Error: {e}")
@@ -381,10 +432,15 @@ with right_col:
                     title = item.get("title") or item.get("name", "?")
                     year = (item.get("release_date") or item.get("first_air_date") or "")[:4]
                     rating = item.get("vote_average", 0)
+                    tmdb_id = item.get("id")
                     
                     col1, col2 = st.columns([4, 1])
                     with col1:
-                        st.write(f"**{title}** ({year})")
+                        if tmdb_id:
+                            url = f"https://www.themoviedb.org/{'movie' if search_type == 'Movies' else 'tv'}/{tmdb_id}"
+                            st.markdown(f"[**{title}**]({url}) ({year})")
+                        else:
+                            st.write(f"**{title}** ({year})")
                     with col2:
                         st.write(f"⭐{rating:.1f}")
             else:
