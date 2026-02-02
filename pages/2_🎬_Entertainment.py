@@ -458,13 +458,14 @@ with right_col:
         watchlist = lb_data.get("watchlist", [])
         
         # Debug panel
-        with st.expander("🔧 Debug Info", expanded=False):
+        with st.expander("🔧 Debug Info", expanded=True):
             st.write(f"**Activity:** {len(activity)} items")
-            st.write(f"**Watchlist:** {len(watchlist)} films (from {lb_data.get('pages_scraped', 0)} pages)")
+            st.write(f"**Watchlist:** {len(watchlist)} films")
+            st.write(f"**HTTP Status:** {lb_data.get('watchlist_status', 'N/A')}")
+            st.write(f"**Response bytes:** {lb_data.get('watchlist_bytes', 'N/A')}")
+            st.write(f"**Posters found in HTML:** {lb_data.get('posters_found', 'N/A')}")
             if lb_data.get('watchlist_error'):
                 st.error(f"Error: {lb_data.get('watchlist_error')}")
-            if watchlist:
-                st.success(f"✅ Got {len(watchlist)} films!")
         
         tab1, tab2 = st.tabs(["📋 Watchlist", "🎬 Activity"])
         
