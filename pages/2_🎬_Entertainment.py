@@ -1,7 +1,6 @@
 # pages/2_🎬_Entertainment.py
 """
-Entertainment Dashboard - Cinema, Letterboxd, Games, AI Recommendations.
-Using native Streamlit components only to avoid theme color issues.
+Entertainment Dashboard - PURE STREAMLIT, NO HTML
 """
 import streamlit as st
 from datetime import datetime
@@ -29,7 +28,6 @@ VUE_CINEMA_SLUG = "basingstoke-festival-place"
 VUE_WHATS_ON_URL = f"https://www.myvue.com/cinema/{VUE_CINEMA_SLUG}/whats-on"
 
 def make_vue_film_url(title: str) -> str:
-    """Create Vue film URL from title."""
     slug = title.lower()
     slug = re.sub(r'[^\w\s-]', '', slug)
     slug = re.sub(r'\s+', '-', slug)
@@ -46,8 +44,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
-gs.inject_global_styles()
 
 # ============================================================
 # OpenAI Client
@@ -75,47 +71,41 @@ with st.sidebar:
         "🎮 Gaming",
         ["IGN", "Polygon", "Kotaku", "Eurogamer"],
         default=["IGN", "Polygon", "Kotaku"],
-        key="gaming_sources"
     )
     ent_sources = st.multiselect(
-        "🎬 Entertainment",
+        "🎬 Entertainment", 
         ["Variety", "The Verge", "Screen Rant", "Collider", "Deadline"],
         default=["Variety", "Collider"],
-        key="ent_sources"
     )
-    news_count = st.slider("Max articles", 10, 40, 20, key="news_count")
+    news_count = st.slider("Max articles", 10, 40, 20)
     
     st.divider()
     
     st.subheader("🔗 Quick Links")
-    st.markdown(f"- 🎟️ [Vue Basingstoke]({VUE_WHATS_ON_URL})")
-    st.markdown(f"- 🎭 [Letterboxd @{LETTERBOXD_USER}](https://letterboxd.com/{LETTERBOXD_USER}/)")
-    st.markdown(f"- 📋 [My Watchlist](https://letterboxd.com/{LETTERBOXD_USER}/watchlist/)")
+    st.write(f"🎟️ [Vue Basingstoke]({VUE_WHATS_ON_URL})")
+    st.write(f"🎭 [Letterboxd @{LETTERBOXD_USER}](https://letterboxd.com/{LETTERBOXD_USER}/)")
+    st.write(f"📋 [My Watchlist](https://letterboxd.com/{LETTERBOXD_USER}/watchlist/)")
     
     st.divider()
-    show_debug = st.checkbox("🔧 Debug mode", key="debug")
+    show_debug = st.checkbox("🔧 Debug mode")
 
 # ============================================================
-# Header (minimal HTML, just gradient background)
+# Header
 # ============================================================
 
-st.markdown("""
-<div style="background: linear-gradient(-45deg, #0f0c29, #302b63, #24243e); padding: 1.5rem 2rem; 
-            border-radius: 16px; margin-bottom: 1rem;">
-    <h1 style="margin: 0; color: white;">🎬 Entertainment Hub</h1>
-    <p style="color: rgba(255,255,255,0.7); margin: 0.3rem 0 0 0; font-size: 0.9rem;">Cinema • Letterboxd • Games • AI Recommendations</p>
-</div>
-""", unsafe_allow_html=True)
+st.title("🎬 Entertainment Hub")
+st.caption("Cinema • Letterboxd • Games • AI Recommendations")
+
+st.divider()
 
 # ============================================================
-# Entertainment & Gaming News - With Images
+# Entertainment & Gaming News
 # ============================================================
 
-with st.expander("📰🎮 **Entertainment & Gaming News**", expanded=True):
+with st.expander("📰🎮 Entertainment & Gaming News", expanded=True):
     try:
         news = et.get_entertainment_news()
         if news:
-            # Combine selected sources
             all_sources = (gaming_sources or []) + (ent_sources or [])
             if all_sources:
                 filtered = [n for n in news if n.get("source") in all_sources]
@@ -124,10 +114,8 @@ with st.expander("📰🎮 **Entertainment & Gaming News**", expanded=True):
             else:
                 filtered = news
             
-            # Scrollable news container
-            news_box = st.container(height=400)
+            news_box = st.container(height=380)
             with news_box:
-                # 2-column layout with images
                 for i in range(0, min(len(filtered), news_count), 2):
                     cols = st.columns(2)
                     for j, col in enumerate(cols):
@@ -140,10 +128,8 @@ with st.expander("📰🎮 **Entertainment & Gaming News**", expanded=True):
                                 link = article.get("link", "")
                                 image = article.get("image", "")
                                 
-                                # Gaming vs Entertainment icon
                                 icon = "🎮" if source in ["IGN", "Polygon", "Kotaku", "Eurogamer"] else "🎬"
                                 
-                                # Show image if available
                                 if image:
                                     try:
                                         st.image(image, use_column_width=True)
@@ -151,10 +137,7 @@ with st.expander("📰🎮 **Entertainment & Gaming News**", expanded=True):
                                         pass
                                 
                                 st.caption(f"{icon} **{source}**")
-                                if link:
-                                    st.markdown(f"[{title}]({link})")
-                                else:
-                                    st.write(title)
+                                st.write(f"[{title}]({link})")
                                 st.divider()
         else:
             st.info("No news available")
@@ -174,7 +157,6 @@ left_col, mid_col, right_col = st.columns([3, 4, 3], gap="large")
 # ============================================================
 
 with left_col:
-    # COMING SOON - Scrollable whole year
     st.subheader("🗓️ Coming Soon")
     st.caption("Major UK cinema releases")
     
@@ -182,9 +164,9 @@ with left_col:
         upcoming = et.get_upcoming_movies("GB", pages=6)
         
         if upcoming:
-            # Filter and sort by date
+            # ENGLISH ONLY, sorted by date
             major = sorted(
-                [m for m in upcoming if m.get("popularity", 0) > 5],
+                [m for m in upcoming if m.get("popularity", 0) > 5 and m.get("original_language") == "en"],
                 key=lambda x: x.get("release_date", "9999")
             )
             
@@ -202,7 +184,6 @@ with left_col:
                             month_year = dt.strftime("%B %Y")
                             date_str = dt.strftime("%d")
                             
-                            # Month header
                             if month_year != current_month:
                                 current_month = month_year
                                 st.markdown(f"**📅 {month_year}**")
@@ -216,34 +197,33 @@ with left_col:
                         st.write(f"**{date_str}**")
                     with c2:
                         if tmdb_id:
-                            st.markdown(f"[{title}](https://www.themoviedb.org/movie/{tmdb_id})")
+                            st.write(f"[{title}](https://www.themoviedb.org/movie/{tmdb_id})")
                         else:
                             st.write(title)
         else:
-            st.info("No upcoming releases found")
+            st.info("No upcoming releases")
     except Exception as e:
         st.error(f"Error: {e}")
     
     st.divider()
     
-    # IN CINEMAS NOW
+    # IN CINEMAS NOW - ENGLISH ONLY
     st.subheader("🎥 In Cinemas Now")
-    st.markdown(f"[🎟️ Book at Vue Basingstoke]({VUE_WHATS_ON_URL})")
+    st.write(f"[🎟️ Vue Basingstoke]({VUE_WHATS_ON_URL})")
     
     try:
         now_playing = et.get_now_playing("GB")
         
         if now_playing:
-            # Filter: English language, good rating, sorted by rating
+            # ENGLISH ONLY, good rating
             filtered = sorted(
                 [f for f in now_playing 
                  if f.get("vote_average", 0) > 5.0 
-                 and f.get("original_language") in ["en", "ja", "ko", "fr"]],
+                 and f.get("original_language") == "en"],
                 key=lambda x: x.get("vote_average", 0),
                 reverse=True
             )[:9]
             
-            # 3 columns with posters
             cols = st.columns(3)
             for i, film in enumerate(filtered):
                 with cols[i % 3]:
@@ -256,7 +236,7 @@ with left_col:
                     
                     vue_url = make_vue_film_url(title)
                     short = title[:14] + "…" if len(title) > 14 else title
-                    st.markdown(f"[{short}]({vue_url})")
+                    st.write(f"[{short}]({vue_url})")
                     st.caption(f"⭐ {rating:.1f}")
         else:
             st.info("No films found")
@@ -377,9 +357,14 @@ with right_col:
     
     c1, c2 = st.columns(2)
     with c1:
-        st.markdown(f"[📋 Watchlist](https://letterboxd.com/{LETTERBOXD_USER}/watchlist/)")
+        st.write(f"[📋 Watchlist](https://letterboxd.com/{LETTERBOXD_USER}/watchlist/)")
     with c2:
-        st.markdown(f"[🎬 Profile](https://letterboxd.com/{LETTERBOXD_USER}/)")
+        st.write(f"[🎬 Profile](https://letterboxd.com/{LETTERBOXD_USER}/)")
+    
+    # Force fresh fetch for testing
+    if st.button("🔄 Refresh", key="refresh_lb"):
+        st.cache_data.clear()
+        st.rerun()
     
     try:
         lb_data = et.get_letterboxd_activity(LETTERBOXD_USER)
@@ -388,24 +373,23 @@ with right_col:
         
         # Debug panel
         if show_debug:
-            with st.expander("🔧 Letterboxd Debug", expanded=True):
-                st.write(f"**Activity URL:** {lb_data.get('activity_url', 'N/A')}")
-                st.write(f"**Activity count:** {lb_data.get('activity_count', 0)}")
-                st.write(f"**Watchlist URL:** {lb_data.get('watchlist_url', 'N/A')}")
-                st.write(f"**Watchlist count:** {lb_data.get('watchlist_count', 0)}")
+            with st.expander("🔧 Debug Info", expanded=True):
+                st.write(f"Activity count: {lb_data.get('activity_count', 0)}")
+                st.write(f"Watchlist count: {lb_data.get('watchlist_count', 0)}")
+                st.write(f"Watchlist URL: {lb_data.get('watchlist_url', 'N/A')}")
                 
-                if lb_data.get('watchlist_bozo'):
-                    st.error(f"Parse error: {lb_data.get('watchlist_bozo')}")
+                if lb_data.get('watchlist_parse_error'):
+                    st.error(f"Parse error: {lb_data.get('watchlist_parse_error')}")
                 if lb_data.get('watchlist_error'):
                     st.error(f"Error: {lb_data.get('watchlist_error')}")
                 
-                st.write("**First entry keys:**", lb_data.get('watchlist_first_keys', []))
-                st.write("**First title raw:**", lb_data.get('watchlist_first_title_raw', 'N/A'))
+                st.write(f"Activity items found: {len(activity)}")
+                st.write(f"Watchlist items found: {len(watchlist)}")
                 
-                if watchlist:
-                    st.write("**First watchlist item:**", watchlist[0])
                 if activity:
-                    st.write("**First activity item:**", activity[0])
+                    st.write("First activity:", activity[0])
+                if watchlist:
+                    st.write("First watchlist:", watchlist[0])
         
         tab1, tab2 = st.tabs(["📋 Watchlist", "🎬 Activity"])
         
@@ -420,15 +404,14 @@ with right_col:
                         link = item.get("link", "")
                         display = f"🎬 {title}" + (f" ({year})" if year else "")
                         if link:
-                            st.markdown(f"[{display}]({link})")
+                            st.write(f"[{display}]({link})")
                         else:
                             st.write(display)
             else:
                 st.warning("⚠️ Watchlist not loading")
-                st.caption(f"Feed: letterboxd.com/{LETTERBOXD_USER}/watchlist/rss/")
-                st.caption("Make sure your watchlist is set to public!")
-                if show_debug:
-                    st.info("Enable Debug mode in sidebar for more info")
+                st.write(f"RSS: letterboxd.com/{LETTERBOXD_USER}/watchlist/rss/")
+                st.write("Make sure your watchlist is PUBLIC!")
+                st.write("Try clicking 🔄 Refresh above")
         
         with tab2:
             if activity:
@@ -442,7 +425,7 @@ with right_col:
                         star = " ⭐" if item.get("has_rating") else ""
                         display = f"🎬 {title}" + (f" ({year})" if year else "") + star
                         if link:
-                            st.markdown(f"[{display}]({link})")
+                            st.write(f"[{display}]({link})")
                         else:
                             st.write(display)
             else:
@@ -472,7 +455,7 @@ with right_col:
                     
                     short = title[:10] + "…" if len(title) > 10 else title
                     if tmdb_id:
-                        st.markdown(f"[{short}](https://www.themoviedb.org/movie/{tmdb_id})")
+                        st.write(f"[{short}](https://www.themoviedb.org/movie/{tmdb_id})")
                     st.caption(f"⭐ {rating:.1f}")
     except Exception as e:
         st.caption(f"Error: {e}")
@@ -482,7 +465,7 @@ with right_col:
     # Search
     st.subheader("🔍 Search TMDB")
     
-    q = st.text_input("Search movies or TV...", key="search", label_visibility="collapsed", placeholder="Search...")
+    q = st.text_input("Search movies or TV...", label_visibility="collapsed", placeholder="Search...")
     
     if q:
         stype = st.radio("Type", ["Movies", "TV"], horizontal=True, label_visibility="collapsed")
@@ -494,7 +477,7 @@ with right_col:
                 year = (r.get("release_date") or r.get("first_air_date") or "")[:4]
                 tid = r.get("id")
                 url = f"https://www.themoviedb.org/{'movie' if stype == 'Movies' else 'tv'}/{tid}"
-                st.markdown(f"**[{title}]({url})** ({year})")
+                st.write(f"**[{title}]({url})** ({year})")
         else:
             st.caption("No results")
 
