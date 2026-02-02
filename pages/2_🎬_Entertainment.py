@@ -458,29 +458,11 @@ with right_col:
         watchlist = lb_data.get("watchlist", [])
         
         # Debug panel
-        with st.expander("🔧 Debug Info", expanded=True):
+        with st.expander("🔧 Debug Info", expanded=False):
             st.write(f"**Activity:** {len(activity)} items")
             st.write(f"**Watchlist:** {len(watchlist)} films (from {lb_data.get('pages_scraped', 0)} pages)")
-            st.write(f"**Status:** {lb_data.get('watchlist_status', 'N/A')}")
-            st.write(f"**Last URL:** {lb_data.get('last_url', 'N/A')}")
-            
-            # Show debug info
-            if lb_data.get('debug_info'):
-                for info in lb_data['debug_info']:
-                    st.write(info)
-            
-            # Show per-page counts
-            for i in range(1, 11):
-                key = f"page_{i}_posters"
-                if key in lb_data:
-                    st.write(f"Page {i}: {lb_data[key]} posters")
-            
             if lb_data.get('watchlist_error'):
                 st.error(f"Error: {lb_data.get('watchlist_error')}")
-            
-            if lb_data.get('response_preview'):
-                st.code(lb_data.get('response_preview')[:300], language="html")
-            
             if watchlist:
                 st.success(f"✅ Got {len(watchlist)} films!")
         
