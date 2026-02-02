@@ -451,31 +451,10 @@ with right_col:
     with c2:
         st.write(f"[🎬 Profile](https://letterboxd.com/{LETTERBOXD_USER}/)")
     
-    # Force fresh fetch for testing
-    if st.button("🔄 Refresh", key="refresh_lb"):
-        st.cache_data.clear()
-        st.rerun()
-    
     try:
         lb_data = et.get_letterboxd_activity(LETTERBOXD_USER)
         activity = lb_data.get("activity", [])
         watchlist = lb_data.get("watchlist", [])
-        
-        # Debug panel - shows pagination details
-        with st.expander("🔧 Debug Info", expanded=True):
-            st.write(f"**Activity:** {len(activity)} items")
-            st.write(f"**Watchlist:** {len(watchlist)} films (from {lb_data.get('pages_scraped', 0)} pages)")
-            st.write(f"**Status:** {lb_data.get('watchlist_status', 'N/A')}")
-            
-            # Show page-by-page debug
-            if lb_data.get('page_debug'):
-                st.write("**Per-page breakdown:**")
-                for p in lb_data['page_debug']:
-                    reason = f" - {p.get('reason')}" if p.get('reason') else ""
-                    st.write(f"  Page {p['page']}: {p.get('posters', 0)} posters, HTTP {p['status']}{reason}")
-            
-            if lb_data.get('watchlist_error'):
-                st.error(f"Error: {lb_data.get('watchlist_error')}")
         
         tab1, tab2 = st.tabs(["📋 Watchlist", "🎬 Activity"])
         
