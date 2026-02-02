@@ -205,12 +205,12 @@ def get_tv_season(tv_id: int, season_num: int) -> Optional[Dict]:
     return _tmdb_get(f"/tv/{tv_id}/season/{season_num}")
 
 # ============================================================
-# Letterboxd Integration (via RSS + HTML scraping fallback)
+# Letterboxd Integration (via RSS + HTML scraping)
 # ============================================================
 
 @st.cache_data(ttl=600)
 def get_letterboxd_activity(username: str = None) -> Dict[str, List[Dict]]:
-    """Get Letterboxd activity and watchlist."""
+    """Get Letterboxd activity via RSS and watchlist via HTML scraping (with pagination)."""
     import requests
     from bs4 import BeautifulSoup
     
@@ -226,7 +226,7 @@ def get_letterboxd_activity(username: str = None) -> Dict[str, List[Dict]]:
         'Accept-Language': 'en-US,en;q=0.5',
     }
     
-    # Activity feed via RSS (this works)
+    # Activity feed via RSS (this works!)
     try:
         activity_url = f"https://letterboxd.com/{username}/rss/"
         resp = requests.get(activity_url, headers=headers, timeout=10)
@@ -255,63 +255,63 @@ def get_letterboxd_activity(username: str = None) -> Dict[str, List[Dict]]:
     except Exception as e:
         result["activity_error"] = str(e)
     
-    # WATCHLIST - Scrape HTML page directly (RSS returns 403)
+    # WATCHLIST via HTML scraping with PAGINATION
     try:
-        watchlist_url = f"https://letterboxd.com/{username}/watchlist/"
-        result["watchlist_url"] = watchlist_url
+        result["pages_scraped"] = 0
         
-        resp = requests.get(watchlist_url, headers=headers, timeout=10)
-        result["watchlist_status"] = resp.status_code
-        result["watchlist_length"] = len(resp.text) if resp.text else 0
-        
-        if resp.status_code == 200:
+        for page_num in range(1, 6):  # Scrape up to 5 pages (280 films max)
+            if page_num == 1:
+                watchlist_url = f"https://letterboxd.com/{username}/watchlist/"
+            else:
+                watchlist_url = f"https://letterboxd.com/{username}/watchlist/page/{page_num}/"
+            
+            result["watchlist_url"] = watchlist_url
+            
+            resp = requests.get(watchlist_url, headers=headers, timeout=10)
+            result["watchlist_status"] = resp.status_code
+            
+            if resp.status_code != 200:
+                break
+                
             soup = BeautifulSoup(resp.text, 'html.parser')
             
-            # Letterboxd watchlist uses poster-container with data attributes
-            # Find all film posters
+            # Find all film posters on this page
             posters = soup.select('li.poster-container')
-            result["posters_found"] = len(posters)
             
             if not posters:
-                # Try alternative selectors
-                posters = soup.select('.film-poster') or soup.select('[data-film-slug]')
-                result["alt_posters_found"] = len(posters)
+                # No more films, stop paginating
+                break
             
-            for poster in posters[:50]:
-                # Get the div with data attributes
-                film_div = poster.select_one('div.film-poster') or poster
-                
-                # Extract film name from data-film-slug or img alt
-                film_slug = film_div.get('data-film-slug', '') if film_div else ''
-                
-                # Get image for alt text (film title)
-                img = poster.select_one('img')
-                title = img.get('alt', '') if img else ''
-                
-                # If no title from img, try to make one from slug
-                if not title and film_slug:
-                    title = film_slug.replace('-', ' ').title()
-                
-                # Get link
-                link = ""
-                link_el = poster.select_one('a')
-                if link_el:
-                    href = link_el.get('href', '')
-                    if href:
-                        link = f"https://letterboxd.com{href}" if href.startswith('/') else href
-                
-                if title:
-                    result["watchlist"].append({
-                        "title": title.strip(),
-                        "year": "",
-                        "link": link
-                    })
-        else:
-            result["watchlist_error"] = f"HTTP {resp.status_code}"
+            result["pages_scraped"] = page_num
             
+            for poster in posters:
+                film_div = poster.select_one('div.film-poster')
+                if film_div:
+                    slug = film_div.get('data-film-slug', '')
+                    img = film_div.select_one('img')
+                    title = img.get('alt', '') if img else ''
+                    
+                    if not title and slug:
+                        title = slug.replace('-', ' ').title()
+                    
+                    link = f"https://letterboxd.com/film/{slug}/" if slug else ""
+                    
+                    if title:
+                        result["watchlist"].append({
+                            "title": title.strip(),
+                            "year": "",
+                            "link": link
+                        })
+            
+            # Check if there's a next page
+            next_link = soup.select_one('.paginate-nextprev a.next')
+            if not next_link:
+                break
+                        
     except Exception as e:
         result["watchlist_error"] = str(e)
     
+    result["posters_found"] = len(result["watchlist"])
     return result
 
 # ============================================================
