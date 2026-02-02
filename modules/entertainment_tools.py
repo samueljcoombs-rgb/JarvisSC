@@ -210,77 +210,83 @@ def get_tv_season(tv_id: int, season_num: int) -> Optional[Dict]:
 
 @st.cache_data(ttl=1800)
 def get_letterboxd_activity(username: str = None) -> Dict[str, List[Dict]]:
-    """Get Letterboxd activity via RSS feed."""
+    """Get Letterboxd activity and watchlist via RSS feeds."""
     username = username or _letterboxd_username()
     if not username:
         return {"error": "No Letterboxd username configured", "activity": [], "watchlist": []}
     
     result = {"activity": [], "watchlist": [], "username": username}
     
-    # Activity feed (diary/reviews) - uses letterboxd:filmTitle namespace
+    # Activity feed (diary/reviews)
     try:
-        feed = feedparser.parse(f"https://letterboxd.com/{username}/rss/")
-        result["activity_entries_count"] = len(feed.entries) if feed.entries else 0
+        activity_url = f"https://letterboxd.com/{username}/rss/"
+        feed = feedparser.parse(activity_url)
+        result["activity_url"] = activity_url
+        result["activity_count"] = len(feed.entries) if feed.entries else 0
         
-        for entry in feed.entries[:30]:
-            # Letterboxd uses namespaced fields: letterboxd:filmTitle -> letterboxd_filmtitle
-            title = getattr(entry, 'letterboxd_filmtitle', None) or entry.get('letterboxd_filmtitle', '')
-            year = getattr(entry, 'letterboxd_filmyear', None) or entry.get('letterboxd_filmyear', '')
-            rating = getattr(entry, 'letterboxd_memberrating', None) or entry.get('letterboxd_memberrating', '')
+        for entry in feed.entries[:25]:
+            # feedparser converts letterboxd:filmTitle -> letterboxd_filmtitle
+            film_title = getattr(entry, 'letterboxd_filmtitle', '') or ''
+            film_year = getattr(entry, 'letterboxd_filmyear', '') or ''
+            rating = getattr(entry, 'letterboxd_memberrating', '') or ''
             
-            # Fall back to title field if namespace didn't work
-            if not title:
-                title = entry.get("title", "")
-                # Title format: "Film Name, Year - ★★★½"
-                if ", " in title and " - " in title:
-                    title = title.split(", ")[0]
+            # Fallback: parse from title "Film Name, Year - ★★★"
+            if not film_title:
+                raw_title = entry.get("title", "")
+                if ", " in raw_title:
+                    parts = raw_title.split(", ")
+                    film_title = parts[0]
+                    if len(parts) > 1 and " - " in parts[1]:
+                        film_year = parts[1].split(" - ")[0]
+                else:
+                    film_title = raw_title
             
             item = {
-                "title": title,
-                "year": str(year) if year else "",
+                "title": str(film_title).strip(),
+                "year": str(film_year).strip() if film_year else "",
                 "link": entry.get("link", ""),
-                "published": entry.get("published", ""),
-                "rating": rating,
                 "has_rating": bool(rating) or "★" in entry.get("title", "")
             }
-            result["activity"].append(item)
+            if item["title"]:
+                result["activity"].append(item)
+                
     except Exception as e:
         result["activity_error"] = str(e)
     
-    # Watchlist feed - different URL, simpler structure
+    # Watchlist feed - DIFFERENT URL
     try:
         watchlist_url = f"https://letterboxd.com/{username}/watchlist/rss/"
-        watchlist_feed = feedparser.parse(watchlist_url)
-        result["watchlist_entries_count"] = len(watchlist_feed.entries) if watchlist_feed.entries else 0
+        wfeed = feedparser.parse(watchlist_url)
         result["watchlist_url"] = watchlist_url
+        result["watchlist_count"] = len(wfeed.entries) if wfeed.entries else 0
         
-        # Debug: capture first entry keys
-        if watchlist_feed.entries:
-            first = watchlist_feed.entries[0]
-            result["watchlist_sample_keys"] = [k for k in dir(first) if not k.startswith('_')][:20]
+        # Debug: get bozo error if any
+        if wfeed.bozo:
+            result["watchlist_bozo"] = str(wfeed.bozo_exception)
         
-        for entry in watchlist_feed.entries[:40]:
-            # Try namespaced fields first (letterboxd:filmTitle -> letterboxd_filmtitle)
-            title = getattr(entry, 'letterboxd_filmtitle', None)
-            year = getattr(entry, 'letterboxd_filmyear', None)
+        # Debug: sample entry structure
+        if wfeed.entries:
+            first = wfeed.entries[0]
+            result["watchlist_first_keys"] = [k for k in first.keys()]
+            result["watchlist_first_title_raw"] = first.get("title", "NO_TITLE_KEY")
+        
+        for entry in wfeed.entries[:50]:
+            # Try letterboxd namespace fields
+            film_title = getattr(entry, 'letterboxd_filmtitle', None)
+            film_year = getattr(entry, 'letterboxd_filmyear', None)
             
-            # Also try dict access
-            if not title:
-                title = entry.get('letterboxd_filmtitle', '')
-            if not year:
-                year = entry.get('letterboxd_filmyear', '')
-            
-            # Fall back to standard title
-            if not title:
-                title = entry.get("title", "Unknown")
+            # Fallback to regular title
+            if not film_title:
+                film_title = entry.get("title", "Unknown")
             
             item = {
-                "title": str(title).strip() if title else "Unknown",
-                "year": str(year) if year else "",
+                "title": str(film_title).strip() if film_title else "Unknown",
+                "year": str(film_year).strip() if film_year else "",
                 "link": entry.get("link", "")
             }
-            result["watchlist"].append(item)
-            
+            if item["title"] and item["title"] != "Unknown":
+                result["watchlist"].append(item)
+                
     except Exception as e:
         result["watchlist_error"] = str(e)
     
@@ -292,7 +298,8 @@ def get_letterboxd_activity(username: str = None) -> Dict[str, List[Dict]]:
 
 @st.cache_data(ttl=1800)
 def get_entertainment_news() -> List[Dict]:
-    """Get entertainment news from various RSS sources."""
+    """Get entertainment news from various RSS sources with images."""
+    import re
     news = []
     
     # Entertainment RSS feeds - more sources
@@ -305,27 +312,55 @@ def get_entertainment_news() -> List[Dict]:
         ("Eurogamer", "https://www.eurogamer.net/feed"),
         ("Screen Rant", "https://screenrant.com/feed/"),
         ("Collider", "https://collider.com/feed/"),
-        ("AV Club", "https://www.avclub.com/rss"),
         ("Deadline", "https://deadline.com/feed/"),
     ]
     
     for source, url in feeds:
         try:
             feed = feedparser.parse(url)
-            for entry in feed.entries[:8]:  # Get more per source
+            for entry in feed.entries[:8]:
+                # Try to extract image from various sources
+                image = None
+                
+                # 1. Check media_content
+                if hasattr(entry, 'media_content') and entry.media_content:
+                    for media in entry.media_content:
+                        if media.get('medium') == 'image' or media.get('type', '').startswith('image'):
+                            image = media.get('url')
+                            break
+                
+                # 2. Check media_thumbnail
+                if not image and hasattr(entry, 'media_thumbnail') and entry.media_thumbnail:
+                    image = entry.media_thumbnail[0].get('url')
+                
+                # 3. Check enclosures
+                if not image and hasattr(entry, 'enclosures') and entry.enclosures:
+                    for enc in entry.enclosures:
+                        if enc.get('type', '').startswith('image'):
+                            image = enc.get('href') or enc.get('url')
+                            break
+                
+                # 4. Try to extract from description/content HTML
+                if not image:
+                    content = entry.get('summary', '') or entry.get('description', '')
+                    img_match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', content)
+                    if img_match:
+                        image = img_match.group(1)
+                
                 news.append({
                     "source": source,
                     "title": entry.get("title", ""),
                     "link": entry.get("link", ""),
                     "published": entry.get("published", ""),
-                    "summary": (entry.get("summary", "") or "")[:200]
+                    "summary": (entry.get("summary", "") or "")[:200],
+                    "image": image
                 })
         except Exception:
             continue
     
     # Sort by date (newest first)
     news.sort(key=lambda x: x.get("published", ""), reverse=True)
-    return news[:50]  # Return more articles
+    return news[:60]
 
 # ============================================================
 # Watchlist Management
