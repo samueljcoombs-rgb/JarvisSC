@@ -205,12 +205,12 @@ def get_tv_season(tv_id: int, season_num: int) -> Optional[Dict]:
     return _tmdb_get(f"/tv/{tv_id}/season/{season_num}")
 
 # ============================================================
-# Letterboxd Integration (via RSS + HTML scraping)
+# Letterboxd Integration (via RSS + HTML scraping fallback)
 # ============================================================
 
 @st.cache_data(ttl=600)
 def get_letterboxd_activity(username: str = None) -> Dict[str, List[Dict]]:
-    """Get Letterboxd activity via RSS and watchlist via HTML scraping."""
+    """Get Letterboxd activity and watchlist."""
     import requests
     from bs4 import BeautifulSoup
     
@@ -226,7 +226,7 @@ def get_letterboxd_activity(username: str = None) -> Dict[str, List[Dict]]:
         'Accept-Language': 'en-US,en;q=0.5',
     }
     
-    # Activity feed via RSS
+    # Activity feed via RSS (this works)
     try:
         activity_url = f"https://letterboxd.com/{username}/rss/"
         resp = requests.get(activity_url, headers=headers, timeout=10)
@@ -255,42 +255,60 @@ def get_letterboxd_activity(username: str = None) -> Dict[str, List[Dict]]:
     except Exception as e:
         result["activity_error"] = str(e)
     
-    # WATCHLIST via HTML scraping (RSS returns 403)
+    # WATCHLIST - Scrape HTML page directly (RSS returns 403)
     try:
         watchlist_url = f"https://letterboxd.com/{username}/watchlist/"
         result["watchlist_url"] = watchlist_url
         
         resp = requests.get(watchlist_url, headers=headers, timeout=10)
         result["watchlist_status"] = resp.status_code
+        result["watchlist_length"] = len(resp.text) if resp.text else 0
         
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, 'html.parser')
             
-            # Letterboxd structure: ul.poster-list > li.poster-container
+            # Letterboxd watchlist uses poster-container with data attributes
+            # Find all film posters
             posters = soup.select('li.poster-container')
             result["posters_found"] = len(posters)
             
+            if not posters:
+                # Try alternative selectors
+                posters = soup.select('.film-poster') or soup.select('[data-film-slug]')
+                result["alt_posters_found"] = len(posters)
+            
             for poster in posters[:50]:
-                # Get the div with film data
-                film_div = poster.select_one('div.film-poster')
-                if film_div:
-                    # data-film-slug contains the slug
-                    slug = film_div.get('data-film-slug', '')
-                    
-                    # Get image alt for title
-                    img = film_div.select_one('img')
-                    title = img.get('alt', '') if img else ''
-                    
-                    # Build link
-                    link = f"https://letterboxd.com/film/{slug}/" if slug else ""
-                    
-                    if title:
-                        result["watchlist"].append({
-                            "title": title.strip(),
-                            "year": "",
-                            "link": link
-                        })
-                        
+                # Get the div with data attributes
+                film_div = poster.select_one('div.film-poster') or poster
+                
+                # Extract film name from data-film-slug or img alt
+                film_slug = film_div.get('data-film-slug', '') if film_div else ''
+                
+                # Get image for alt text (film title)
+                img = poster.select_one('img')
+                title = img.get('alt', '') if img else ''
+                
+                # If no title from img, try to make one from slug
+                if not title and film_slug:
+                    title = film_slug.replace('-', ' ').title()
+                
+                # Get link
+                link = ""
+                link_el = poster.select_one('a')
+                if link_el:
+                    href = link_el.get('href', '')
+                    if href:
+                        link = f"https://letterboxd.com{href}" if href.startswith('/') else href
+                
+                if title:
+                    result["watchlist"].append({
+                        "title": title.strip(),
+                        "year": "",
+                        "link": link
+                    })
+        else:
+            result["watchlist_error"] = f"HTTP {resp.status_code}"
+            
     except Exception as e:
         result["watchlist_error"] = str(e)
     
