@@ -114,18 +114,110 @@ with st.expander("📰🎮 Entertainment & Gaming News", expanded=True):
             else:
                 filtered = news
             
-            news_box = st.container(height=300)
-            with news_box:
-                # Simple clean list format
-                for article in filtered[:news_count]:
-                    title = article.get("title", "")
-                    source = article.get("source", "")
-                    link = article.get("link", "")
-                    
-                    icon = "🎮" if source in ["IGN", "Polygon", "Kotaku", "Eurogamer"] else "🎬"
-                    short_title = title[:80] + "..." if len(title) > 80 else title
-                    
-                    st.write(f"{icon} **{source}** · [{short_title}]({link})")
+            # Sleek scrollable news with cards
+            st.markdown("""
+            <style>
+            .news-scroll {
+                display: flex;
+                overflow-x: auto;
+                gap: 1rem;
+                padding: 1rem 0;
+                scroll-behavior: smooth;
+            }
+            .news-scroll::-webkit-scrollbar {
+                height: 8px;
+            }
+            .news-scroll::-webkit-scrollbar-track {
+                background: rgba(128,128,128,0.1);
+                border-radius: 4px;
+            }
+            .news-scroll::-webkit-scrollbar-thumb {
+                background: rgba(128,128,128,0.4);
+                border-radius: 4px;
+            }
+            .news-card {
+                flex: 0 0 280px;
+                border-radius: 12px;
+                overflow: hidden;
+                background: rgba(128,128,128,0.1);
+                border: 1px solid rgba(128,128,128,0.2);
+                transition: transform 0.2s, box-shadow 0.2s;
+            }
+            .news-card:hover {
+                transform: translateY(-4px);
+                box-shadow: 0 8px 24px rgba(0,0,0,0.2);
+            }
+            .news-card img {
+                width: 100%;
+                height: 140px;
+                object-fit: cover;
+            }
+            .news-card-body {
+                padding: 0.8rem;
+            }
+            .news-badge {
+                display: inline-block;
+                padding: 2px 8px;
+                border-radius: 4px;
+                font-size: 0.7rem;
+                font-weight: 600;
+                margin-bottom: 0.5rem;
+            }
+            .news-badge.gaming {
+                background: linear-gradient(135deg, #10b981, #059669);
+                color: white;
+            }
+            .news-badge.entertainment {
+                background: linear-gradient(135deg, #ec4899, #db2777);
+                color: white;
+            }
+            .news-title {
+                font-size: 0.85rem;
+                line-height: 1.3;
+                margin: 0;
+                display: -webkit-box;
+                -webkit-line-clamp: 3;
+                -webkit-box-orient: vertical;
+                overflow: hidden;
+            }
+            .news-title a {
+                color: inherit;
+                text-decoration: none;
+            }
+            .news-title a:hover {
+                text-decoration: underline;
+            }
+            </style>
+            """, unsafe_allow_html=True)
+            
+            # Build HTML cards
+            cards_html = '<div class="news-scroll">'
+            for article in filtered[:news_count]:
+                title = article.get("title", "")
+                source = article.get("source", "")
+                link = article.get("link", "")
+                image = article.get("image", "")
+                
+                is_gaming = source in ["IGN", "Polygon", "Kotaku", "Eurogamer"]
+                badge_class = "gaming" if is_gaming else "entertainment"
+                badge_icon = "🎮" if is_gaming else "🎬"
+                
+                # Placeholder image if none
+                if not image:
+                    image = "https://placehold.co/280x140/1a1a2e/8b5cf6?text=News"
+                
+                cards_html += f'''
+                <div class="news-card">
+                    <img src="{image}" alt="" onerror="this.src='https://placehold.co/280x140/1a1a2e/8b5cf6?text=News'">
+                    <div class="news-card-body">
+                        <span class="news-badge {badge_class}">{badge_icon} {source}</span>
+                        <p class="news-title"><a href="{link}" target="_blank">{title}</a></p>
+                    </div>
+                </div>
+                '''
+            cards_html += '</div>'
+            
+            st.markdown(cards_html, unsafe_allow_html=True)
         else:
             st.info("No news available")
     except Exception as e:
@@ -359,21 +451,16 @@ with right_col:
         watchlist = lb_data.get("watchlist", [])
         
         # ALWAYS show debug for now to diagnose issue
-        with st.expander("🔧 Debug Info", expanded=True):
-            st.write(f"**Activity:** {len(activity)} items (status: {lb_data.get('activity_status', 'N/A')})")
-            st.write(f"**Watchlist URL:** {lb_data.get('watchlist_url', 'N/A')}")
-            st.write(f"**Watchlist status:** {lb_data.get('watchlist_status', 'N/A')}")
-            st.write(f"**Posters found:** {lb_data.get('posters_found', 0)}")
-            st.write(f"**Watchlist items:** {len(watchlist)}")
+        with st.expander("🔧 Debug Info", expanded=False):
+            st.write(f"**Activity:** {len(activity)} items")
+            st.write(f"**Watchlist:** {len(watchlist)} films (from {lb_data.get('pages_scraped', 1)} pages)")
+            st.write(f"**Status:** {lb_data.get('watchlist_status', 'N/A')}")
             
-            if lb_data.get('alt_posters_found'):
-                st.write(f"Alt posters: {lb_data.get('alt_posters_found')}")
             if lb_data.get('watchlist_error'):
                 st.error(f"Error: {lb_data.get('watchlist_error')}")
             
             if watchlist:
                 st.success(f"✅ Got {len(watchlist)} films!")
-                st.write("First:", watchlist[0])
         
         tab1, tab2 = st.tabs(["📋 Watchlist", "🎬 Activity"])
         
