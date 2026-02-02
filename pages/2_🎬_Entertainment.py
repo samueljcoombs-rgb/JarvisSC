@@ -114,41 +114,18 @@ with st.expander("📰🎮 Entertainment & Gaming News", expanded=True):
             else:
                 filtered = news
             
-            news_box = st.container(height=350)
+            news_box = st.container(height=300)
             with news_box:
-                # 3 columns for smaller items
-                for i in range(0, min(len(filtered), news_count), 3):
-                    cols = st.columns(3)
-                    for j, col in enumerate(cols):
-                        idx = i + j
-                        if idx < len(filtered) and idx < news_count:
-                            article = filtered[idx]
-                            with col:
-                                title = article.get("title", "")
-                                source = article.get("source", "")
-                                link = article.get("link", "")
-                                image = article.get("image", "")
-                                
-                                icon = "🎮" if source in ["IGN", "Polygon", "Kotaku", "Eurogamer"] else "🎬"
-                                
-                                # Small image thumbnail
-                                if image:
-                                    try:
-                                        img_col, txt_col = st.columns([1, 2])
-                                        with img_col:
-                                            st.image(image, width=80)
-                                        with txt_col:
-                                            st.caption(f"{icon} {source}")
-                                            short_title = title[:50] + "..." if len(title) > 50 else title
-                                            st.write(f"[{short_title}]({link})")
-                                    except:
-                                        st.caption(f"{icon} {source}")
-                                        short_title = title[:60] + "..." if len(title) > 60 else title
-                                        st.write(f"[{short_title}]({link})")
-                                else:
-                                    st.caption(f"{icon} {source}")
-                                    short_title = title[:60] + "..." if len(title) > 60 else title
-                                    st.write(f"[{short_title}]({link})")
+                # Simple clean list format
+                for article in filtered[:news_count]:
+                    title = article.get("title", "")
+                    source = article.get("source", "")
+                    link = article.get("link", "")
+                    
+                    icon = "🎮" if source in ["IGN", "Polygon", "Kotaku", "Eurogamer"] else "🎬"
+                    short_title = title[:80] + "..." if len(title) > 80 else title
+                    
+                    st.write(f"{icon} **{source}** · [{short_title}]({link})")
         else:
             st.info("No news available")
     except Exception as e:
@@ -381,28 +358,22 @@ with right_col:
         activity = lb_data.get("activity", [])
         watchlist = lb_data.get("watchlist", [])
         
-        # Debug panel
-        if show_debug:
-            with st.expander("🔧 Debug Info", expanded=True):
-                st.write(f"Activity status: {lb_data.get('activity_status', 'N/A')}")
-                st.write(f"Activity items: {len(activity)}")
-                st.write(f"Watchlist URL: {lb_data.get('watchlist_url', 'N/A')}")
-                st.write(f"Watchlist HTTP status: {lb_data.get('watchlist_status', 'N/A')}")
-                st.write(f"Watchlist response length: {lb_data.get('watchlist_length', 'N/A')} bytes")
-                st.write(f"Watchlist entries raw: {lb_data.get('watchlist_entries_raw', 'N/A')}")
-                st.write(f"Watchlist items parsed: {len(watchlist)}")
-                
-                if lb_data.get('trying_manual_parse'):
-                    st.info("Tried manual XML parsing")
-                if lb_data.get('xml_parse_error'):
-                    st.error(f"XML error: {lb_data.get('xml_parse_error')}")
-                if lb_data.get('watchlist_error'):
-                    st.error(f"Error: {lb_data.get('watchlist_error')}")
-                
-                if activity:
-                    st.write("First activity:", activity[0])
-                if watchlist:
-                    st.write("First watchlist:", watchlist[0])
+    # ALWAYS show debug for now to diagnose issue
+    with st.expander("🔧 Debug Info", expanded=True):
+        st.write(f"**Activity:** {len(activity)} items (status: {lb_data.get('activity_status', 'N/A')})")
+        st.write(f"**Watchlist URL:** {lb_data.get('watchlist_url', 'N/A')}")
+        st.write(f"**Watchlist status:** {lb_data.get('watchlist_status', 'N/A')}")
+        st.write(f"**Posters found:** {lb_data.get('posters_found', 0)}")
+        st.write(f"**Watchlist items:** {len(watchlist)}")
+        
+        if lb_data.get('alt_posters_found'):
+            st.write(f"Alt posters: {lb_data.get('alt_posters_found')}")
+        if lb_data.get('watchlist_error'):
+            st.error(f"Error: {lb_data.get('watchlist_error')}")
+        
+        if watchlist:
+            st.success(f"✅ Got {len(watchlist)} films!")
+            st.write("First:", watchlist[0])
         
         tab1, tab2 = st.tabs(["📋 Watchlist", "🎬 Activity"])
         
