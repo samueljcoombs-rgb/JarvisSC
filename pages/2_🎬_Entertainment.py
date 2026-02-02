@@ -1,13 +1,11 @@
 # pages/2_🎬_Entertainment.py
 """
-Entertainment Dashboard - Movies, TV Shows, Letterboxd integration with AI recommendations.
-Premium dashboard layout - no tabs, everything visible.
+Entertainment Dashboard - Letterboxd, Cinema Releases, Vue Listings, AI Recommendations.
 """
 import streamlit as st
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import os
-import json
 
 # Import modules
 try:
@@ -58,7 +56,6 @@ def get_openai_client():
 
 st.markdown("""
 <style>
-/* Animated gradient header */
 @keyframes gradientShift {
     0% { background-position: 0% 50%; }
     50% { background-position: 100% 50%; }
@@ -114,212 +111,73 @@ st.markdown("""
     z-index: 1;
 }
 
-/* News ticker/carousel */
-.news-ticker {
-    background: linear-gradient(90deg, rgba(236, 72, 153, 0.1), rgba(139, 92, 246, 0.1), rgba(59, 130, 246, 0.1));
-    border: 1px solid rgba(255,255,255,0.1);
-    border-radius: 16px;
-    padding: 1rem 1.5rem;
-    margin-bottom: 1.5rem;
-    overflow: hidden;
-}
-
-.news-item {
-    display: inline-block;
-    background: rgba(255,255,255,0.05);
+/* Movie release card */
+.release-card {
+    background: linear-gradient(145deg, rgba(255,255,255,0.08) 0%, rgba(255,255,255,0.02) 100%);
     border: 1px solid rgba(255,255,255,0.1);
     border-radius: 12px;
-    padding: 0.75rem 1rem;
-    margin-right: 1rem;
+    padding: 0.75rem;
     margin-bottom: 0.5rem;
-    transition: all 0.3s ease;
-    max-width: 300px;
-}
-
-.news-item:hover {
-    background: rgba(139, 92, 246, 0.2);
-    border-color: rgba(139, 92, 246, 0.4);
-    transform: translateY(-2px);
-}
-
-.news-item .source {
-    font-size: 0.7rem;
-    color: #ec4899;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-}
-
-.news-item .title {
-    font-size: 0.85rem;
-    color: white;
-    font-weight: 600;
-    margin-top: 0.25rem;
-    line-height: 1.3;
-}
-
-/* Poster Grid - Letterboxd Style */
-.poster-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-    gap: 1rem;
-}
-
-.poster-card {
-    position: relative;
-    border-radius: 8px;
-    overflow: hidden;
-    aspect-ratio: 2/3;
-    background: rgba(255,255,255,0.05);
-    transition: all 0.3s ease;
-    cursor: pointer;
-}
-
-.poster-card:hover {
-    transform: scale(1.05);
-    box-shadow: 0 12px 40px rgba(0,0,0,0.5);
-    z-index: 10;
-}
-
-.poster-card img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-}
-
-.poster-card .overlay {
-    position: absolute;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    background: linear-gradient(transparent, rgba(0,0,0,0.9));
-    padding: 2rem 0.5rem 0.5rem;
-    opacity: 0;
-    transition: opacity 0.3s ease;
-}
-
-.poster-card:hover .overlay {
-    opacity: 1;
-}
-
-.poster-card .title {
-    font-size: 0.75rem;
-    font-weight: 700;
-    color: white;
-    line-height: 1.2;
-}
-
-.poster-card .rating {
-    position: absolute;
-    top: 0.5rem;
-    right: 0.5rem;
-    background: linear-gradient(135deg, #f59e0b, #d97706);
-    color: white;
-    font-size: 0.7rem;
-    font-weight: 800;
-    padding: 2px 6px;
-    border-radius: 6px;
-}
-
-/* Section Headers */
-.section-header {
     display: flex;
-    align-items: center;
     gap: 0.75rem;
-    margin-bottom: 1rem;
-}
-
-.section-header .icon {
-    font-size: 1.5rem;
-}
-
-.section-header .text {
-    font-weight: 800;
-    font-size: 1.2rem;
-    background: linear-gradient(135deg, #ec4899, #8b5cf6);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-}
-
-/* AI Coach Card */
-.ai-coach-card {
-    background: linear-gradient(145deg, rgba(139, 92, 246, 0.15) 0%, rgba(236, 72, 153, 0.1) 100%);
-    border: 1px solid rgba(139, 92, 246, 0.3);
-    border-radius: 20px;
-    padding: 1.5rem;
-    margin-bottom: 1.5rem;
-}
-
-/* Letterboxd Activity Card */
-.lb-activity {
-    background: linear-gradient(135deg, rgba(255, 136, 0, 0.15) 0%, rgba(0, 210, 0, 0.1) 100%);
-    border: 1px solid rgba(255, 136, 0, 0.3);
-    border-radius: 12px;
-    padding: 1rem;
-    margin-bottom: 0.75rem;
-    display: flex;
-    gap: 1rem;
-    align-items: center;
-}
-
-.lb-activity:hover {
-    transform: translateX(4px);
-    border-color: rgba(255, 136, 0, 0.5);
-}
-
-.lb-activity .rating-stars {
-    color: #00e054;
-    font-weight: 700;
-}
-
-/* Watchlist Item */
-.watchlist-item {
-    background: rgba(255,255,255,0.05);
-    border: 1px solid rgba(255,255,255,0.1);
-    border-radius: 12px;
-    padding: 0.75rem 1rem;
-    margin-bottom: 0.5rem;
-    display: flex;
-    justify-content: space-between;
     align-items: center;
     transition: all 0.3s ease;
 }
 
-.watchlist-item:hover {
-    background: rgba(139, 92, 246, 0.1);
-    border-color: rgba(139, 92, 246, 0.3);
+.release-card:hover {
+    border-color: rgba(139, 92, 246, 0.4);
+    transform: translateX(4px);
 }
 
-/* Scrollable Chat Container */
-.chat-container {
-    max-height: 400px;
-    overflow-y: auto;
-    padding-right: 0.5rem;
+.release-date {
+    background: linear-gradient(135deg, #ec4899, #8b5cf6);
+    color: white;
+    padding: 0.5rem;
+    border-radius: 8px;
+    text-align: center;
+    min-width: 50px;
+    font-weight: 700;
+    font-size: 0.8rem;
 }
 
-.chat-container::-webkit-scrollbar {
-    width: 6px;
+.release-date .month {
+    font-size: 0.65rem;
+    text-transform: uppercase;
 }
 
-.chat-container::-webkit-scrollbar-track {
-    background: rgba(255,255,255,0.05);
-    border-radius: 3px;
+.release-date .day {
+    font-size: 1.1rem;
+    line-height: 1;
 }
 
-.chat-container::-webkit-scrollbar-thumb {
-    background: rgba(139, 92, 246, 0.5);
-    border-radius: 3px;
+/* Vue cinema card */
+.vue-card {
+    background: linear-gradient(145deg, rgba(0, 82, 147, 0.2) 0%, rgba(0, 50, 100, 0.1) 100%);
+    border: 1px solid rgba(0, 82, 147, 0.3);
+    border-radius: 12px;
+    padding: 0.75rem 1rem;
+    margin-bottom: 0.5rem;
+    transition: all 0.3s ease;
 }
 
-/* Footer nav */
-.footer-nav {
-    display: flex;
-    justify-content: center;
-    gap: 1rem;
-    padding: 1rem;
-    margin-top: 2rem;
-    border-top: 1px solid rgba(255,255,255,0.1);
+.vue-card:hover {
+    border-color: rgba(0, 82, 147, 0.6);
+    box-shadow: 0 4px 15px rgba(0, 82, 147, 0.3);
+}
+
+/* Letterboxd styles */
+.lb-watchlist-item {
+    background: linear-gradient(135deg, rgba(255, 136, 0, 0.1) 0%, rgba(0, 210, 0, 0.05) 100%);
+    border: 1px solid rgba(255, 136, 0, 0.2);
+    border-radius: 10px;
+    padding: 0.6rem 0.8rem;
+    margin-bottom: 0.4rem;
+    transition: all 0.3s ease;
+}
+
+.lb-watchlist-item:hover {
+    border-color: rgba(255, 136, 0, 0.5);
+    transform: translateX(4px);
 }
 </style>
 """, unsafe_allow_html=True)
@@ -331,7 +189,7 @@ st.markdown("""
 st.markdown("""
 <div class="ent-header">
     <h1>🎬 Entertainment Hub</h1>
-    <p>✨ Your movies, shows, and personalized AI recommendations</p>
+    <p>✨ Cinema releases, Letterboxd, and AI recommendations</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -340,35 +198,36 @@ st.markdown("""
 # ============================================================
 
 st.markdown("""
-<div class="section-header">
-    <span class="icon">📰</span>
-    <span class="text">Entertainment News</span>
+<div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem;">
+    <span style="font-size: 1.5rem;">📰</span>
+    <span style="font-weight: 800; font-size: 1.2rem; background: linear-gradient(135deg, #ec4899, #8b5cf6);
+                 -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">Entertainment News</span>
 </div>
 """, unsafe_allow_html=True)
 
 try:
     news = et.get_entertainment_news()
     if news:
-        # Display as horizontal scrollable row
-        news_html = '<div class="news-ticker">'
-        for article in news[:8]:
-            title = article.get("title", "")[:60] + "..." if len(article.get("title", "")) > 60 else article.get("title", "")
-            source = article.get("source", "")
-            link = article.get("link", "#")
-            news_html += f'''
-            <a href="{link}" target="_blank" style="text-decoration: none;">
-                <div class="news-item">
-                    <div class="source">{source}</div>
-                    <div class="title">{title}</div>
-                </div>
-            </a>
-            '''
-        news_html += '</div>'
-        st.markdown(news_html, unsafe_allow_html=True)
-    else:
-        st.caption("No news available")
+        news_cols = st.columns(4)
+        for i, article in enumerate(news[:8]):
+            with news_cols[i % 4]:
+                title = article.get("title", "")
+                if len(title) > 50:
+                    title = title[:50] + "..."
+                source = article.get("source", "")
+                link = article.get("link", "#")
+                
+                st.markdown(f"""
+                <a href="{link}" target="_blank" style="text-decoration: none;">
+                    <div style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); 
+                                border-radius: 12px; padding: 0.75rem; margin-bottom: 0.5rem; min-height: 80px;">
+                        <div style="font-size: 0.7rem; color: #ec4899; font-weight: 700; text-transform: uppercase;">{source}</div>
+                        <div style="font-size: 0.85rem; font-weight: 600; margin-top: 0.25rem; line-height: 1.3; color: white;">{title}</div>
+                    </div>
+                </a>
+                """, unsafe_allow_html=True)
 except Exception as e:
-    st.caption(f"News loading... ({e})")
+    st.caption(f"News loading...")
 
 st.markdown("---")
 
@@ -379,101 +238,166 @@ st.markdown("---")
 left_col, mid_col, right_col = st.columns([3, 4, 3], gap="large")
 
 # ============================================================
-# LEFT COLUMN: Watchlist & Letterboxd
+# LEFT COLUMN: Letterboxd (Activity + Watchlist)
 # ============================================================
 
 with left_col:
-    # My Watchlist Section
-    st.markdown("""
-    <div class="section-header">
-        <span class="icon">📋</span>
-        <span class="text">My Watchlist</span>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Get watchlist from sheets
-    try:
-        watchlist = sm.get_watchlist(status="to_watch")
-        if watchlist:
-            for item in watchlist[:8]:
-                title = item.get("title", "Unknown")
-                content_type = item.get("type", "movie")
-                icon = "🎬" if content_type == "movie" else "📺"
-                
-                col1, col2 = st.columns([4, 1])
-                with col1:
-                    st.markdown(f"{icon} **{title}**")
-                with col2:
-                    if st.button("✓", key=f"watched_{item.get('id', title)}", help="Mark as watched"):
-                        sm.update_watchlist_item(item.get("id"), {"status": "watched"})
-                        st.rerun()
-        else:
-            st.caption("Your watchlist is empty. Search for movies below!")
-    except Exception as e:
-        st.caption(f"Watchlist: {e}")
-    
-    # Add to watchlist
-    with st.expander("➕ Add to Watchlist"):
-        new_title = st.text_input("Movie/Show title", key="add_wl_title")
-        new_type = st.selectbox("Type", ["movie", "tv"], key="add_wl_type")
-        if st.button("Add", key="add_wl_btn"):
-            if new_title:
-                sm.add_to_watchlist(title=new_title, content_type=new_type, status="to_watch")
-                st.success(f"Added {new_title}!")
-                st.rerun()
-    
-    st.divider()
-    
-    # Letterboxd Section
-    st.markdown("""
-    <div class="section-header">
-        <span class="icon">🎭</span>
-        <span class="text">Letterboxd</span>
+    st.markdown(f"""
+    <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem;">
+        <span style="font-size: 1.5rem;">🎭</span>
+        <span style="font-weight: 800; font-size: 1.2rem; background: linear-gradient(135deg, #ff8800, #00e054);
+                     -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">Letterboxd</span>
+        <span style="font-size: 0.8rem; color: rgba(255,255,255,0.5);">@{LETTERBOXD_USER}</span>
     </div>
     """, unsafe_allow_html=True)
     
     if LETTERBOXD_USER:
-        st.caption(f"@{LETTERBOXD_USER}")
-        
         try:
             lb_data = et.get_letterboxd_activity(LETTERBOXD_USER)
             activity = lb_data.get("activity", []) if isinstance(lb_data, dict) else []
             lb_watchlist = lb_data.get("watchlist", []) if isinstance(lb_data, dict) else []
             
-            # Recent Activity
-            if activity:
-                st.markdown("**Recent Activity:**")
-                for item in activity[:5]:
-                    title = item.get("title", "")
-                    has_rating = item.get("has_rating", False)
-                    
-                    st.markdown(f"""
-                    <div class="lb-activity">
-                        <div>
-                            <strong>{title}</strong>
-                            {' <span class="rating-stars">★</span>' if has_rating else ''}
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
+            # Watchlist Tab and Activity Tab
+            lb_tab1, lb_tab2 = st.tabs(["📋 Watchlist", "🎬 Recent Activity"])
             
-            # Letterboxd Watchlist Count
-            if lb_watchlist:
-                st.caption(f"📋 {len(lb_watchlist)} films in Letterboxd watchlist")
-                
+            with lb_tab1:
+                if lb_watchlist:
+                    st.caption(f"{len(lb_watchlist)} films to watch")
+                    for item in lb_watchlist[:15]:
+                        title = item.get("title", "Unknown")
+                        year = item.get("year", "")
+                        
+                        st.markdown(f"""
+                        <div class="lb-watchlist-item">
+                            <strong>{title}</strong> <span style="color: rgba(255,255,255,0.5);">({year})</span>
+                        </div>
+                        """, unsafe_allow_html=True)
+                else:
+                    st.caption("No watchlist found")
+            
+            with lb_tab2:
+                if activity:
+                    for item in activity[:8]:
+                        title = item.get("title", "")
+                        has_rating = item.get("has_rating", False)
+                        rating_html = ' <span style="color: #00e054; font-weight: 700;">★</span>' if has_rating else ''
+                        
+                        st.markdown(f"""
+                        <div style="background: linear-gradient(135deg, rgba(255, 136, 0, 0.15) 0%, rgba(0, 210, 0, 0.1) 100%);
+                                    border: 1px solid rgba(255, 136, 0, 0.3); border-radius: 10px; padding: 0.6rem 0.8rem;
+                                    margin-bottom: 0.4rem;">
+                            <strong>{title}</strong>{rating_html}
+                        </div>
+                        """, unsafe_allow_html=True)
+                else:
+                    st.caption("No recent activity")
+                    
         except Exception as e:
-            st.caption(f"Could not load: {e}")
+            st.caption(f"Could not load Letterboxd: {e}")
     else:
         st.caption("Add LETTERBOXD_USERNAME to secrets")
+    
+    st.divider()
+    
+    # In Cinemas Now (Vue / UK)
+    st.markdown("""
+    <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem;">
+        <span style="font-size: 1.5rem;">🎥</span>
+        <span style="font-weight: 800; font-size: 1.2rem; background: linear-gradient(135deg, #005293, #00a8e8);
+                     -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">At Vue Basingstoke</span>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    try:
+        # Try Vue API first, fall back to now_playing
+        vue_films = et.get_vue_cinema_listings("10032")  # Basingstoke
+        
+        if not vue_films:
+            # Fallback to TMDb now_playing
+            now_playing = et.get_now_playing("GB")
+            vue_films = [{"title": m.get("title", ""), "rating": f"⭐ {m.get('vote_average', 0):.1f}"} for m in now_playing[:8]]
+        
+        if vue_films:
+            for film in vue_films[:8]:
+                title = film.get("title", "Unknown")
+                rating = film.get("rating", "")
+                
+                st.markdown(f"""
+                <div class="vue-card">
+                    <strong>{title}</strong>
+                    <span style="float: right; font-size: 0.8rem; color: rgba(255,255,255,0.6);">{rating}</span>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.caption("Could not load cinema listings")
+    except Exception as e:
+        st.caption(f"Cinema listings: {e}")
 
 # ============================================================
-# MIDDLE COLUMN: AI Movie Coach
+# MIDDLE COLUMN: Coming Soon + AI Coach
 # ============================================================
 
 with mid_col:
+    # Coming Soon Section
     st.markdown("""
-    <div class="section-header">
-        <span class="icon">🤖</span>
-        <span class="text">AI Movie Coach</span>
+    <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem;">
+        <span style="font-size: 1.5rem;">🗓️</span>
+        <span style="font-weight: 800; font-size: 1.2rem; background: linear-gradient(135deg, #f59e0b, #ef4444);
+                     -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">Coming to Cinemas</span>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    try:
+        upcoming = et.get_upcoming_movies("GB", pages=3)
+        
+        if upcoming:
+            # Filter to major releases (higher popularity)
+            major = [m for m in upcoming if m.get("popularity", 0) > 15][:12]
+            
+            for movie in major:
+                title = movie.get("title", "Unknown")
+                release_date = movie.get("release_date", "")
+                rating = movie.get("vote_average", 0)
+                poster_path = movie.get("poster_path", "")
+                
+                # Parse date
+                if release_date:
+                    try:
+                        dt = datetime.strptime(release_date, "%Y-%m-%d")
+                        month = dt.strftime("%b").upper()
+                        day = dt.strftime("%d")
+                    except:
+                        month = "TBA"
+                        day = "?"
+                else:
+                    month = "TBA"
+                    day = "?"
+                
+                col1, col2 = st.columns([1, 5])
+                with col1:
+                    st.markdown(f"""
+                    <div class="release-date">
+                        <div class="month">{month}</div>
+                        <div class="day">{day}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with col2:
+                    st.markdown(f"**{title}**")
+                    if rating > 0:
+                        st.caption(f"⭐ {rating:.1f}")
+        else:
+            st.caption("No upcoming releases found")
+    except Exception as e:
+        st.caption(f"Could not load upcoming: {e}")
+    
+    st.divider()
+    
+    # AI Movie Coach
+    st.markdown("""
+    <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem;">
+        <span style="font-size: 1.5rem;">🤖</span>
+        <span style="font-weight: 800; font-size: 1.2rem; background: linear-gradient(135deg, #8b5cf6, #ec4899);
+                     -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">AI Movie Coach</span>
     </div>
     """, unsafe_allow_html=True)
     
@@ -485,10 +409,10 @@ with mid_col:
     c1, c2, c3 = st.columns(3)
     with c1:
         if st.button("🎯 Recommend", key="ent_recommend", use_container_width=True):
-            st.session_state.ent_pending = "Based on my Letterboxd activity and watchlist, recommend 5 movies I should watch next. Consider my taste and what I've enjoyed recently."
+            st.session_state.ent_pending = "Based on my Letterboxd activity and watchlist, recommend 5 movies I should watch next. Consider my taste and explain why each would suit me."
     with c2:
-        if st.button("🎲 Mood Pick", key="ent_mood", use_container_width=True):
-            st.session_state.ent_pending = "I can't decide what to watch tonight. Ask me about my mood and suggest something perfect."
+        if st.button("🎲 Tonight?", key="ent_mood", use_container_width=True):
+            st.session_state.ent_pending = "I need help deciding what to watch tonight. Ask me about my mood and suggest something perfect from my watchlist or something new."
     with c3:
         if st.button("🗑️ Clear", key="ent_clear", use_container_width=True):
             st.session_state.ent_chat = []
@@ -526,7 +450,7 @@ Recent Activity (watched/rated):
 Watchlist (wants to watch):
 {watchlist_text}
 
-Based on this viewing history and watchlist, you can understand the user's taste. They seem to enjoy films based on what they've watched and what they want to watch.
+Based on this viewing history and watchlist, you can understand the user's taste.
 
 When recommending:
 - Consider their apparent preferences
@@ -534,8 +458,9 @@ When recommending:
 - Mix well-known and hidden gems
 - Be specific about WHY they'd like each recommendation
 - Group suggestions by mood/genre when appropriate
+- If they ask about their watchlist, help prioritize what to watch
 
-Be conversational, enthusiastic about film, and helpful."""
+Be conversational, enthusiastic about film, and helpful. Keep responses concise but insightful."""
         
         # Call AI
         client = get_openai_client()
@@ -544,25 +469,12 @@ Be conversational, enthusiastic about film, and helpful."""
                 messages = [{"role": "system", "content": context}]
                 messages.extend(st.session_state.ent_chat)
                 
-                # Try GPT-5.1 first
-                if hasattr(client, "responses"):
-                    resp = client.responses.create(
-                        model="gpt-5.1",
-                        input=messages,
-                        max_output_tokens=1500,
-                    )
-                    if hasattr(resp, 'output_text'):
-                        reply = resp.output_text
-                    else:
-                        reply = resp.output[0].content[0].text if resp.output else "No response"
-                else:
-                    resp = client.chat.completions.create(
-                        model="gpt-4o",
-                        messages=messages,
-                        max_tokens=1500
-                    )
-                    reply = resp.choices[0].message.content
-                
+                resp = client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=messages,
+                    max_tokens=1000
+                )
+                reply = resp.choices[0].message.content
                 st.session_state.ent_chat.append({"role": "assistant", "content": reply})
             except Exception as e:
                 st.session_state.ent_chat.append({"role": "assistant", "content": f"Error: {e}"})
@@ -572,19 +484,19 @@ Be conversational, enthusiastic about film, and helpful."""
         st.rerun()
     
     # Display chat history
-    st.markdown("---")
     if st.session_state.ent_chat:
-        chat_container = st.container(height=400)
+        chat_container = st.container(height=300)
         with chat_container:
             for msg in reversed(st.session_state.ent_chat):
                 with st.chat_message(msg["role"]):
                     st.write(msg["content"])
     else:
         st.markdown("""
-        <div style="text-align: center; padding: 2rem; color: rgba(255,255,255,0.5);">
-            <p style="font-size: 2rem;">🎬</p>
+        <div style="text-align: center; padding: 1.5rem; color: rgba(255,255,255,0.5); 
+                    background: rgba(139, 92, 246, 0.1); border-radius: 12px;">
+            <p style="font-size: 1.5rem; margin-bottom: 0.5rem;">🎬</p>
             <p><strong>Your AI Movie Coach</strong></p>
-            <p style="font-size: 0.9rem;">Ask for recommendations, discuss films, or get help deciding what to watch!</p>
+            <p style="font-size: 0.85rem;">Get personalized recommendations based on your Letterboxd!</p>
         </div>
         """, unsafe_allow_html=True)
 
@@ -595,29 +507,28 @@ Be conversational, enthusiastic about film, and helpful."""
 with right_col:
     # Trending Movies
     st.markdown("""
-    <div class="section-header">
-        <span class="icon">🔥</span>
-        <span class="text">Trending Now</span>
+    <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem;">
+        <span style="font-size: 1.5rem;">🔥</span>
+        <span style="font-weight: 800; font-size: 1.2rem; background: linear-gradient(135deg, #f59e0b, #ef4444);
+                     -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">Trending Now</span>
     </div>
     """, unsafe_allow_html=True)
     
     try:
         trending = et.get_trending_movies()
         if trending:
-            # Display as poster grid
             cols = st.columns(3)
             for i, movie in enumerate(trending[:6]):
                 with cols[i % 3]:
                     poster_path = movie.get("poster_path")
                     title = movie.get("title", "Unknown")
                     rating = movie.get("vote_average", 0)
-                    year = (movie.get("release_date") or "")[:4]
                     
                     if poster_path:
                         poster_url = et.get_poster_url(poster_path, "w342")
                         st.image(poster_url, use_column_width=True)
                     
-                    st.caption(f"**{title}** ({year})")
+                    st.caption(f"**{title[:15]}...**" if len(title) > 15 else f"**{title}**")
                     st.caption(f"⭐ {rating:.1f}")
     except Exception as e:
         st.caption(f"Could not load trending: {e}")
@@ -626,16 +537,17 @@ with right_col:
     
     # Quick Search
     st.markdown("""
-    <div class="section-header">
-        <span class="icon">🔍</span>
-        <span class="text">Quick Search</span>
+    <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem;">
+        <span style="font-size: 1.5rem;">🔍</span>
+        <span style="font-weight: 800; font-size: 1.2rem; background: linear-gradient(135deg, #60a5fa, #8b5cf6);
+                     -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">Quick Search</span>
     </div>
     """, unsafe_allow_html=True)
     
     search_query = st.text_input("Search movies or TV shows...", key="ent_search", label_visibility="collapsed")
     
     if search_query:
-        search_type = st.radio("Type", ["Movies", "TV Shows"], horizontal=True, key="search_type")
+        search_type = st.radio("Type", ["Movies", "TV Shows"], horizontal=True, key="search_type", label_visibility="collapsed")
         
         try:
             if search_type == "Movies":
@@ -644,22 +556,18 @@ with right_col:
                 results = et.search_tv(search_query)
             
             if results:
-                for item in results[:5]:
+                for item in results[:6]:
                     title = item.get("title") or item.get("name", "Unknown")
                     year = (item.get("release_date") or item.get("first_air_date") or "")[:4]
                     rating = item.get("vote_average", 0)
                     
-                    col1, col2 = st.columns([4, 1])
-                    with col1:
-                        st.markdown(f"**{title}** ({year}) ⭐ {rating:.1f}")
-                    with col2:
-                        if st.button("➕", key=f"add_{item.get('id', title)}", help="Add to watchlist"):
-                            sm.add_to_watchlist(
-                                title=title,
-                                content_type="movie" if search_type == "Movies" else "tv",
-                                status="to_watch"
-                            )
-                            st.success("Added!")
+                    st.markdown(f"""
+                    <div style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); 
+                                border-radius: 10px; padding: 0.6rem 0.8rem; margin-bottom: 0.4rem;">
+                        <strong>{title}</strong> <span style="color: rgba(255,255,255,0.5);">({year})</span>
+                        <span style="float: right;">⭐ {rating:.1f}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
             else:
                 st.caption("No results found")
         except Exception as e:
