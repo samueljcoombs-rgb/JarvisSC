@@ -288,16 +288,18 @@ def get_letterboxd_activity(username: str = None) -> Dict[str, List[Dict]]:
             
             # Letterboxd watchlist uses poster-container with data attributes
             posters = soup.select('li.poster-container')
+            
+            # Try alternative selectors if primary fails
+            if not posters:
+                posters = soup.select('.film-poster') or soup.select('[data-film-slug]')
+                if page_num == 1:
+                    result["alt_posters_found"] = len(posters)
+            
             page_info["posters"] = len(posters)
             
             # Store count from first page
             if page_num == 1:
                 result["posters_found"] = len(posters)
-                
-                if not posters:
-                    # Try alternative selectors
-                    posters = soup.select('.film-poster') or soup.select('[data-film-slug]')
-                    result["alt_posters_found"] = len(posters)
             
             # No posters = end of watchlist
             if not posters:
