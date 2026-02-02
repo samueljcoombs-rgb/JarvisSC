@@ -1,621 +1,470 @@
-# modules/entertainment_tools.py
+# app.py
 """
-Entertainment Tools for Jarvis
-Movies, TV Shows, Gaming, Letterboxd integration, and watchlist management.
+Jarvis AI Dashboard - Main Application
+Multi-page Streamlit app with Google Sheets persistence
 """
-from __future__ import annotations
 import os
 import json
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
-from zoneinfo import ZoneInfo
-
-import requests
-import feedparser
+import time
+from datetime import datetime
+from pathlib import Path
+import importlib.util
 import streamlit as st
+from openai import OpenAI
 
+# Import sheets memory for persistent storage
 try:
     from modules import sheets_memory as sm
+    from modules import global_styles as gs
+    SHEETS_AVAILABLE = True
 except ImportError:
-    import sheets_memory as sm
+    SHEETS_AVAILABLE = False
 
-TZ = ZoneInfo("Europe/London")
-TMDB_BASE = "https://api.themoviedb.org/3"
-TMDB_IMG_BASE = "https://image.tmdb.org/t/p"
+# Legacy memory import for backwards compatibility
+import memory
 
-# ============================================================
-# Image/Poster Helpers
-# ============================================================
+BASE_DIR = Path(__file__).parent
+MODULES_DIR = BASE_DIR / "modules"
+TEMP_CHAT_FILE = BASE_DIR / "temp_chat.json"
+CHAT_SESSIONS_FILE = BASE_DIR / "chat_sessions.json"
 
-def get_poster_url(poster_path: str, size: str = "w500") -> Optional[str]:
-    """Get full poster URL from TMDB poster path.
-    
-    Args:
-        poster_path: The poster path from TMDB (e.g., "/abc123.jpg")
-        size: Image size - w92, w154, w185, w342, w500, w780, original
-    
-    Returns:
-        Full URL to the poster image, or None if no path provided
-    """
-    if not poster_path:
-        return None
-    return f"{TMDB_IMG_BASE}/{size}{poster_path}"
+# ----- Model selection -----
+PREFERRED_ENV = os.getenv("PREFERRED_OPENAI_MODEL", "").strip()
 
-# ============================================================
-# API Helpers
-# ============================================================
-
-def _tmdb_api_key() -> Optional[str]:
-    return st.secrets.get("TMDB_API_KEY") or os.getenv("TMDB_API_KEY")
-
-def _letterboxd_username() -> Optional[str]:
-    return st.secrets.get("LETTERBOXD_USERNAME") or os.getenv("LETTERBOXD_USERNAME")
-
-def _tmdb_get(endpoint: str, params: Dict = None) -> Optional[Dict]:
-    """Make a TMDB API request."""
-    api_key = _tmdb_api_key()
+def _init_client() -> OpenAI:
+    api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        return None
-    
-    params = params or {}
-    params["api_key"] = api_key
-    
-    try:
-        r = requests.get(f"{TMDB_BASE}{endpoint}", params=params, timeout=10)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        st.warning(f"TMDB API error: {e}")
-        return None
-
-# ============================================================
-# Movie Functions
-# ============================================================
-
-@st.cache_data(ttl=3600)
-def get_upcoming_movies(region: str = "GB", pages: int = 2) -> List[Dict]:
-    """Get upcoming movies from TMDB."""
-    movies = []
-    for page in range(1, pages + 1):
-        data = _tmdb_get("/movie/upcoming", {
-            "region": region,
-            "page": page,
-            "language": "en-GB"
-        })
-        if data and "results" in data:
-            movies.extend(data["results"])
-    
-    # Sort by release date
-    movies.sort(key=lambda x: x.get("release_date", "9999"))
-    return movies
-
-@st.cache_data(ttl=3600)
-def get_now_playing(region: str = "GB") -> List[Dict]:
-    """Get movies currently in theaters."""
-    data = _tmdb_get("/movie/now_playing", {
-        "region": region,
-        "language": "en-GB"
-    })
-    return data.get("results", []) if data else []
-
-@st.cache_data(ttl=3600)
-def get_vue_cinema_listings(venue_id: str = "10032") -> List[Dict]:
-    """
-    Get what's showing at a Vue cinema.
-    Default venue_id 10032 = Vue Basingstoke
-    Other venues: 10029=Reading, 10084=Camberley, 10031=Farnborough
-    """
-    try:
-        # Vue's API endpoint for cinema listings
-        url = f"https://www.myvue.com/api/microservice/showings/cinemas/{venue_id}/films"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "application/json"
-        }
-        r = requests.get(url, headers=headers, timeout=10)
-        if r.status_code == 200:
-            data = r.json()
-            films = []
-            for film in data.get("films", data) if isinstance(data, dict) else data:
-                if isinstance(film, dict):
-                    films.append({
-                        "title": film.get("title", film.get("name", "Unknown")),
-                        "poster": film.get("posterUrl", film.get("poster", "")),
-                        "rating": film.get("rating", ""),
-                        "runtime": film.get("runningTime", film.get("runtime", "")),
-                        "synopsis": film.get("synopsis", "")[:150] if film.get("synopsis") else ""
-                    })
-            return films
-    except Exception as e:
-        pass
-    
-    # Fallback: return now_playing as proxy for Vue listings
-    return []
-
-@st.cache_data(ttl=3600)
-def get_upcoming_releases_2025(region: str = "GB") -> List[Dict]:
-    """Get upcoming major releases for the rest of the year with release dates."""
-    movies = []
-    # Get multiple pages of upcoming
-    for page in range(1, 5):
-        data = _tmdb_get("/movie/upcoming", {
-            "region": region,
-            "page": page,
-            "language": "en-GB"
-        })
-        if data and "results" in data:
-            movies.extend(data["results"])
-    
-    # Filter to only include movies with decent popularity (major releases)
-    major_releases = [m for m in movies if m.get("popularity", 0) > 20]
-    
-    # Sort by release date
-    major_releases.sort(key=lambda x: x.get("release_date", "9999"))
-    return major_releases
-
-@st.cache_data(ttl=3600)
-def get_trending_movies(time_window: str = "week") -> List[Dict]:
-    """Get trending movies."""
-    data = _tmdb_get(f"/trending/movie/{time_window}")
-    return data.get("results", []) if data else []
-
-@st.cache_data(ttl=3600)
-def search_movie(query: str) -> List[Dict]:
-    """Search for a movie."""
-    data = _tmdb_get("/search/movie", {"query": query})
-    return data.get("results", []) if data else []
-
-def get_movie_details(movie_id: int) -> Optional[Dict]:
-    """Get detailed movie info."""
-    return _tmdb_get(f"/movie/{movie_id}", {
-        "append_to_response": "credits,videos,watch/providers"
-    })
-
-# ============================================================
-# TV Show Functions
-# ============================================================
-
-@st.cache_data(ttl=3600)
-def get_trending_tv(time_window: str = "week") -> List[Dict]:
-    """Get trending TV shows."""
-    data = _tmdb_get(f"/trending/tv/{time_window}")
-    return data.get("results", []) if data else []
-
-@st.cache_data(ttl=3600)
-def get_popular_tv() -> List[Dict]:
-    """Get popular TV shows."""
-    data = _tmdb_get("/tv/popular")
-    return data.get("results", []) if data else []
-
-@st.cache_data(ttl=3600)
-def search_tv(query: str) -> List[Dict]:
-    """Search for a TV show."""
-    data = _tmdb_get("/search/tv", {"query": query})
-    return data.get("results", []) if data else []
-
-def get_tv_details(tv_id: int) -> Optional[Dict]:
-    """Get detailed TV show info."""
-    return _tmdb_get(f"/tv/{tv_id}", {
-        "append_to_response": "credits,videos"
-    })
-
-@st.cache_data(ttl=3600)
-def get_tv_season(tv_id: int, season_num: int) -> Optional[Dict]:
-    """Get season details including episodes."""
-    return _tmdb_get(f"/tv/{tv_id}/season/{season_num}")
-
-# ============================================================
-# Letterboxd Integration (via RSS)
-# ============================================================
-
-@st.cache_data(ttl=1800)
-def get_letterboxd_activity(username: str = None) -> Dict[str, List[Dict]]:
-    """Get Letterboxd activity via RSS feed."""
-    username = username or _letterboxd_username()
-    if not username:
-        return {"error": "No Letterboxd username configured", "activity": [], "watchlist": []}
-    
-    result = {"activity": [], "watchlist": [], "username": username}
-    
-    # Activity feed (diary/reviews)
-    try:
-        feed = feedparser.parse(f"https://letterboxd.com/{username}/rss/")
-        for entry in feed.entries[:20]:
-            item = {
-                "title": entry.get("title", ""),
-                "link": entry.get("link", ""),
-                "published": entry.get("published", ""),
-                "description": entry.get("description", "")[:200] if entry.get("description") else ""
-            }
-            # Try to extract rating if present
-            if "★" in entry.get("title", ""):
-                item["has_rating"] = True
-            result["activity"].append(item)
-    except Exception as e:
-        result["activity_error"] = str(e)
-    
-    # Watchlist feed - try multiple field names
-    try:
-        watchlist_feed = feedparser.parse(f"https://letterboxd.com/{username}/watchlist/rss/")
-        for entry in watchlist_feed.entries[:30]:
-            # Try different field names that Letterboxd might use
-            title = (entry.get("letterboxd_filmtitle") or 
-                    entry.get("title") or 
-                    entry.get("letterboxd_filmname") or
-                    "Unknown")
-            year = (entry.get("letterboxd_filmyear") or 
-                   entry.get("year") or 
-                   "")
-            
-            # Clean title - remove any "- Watchlist" suffix
-            if " - " in title:
-                title = title.split(" - ")[0]
-            
-            item = {
-                "title": title,
-                "link": entry.get("link", ""),
-                "year": str(year) if year else ""
-            }
-            result["watchlist"].append(item)
-    except Exception as e:
-        result["watchlist_error"] = str(e)
-    
-    return result
-
-# ============================================================
-# Entertainment News
-# ============================================================
-
-@st.cache_data(ttl=1800)
-def get_entertainment_news() -> List[Dict]:
-    """Get entertainment news from various RSS sources."""
-    news = []
-    
-    # Entertainment RSS feeds
-    feeds = [
-        ("Variety", "https://variety.com/feed/"),
-        ("IGN", "https://feeds.feedburner.com/ign/all"),
-        ("The Verge (Entertainment)", "https://www.theverge.com/rss/entertainment/index.xml"),
-    ]
-    
-    for source, url in feeds:
         try:
-            feed = feedparser.parse(url)
-            for entry in feed.entries[:5]:
-                news.append({
-                    "source": source,
-                    "title": entry.get("title", ""),
-                    "link": entry.get("link", ""),
-                    "published": entry.get("published", ""),
-                    "summary": (entry.get("summary", "") or "")[:150]
-                })
+            api_key = st.secrets["OPENAI_API_KEY"]
         except Exception:
-            continue
-    
-    # Sort by date (newest first)
-    news.sort(key=lambda x: x.get("published", ""), reverse=True)
-    return news[:15]
+            api_key = None
+    if not api_key:
+        st.error("Missing OPENAI_API_KEY.")
+        st.stop()
+    return OpenAI(api_key=api_key)
 
-# ============================================================
-# Watchlist Management
-# ============================================================
+client = _init_client()
 
-def add_to_watchlist(title: str, media_type: str = "movie", 
-                     tmdb_id: int = None, platform: str = "", notes: str = "") -> Dict:
-    """Add item to watchlist in Google Sheets."""
-    return sm.add_to_watchlist(
-        title=title,
-        media_type=media_type,
-        platform=platform,
-        notes=notes
+def _select_best_model(client: OpenAI) -> str:
+    if PREFERRED_ENV:
+        return PREFERRED_ENV
+    try:
+        names = {m.id for m in client.models.list().data}
+        for candidate in ["gpt-5", "gpt-latest", "gpt-4.1", "gpt-4o", "gpt-4.1-mini"]:
+            if candidate in names:
+                return candidate
+    except Exception:
+        pass
+    return "gpt-4o"
+
+JARVIS_MODEL = _select_best_model(client)
+
+# ----- JSON helpers -----
+def safe_load_json(path: Path, default):
+    if path.exists():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return default
+    return default
+
+def safe_save_json(path: Path, data):
+    try:
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        tmp.replace(path)
+    except Exception as e:
+        st.warning(f"⚠️ Could not save {path.name}: {e}")
+
+# ----- Module hot-loader -----
+def backup_module(name: str):
+    src = MODULES_DIR / f"{name}.py"
+    dst = MODULES_DIR / f"{name}_backup.py"
+    if src.exists():
+        dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+
+def safe_write_module(name: str, code: str) -> bool:
+    path = MODULES_DIR / f"{name}.py"
+    if not path.exists():
+        st.error(f"Missing module {name}.py")
+        return False
+    try:
+        compile(code, str(path), "exec")
+    except SyntaxError as e:
+        st.error(f"❌ Syntax error in {name}.py: {e}")
+        return False
+    backup_module(name)
+    tmp = path.with_suffix(".py.tmp")
+    tmp.write_text(code, encoding="utf-8")
+    tmp.replace(path)
+    st.success(f"✅ {name}.py updated.")
+    return True
+
+def load_module(name: str):
+    try:
+        path = MODULES_DIR / f"{name}.py"
+        spec = importlib.util.spec_from_file_location(name, path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception as e:
+        st.error(f"⚠️ Failed to load {name}: {e}")
+        return None
+
+# ----- Memory Functions -----
+def get_memory_text():
+    """Get memory summary from sheets or local."""
+    if SHEETS_AVAILABLE:
+        try:
+            return sm.get_memory_summary()
+        except Exception:
+            pass
+    return memory.recent_summary()
+
+def save_chat_to_sheets(role: str, content: str):
+    """Save chat message to Google Sheets."""
+    if SHEETS_AVAILABLE:
+        try:
+            session_id = st.session_state.get("session_id", str(int(time.time())))
+            sm.save_chat_message(role, content, session_id)
+        except Exception as e:
+            pass  # Silently fail, local backup exists
+
+# ----- OpenAI call -----
+def call_jarvis(chat_history, mem_text):
+    sys = (
+        "You are Jarvis, a sophisticated AI assistant inside a Streamlit dashboard. "
+        "You help with daily planning, health tracking, goal setting, entertainment, travel, and more. "
+        "You have access to the user's data stored in Google Sheets including their health logs, "
+        "workout history, bucket list, yearly goals, and travel plans. "
+        "Be helpful, proactive, and personalized. "
+        f"\n\nMemory summary:\n{mem_text}"
     )
+    msgs = [{"role": "system", "content": sys}, *chat_history]
+    resp = client.chat.completions.create(model=JARVIS_MODEL, messages=msgs)
+    return resp.choices[0].message.content
 
-def get_watchlist(status: str = None, media_type: str = None) -> List[Dict]:
-    """Get watchlist from Google Sheets."""
-    return sm.get_watchlist(status=status, media_type=media_type)
+# ----- Page Config -----
+st.set_page_config(
+    page_title="Jarvis Dashboard",
+    page_icon="🤖",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
 
-def update_watchlist_item(item_id: str, updates: Dict) -> Dict:
-    """Update a watchlist item."""
-    return sm.update_watchlist_item(item_id, updates)
+# Inject global styles
+if SHEETS_AVAILABLE:
+    gs.inject_global_styles()
 
-def mark_as_watched(item_id: str) -> Dict:
-    """Mark a watchlist item as watched."""
-    return sm.update_watchlist_item(item_id, {"status": "watched"})
+# ----- Session State -----
+if "chat" not in st.session_state:
+    st.session_state.chat = safe_load_json(TEMP_CHAT_FILE, [])
+if "last_processed_index" not in st.session_state:
+    st.session_state.last_processed_index = -1
+if "session_id" not in st.session_state:
+    st.session_state.session_id = str(int(time.time()))
 
-# ============================================================
-# TV Episode Tracking
-# ============================================================
+# ----- Custom CSS for Main Page - PREMIUM DESIGN -----
+st.markdown("""
+<style>
+/* Animated gradient background for header */
+@keyframes gradientShift {
+    0% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
+}
 
-def track_show(title: str, current_season: int = 1, current_episode: int = 1,
-               platform: str = "", notes: str = "") -> Dict:
-    """Add a show to track."""
-    return sm.add_to_watchlist(
-        title=title,
-        media_type="tv_tracking",
-        season=current_season,
-        episode=current_episode,
-        platform=platform,
-        notes=notes
+@keyframes float {
+    0%, 100% { transform: translateY(0px); }
+    50% { transform: translateY(-5px); }
+}
+
+@keyframes pulse-glow {
+    0%, 100% { box-shadow: 0 8px 32px rgba(99, 102, 241, 0.4); }
+    50% { box-shadow: 0 8px 48px rgba(139, 92, 246, 0.6); }
+}
+
+@keyframes shimmer {
+    0% { background-position: -200% center; }
+    100% { background-position: 200% center; }
+}
+
+.main-header {
+    background: linear-gradient(-45deg, #0f0c29, #302b63, #24243e, #1a1a2e);
+    background-size: 400% 400%;
+    animation: gradientShift 15s ease infinite;
+    padding: 2rem 2.5rem;
+    border-radius: 24px;
+    margin-bottom: 1.5rem;
+    border: 1px solid rgba(139, 92, 246, 0.3);
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5), 
+                inset 0 1px 0 rgba(255,255,255,0.1);
+    position: relative;
+    overflow: hidden;
+}
+
+.main-header::before {
+    content: '';
+    position: absolute;
+    top: -50%;
+    right: -50%;
+    width: 100%;
+    height: 200%;
+    background: radial-gradient(circle, rgba(139, 92, 246, 0.15) 0%, transparent 60%);
+    animation: float 6s ease-in-out infinite;
+}
+
+.main-header::after {
+    content: '';
+    position: absolute;
+    bottom: -50%;
+    left: -50%;
+    width: 100%;
+    height: 200%;
+    background: radial-gradient(circle, rgba(59, 130, 246, 0.1) 0%, transparent 60%);
+    animation: float 8s ease-in-out infinite reverse;
+}
+
+.main-header h1 {
+    color: white;
+    margin: 0;
+    font-size: 2.8rem;
+    font-weight: 900;
+    background: linear-gradient(135deg, #60a5fa 0%, #a78bfa 50%, #f472b6 100%);
+    background-size: 200% auto;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    animation: shimmer 3s linear infinite;
+    position: relative;
+    z-index: 1;
+    text-shadow: 0 0 40px rgba(139, 92, 246, 0.5);
+}
+
+.main-header p {
+    color: rgba(255,255,255,0.8);
+    margin: 0.5rem 0 0 0;
+    font-size: 1.1rem;
+    font-weight: 500;
+    letter-spacing: 0.5px;
+    position: relative;
+    z-index: 1;
+}
+
+/* Navigation Cards - Glassmorphism Premium */
+.nav-card {
+    background: linear-gradient(145deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.02) 100%);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 20px;
+    padding: 1.5rem;
+    text-align: center;
+    transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    cursor: pointer;
+    text-decoration: none;
+    position: relative;
+    overflow: hidden;
+}
+
+.nav-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent);
+    transition: left 0.5s;
+}
+
+.nav-card:hover::before {
+    left: 100%;
+}
+
+.nav-card:hover {
+    background: linear-gradient(145deg, rgba(255,255,255,0.15) 0%, rgba(255,255,255,0.05) 100%);
+    border-color: rgba(139, 92, 246, 0.5);
+    transform: translateY(-8px) scale(1.02);
+    box-shadow: 0 20px 40px rgba(139, 92, 246, 0.3),
+                0 0 0 1px rgba(139, 92, 246, 0.2);
+}
+
+.nav-card .icon {
+    font-size: 2.8rem;
+    margin-bottom: 0.75rem;
+    filter: drop-shadow(0 4px 8px rgba(0,0,0,0.3));
+    transition: transform 0.3s ease;
+}
+
+.nav-card:hover .icon {
+    transform: scale(1.15);
+}
+
+.nav-card .title {
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: white;
+    margin-bottom: 0.25rem;
+    letter-spacing: 0.3px;
+}
+
+.nav-card .desc {
+    font-size: 0.85rem;
+    color: rgba(255,255,255,0.6);
+    font-weight: 400;
+}
+
+/* Section styling */
+section[data-testid="stVerticalBlock"] > div:has(.nav-card) {
+    transition: all 0.3s ease;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# ----- Header -----
+current_time = datetime.now().strftime("%A, %d %B %Y")
+st.markdown(f"""
+<div class="main-header">
+    <h1>🤖 Jarvis Dashboard</h1>
+    <p>✨ {current_time} • Your AI-powered life assistant</p>
+</div>
+""", unsafe_allow_html=True)
+
+# ----- Navigation Cards -----
+st.markdown("### Quick Navigation")
+
+# Create navigation using columns and buttons
+col1, col2, col3, col4, col5 = st.columns(5)
+
+with col1:
+    st.markdown("""
+    <div class="nav-card">
+        <div class="icon">🏋️</div>
+        <div class="title">Health & Fitness</div>
+        <div class="desc">Track workouts, weight, nutrition</div>
+    </div>
+    """, unsafe_allow_html=True)
+    if st.button("Open Health", key="nav_health", use_container_width=True):
+        st.switch_page("pages/1_🏋️_Health_Fitness.py")
+
+with col2:
+    st.markdown("""
+    <div class="nav-card">
+        <div class="icon">🎬</div>
+        <div class="title">Entertainment</div>
+        <div class="desc">Movies, TV, watchlist</div>
+    </div>
+    """, unsafe_allow_html=True)
+    if st.button("Open Entertainment", key="nav_ent", use_container_width=True):
+        st.switch_page("pages/2_🎬_Entertainment.py")
+
+with col3:
+    st.markdown("""
+    <div class="nav-card">
+        <div class="icon">🎯</div>
+        <div class="title">Goals</div>
+        <div class="desc">Bucket list & yearly goals</div>
+    </div>
+    """, unsafe_allow_html=True)
+    if st.button("Open Goals", key="nav_goals", use_container_width=True):
+        st.switch_page("pages/3_🎯_Goals.py")
+
+with col4:
+    st.markdown("""
+    <div class="nav-card">
+        <div class="icon">✈️</div>
+        <div class="title">Travel</div>
+        <div class="desc">Trips, flights, alerts</div>
+    </div>
+    """, unsafe_allow_html=True)
+    if st.button("Open Travel", key="nav_travel", use_container_width=True):
+        st.switch_page("pages/4_✈️_Travel.py")
+
+with col5:
+    st.markdown("""
+    <div class="nav-card">
+        <div class="icon">📰</div>
+        <div class="title">News</div>
+        <div class="desc">Personalized news feed</div>
+    </div>
+    """, unsafe_allow_html=True)
+    if st.button("Open News", key="nav_news", use_container_width=True):
+        st.switch_page("pages/5_📰_News.py")
+
+st.markdown("---")
+
+# ----- Main Dashboard Content -----
+# Load modules
+layout_mod = load_module("layout_manager")
+chat_mod = load_module("chat_ui")
+weather_mod = load_module("weather_panel")
+podcasts_mod = load_module("podcasts_panel")
+athletic_mod = load_module("athletic_feed")
+todos_mod = load_module("todos_panel")
+
+# Sidebar with memory and sessions
+with st.sidebar:
+    st.markdown("### 🤖 Jarvis")
+    st.caption(f"Model: {JARVIS_MODEL}")
+    
+    with st.expander("🧠 Memory & Sessions", expanded=False):
+        mem_text = get_memory_text()
+        sessions = safe_load_json(CHAT_SESSIONS_FILE, [])
+        
+        st.caption(f"Messages: {len(st.session_state.chat)}")
+        st.caption(f"Sessions: {len(sessions)}")
+        
+        st.divider()
+        st.subheader("Memory Preview")
+        preview = (mem_text or "").strip()
+        if preview:
+            st.write(preview[:300] + "..." if len(preview) > 300 else preview)
+        else:
+            st.write("No memories yet.")
+        
+        new_mem = st.text_input("Add to memory:")
+        if new_mem:
+            if SHEETS_AVAILABLE:
+                sm.add_memory(new_mem, "fact", "manual")
+            memory.add_fact(new_mem, "manual")
+            st.success("Saved.")
+            st.rerun()
+        
+        st.divider()
+        if st.button("💾 Save chat"):
+            sessions.append({
+                "id": int(time.time()),
+                "ts": int(time.time()),
+                "messages": st.session_state.chat
+            })
+            safe_save_json(CHAT_SESSIONS_FILE, sessions)
+            st.success("Saved.")
+            st.rerun()
+        
+        if st.button("🗑️ New chat"):
+            st.session_state.chat = []
+            st.session_state.session_id = str(int(time.time()))
+            safe_save_json(TEMP_CHAT_FILE, [])
+            st.session_state.last_processed_index = -1
+            st.success("Cleared.")
+            st.rerun()
+
+# Render the main layout
+if layout_mod:
+    layout_mod.render(
+        chat=st.session_state.chat,
+        mem_text=get_memory_text(),
+        call_jarvis=call_jarvis,
+        safe_write_module=safe_write_module,
+        safe_save_json=safe_save_json,
+        temp_chat_file=TEMP_CHAT_FILE,
+        memory_module=memory,
+        chat_module=chat_mod,
+        weather_module=weather_mod,
+        podcasts_module=podcasts_mod,
+        athletic_module=athletic_mod,
+        todos_module=todos_mod,
     )
-
-def update_show_progress(item_id: str, season: int, episode: int) -> Dict:
-    """Update show progress."""
-    return sm.update_watchlist_item(item_id, {
-        "season": str(season),
-        "episode": str(episode)
-    })
-
-def get_tracked_shows() -> List[Dict]:
-    """Get shows being tracked."""
-    return sm.get_watchlist(media_type="tv_tracking")
-
-# ============================================================
-# UI Components
-# ============================================================
-
-def _poster_url(path: str, size: str = "w342") -> str:
-    """Get full poster URL."""
-    if not path:
-        return ""
-    return f"{TMDB_IMG_BASE}/{size}{path}"
-
-def render_movie_card(movie: Dict, show_add_btn: bool = True):
-    """Render a movie card."""
-    col1, col2 = st.columns([1, 3])
-    
-    with col1:
-        poster = _poster_url(movie.get("poster_path"), "w185")
-        if poster:
-            st.image(poster, width=120)
-        else:
-            st.markdown("🎬")
-    
-    with col2:
-        title = movie.get("title", "Unknown")
-        year = (movie.get("release_date") or "")[:4]
-        rating = movie.get("vote_average", 0)
-        
-        st.markdown(f"**{title}** ({year})")
-        
-        if rating:
-            stars = "⭐" * int(rating / 2)
-            st.caption(f"{stars} {rating:.1f}/10")
-        
-        overview = movie.get("overview", "")
-        if overview:
-            st.caption(overview[:150] + "..." if len(overview) > 150 else overview)
-        
-        if show_add_btn:
-            if st.button("➕ Add to Watchlist", key=f"add_movie_{movie.get('id')}"):
-                result = add_to_watchlist(
-                    title=f"{title} ({year})",
-                    media_type="movie",
-                    tmdb_id=movie.get("id")
-                )
-                if result.get("ok"):
-                    st.success("Added to watchlist!")
-                else:
-                    st.error("Failed to add")
-
-def render_tv_card(show: Dict, show_add_btn: bool = True):
-    """Render a TV show card."""
-    col1, col2 = st.columns([1, 3])
-    
-    with col1:
-        poster = _poster_url(show.get("poster_path"), "w185")
-        if poster:
-            st.image(poster, width=120)
-        else:
-            st.markdown("📺")
-    
-    with col2:
-        title = show.get("name", "Unknown")
-        year = (show.get("first_air_date") or "")[:4]
-        rating = show.get("vote_average", 0)
-        
-        st.markdown(f"**{title}** ({year})")
-        
-        if rating:
-            st.caption(f"⭐ {rating:.1f}/10")
-        
-        overview = show.get("overview", "")
-        if overview:
-            st.caption(overview[:150] + "..." if len(overview) > 150 else overview)
-        
-        if show_add_btn:
-            if st.button("📺 Track Show", key=f"track_tv_{show.get('id')}"):
-                result = track_show(
-                    title=f"{title} ({year})",
-                    platform=""
-                )
-                if result.get("ok"):
-                    st.success("Now tracking!")
-                else:
-                    st.error("Failed to add")
-
-def render_upcoming_movies():
-    """Render upcoming movies section."""
-    st.markdown("### 🎬 Upcoming Releases")
-    
-    movies = get_upcoming_movies()
-    if not movies:
-        st.info("No upcoming movies found. Check your TMDB_API_KEY.")
-        return
-    
-    # Filter to actually upcoming
-    today = datetime.now().date().isoformat()
-    upcoming = [m for m in movies if (m.get("release_date") or "") >= today][:10]
-    
-    for movie in upcoming:
-        with st.container():
-            render_movie_card(movie)
-            release = movie.get("release_date", "TBA")
-            st.caption(f"📅 Release: {release}")
-            st.divider()
-
-def render_trending():
-    """Render trending movies and TV."""
-    tab1, tab2 = st.tabs(["🎬 Movies", "📺 TV Shows"])
-    
-    with tab1:
-        movies = get_trending_movies()
-        if movies:
-            for movie in movies[:8]:
-                render_movie_card(movie)
-                st.divider()
-        else:
-            st.info("Could not load trending movies")
-    
-    with tab2:
-        shows = get_trending_tv()
-        if shows:
-            for show in shows[:8]:
-                render_tv_card(show)
-                st.divider()
-        else:
-            st.info("Could not load trending shows")
-
-def render_watchlist_manager():
-    """Render watchlist management UI."""
-    st.markdown("### 📝 My Watchlist")
-    
-    tab1, tab2, tab3 = st.tabs(["To Watch", "Watched", "TV Tracking"])
-    
-    with tab1:
-        items = get_watchlist(status="to_watch")
-        movies = [i for i in items if i.get("type") == "movie"]
-        
-        if movies:
-            for item in movies:
-                col1, col2, col3 = st.columns([3, 1, 1])
-                with col1:
-                    st.markdown(f"🎬 **{item.get('title')}**")
-                    if item.get("notes"):
-                        st.caption(item["notes"])
-                with col2:
-                    if item.get("platform"):
-                        st.caption(f"📍 {item['platform']}")
-                with col3:
-                    if st.button("✅", key=f"watched_{item.get('id')}"):
-                        mark_as_watched(item.get("id"))
-                        st.rerun()
-                st.divider()
-        else:
-            st.info("No movies in watchlist")
-    
-    with tab2:
-        items = get_watchlist(status="watched")
-        if items:
-            for item in items[-10:]:
-                st.markdown(f"✅ ~~{item.get('title')}~~")
-        else:
-            st.info("No watched items")
-    
-    with tab3:
-        shows = get_tracked_shows()
-        if shows:
-            for show in shows:
-                col1, col2 = st.columns([3, 1])
-                with col1:
-                    season = show.get("season", "1")
-                    episode = show.get("episode", "1")
-                    st.markdown(f"📺 **{show.get('title')}**")
-                    st.caption(f"Season {season}, Episode {episode}")
-                with col2:
-                    new_ep = st.number_input(
-                        "Ep",
-                        min_value=1,
-                        value=int(episode) if episode else 1,
-                        key=f"ep_{show.get('id')}"
-                    )
-                    if new_ep != int(episode or 1):
-                        if st.button("💾", key=f"save_ep_{show.get('id')}"):
-                            update_show_progress(show.get("id"), int(season), new_ep)
-                            st.rerun()
-                st.divider()
-        else:
-            st.info("No shows being tracked")
-
-def render_letterboxd():
-    """Render Letterboxd integration."""
-    st.markdown("### 🎬 Letterboxd")
-    
-    data = get_letterboxd_activity()
-    
-    if "error" in data:
-        st.warning(data["error"])
-        st.info("Add your username to LETTERBOXD_USERNAME in secrets")
-        return
-    
-    tab1, tab2 = st.tabs(["📝 Recent Activity", "👀 Watchlist"])
-    
-    with tab1:
-        if data.get("activity"):
-            for item in data["activity"][:10]:
-                title = item.get("title", "")
-                link = item.get("link", "")
-                st.markdown(f"[{title}]({link})")
-                if item.get("description"):
-                    st.caption(item["description"][:100])
-                st.divider()
-        else:
-            st.info("No recent activity")
-    
-    with tab2:
-        if data.get("watchlist"):
-            for item in data["watchlist"]:
-                title = item.get("title", "")
-                year = item.get("year", "")
-                link = item.get("link", "")
-                col1, col2 = st.columns([3, 1])
-                with col1:
-                    st.markdown(f"[{title} ({year})]({link})")
-                with col2:
-                    if st.button("➕", key=f"lb_{hash(title)}"):
-                        add_to_watchlist(f"{title} ({year})", "movie")
-                        st.success("Added!")
-        else:
-            st.info("Watchlist empty or not public")
-
-def render_search():
-    """Render search functionality."""
-    st.markdown("### 🔍 Search")
-    
-    query = st.text_input("Search movies or TV shows...", key="entertainment_search")
-    search_type = st.radio("Type", ["Movies", "TV Shows"], horizontal=True, key="search_type")
-    
-    if query:
-        if search_type == "Movies":
-            results = search_movie(query)
-            if results:
-                for movie in results[:5]:
-                    render_movie_card(movie)
-                    st.divider()
-            else:
-                st.info("No movies found")
-        else:
-            results = search_tv(query)
-            if results:
-                for show in results[:5]:
-                    render_tv_card(show)
-                    st.divider()
-            else:
-                st.info("No TV shows found")
-
-def render_entertainment_news():
-    """Render entertainment news."""
-    st.markdown("### 📰 Entertainment News")
-    
-    news = get_entertainment_news()
-    
-    if news:
-        for item in news[:10]:
-            source = item.get("source", "")
-            title = item.get("title", "")
-            link = item.get("link", "")
-            
-            st.markdown(f"**[{title}]({link})**")
-            st.caption(f"📰 {source}")
-            st.divider()
-    else:
-        st.info("Could not load news")
