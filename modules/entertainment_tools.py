@@ -99,6 +99,61 @@ def get_now_playing(region: str = "GB") -> List[Dict]:
     return data.get("results", []) if data else []
 
 @st.cache_data(ttl=3600)
+def get_vue_cinema_listings(venue_id: str = "10032") -> List[Dict]:
+    """
+    Get what's showing at a Vue cinema.
+    Default venue_id 10032 = Vue Basingstoke
+    Other venues: 10029=Reading, 10084=Camberley, 10031=Farnborough
+    """
+    try:
+        # Vue's API endpoint for cinema listings
+        url = f"https://www.myvue.com/api/microservice/showings/cinemas/{venue_id}/films"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json"
+        }
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            films = []
+            for film in data.get("films", data) if isinstance(data, dict) else data:
+                if isinstance(film, dict):
+                    films.append({
+                        "title": film.get("title", film.get("name", "Unknown")),
+                        "poster": film.get("posterUrl", film.get("poster", "")),
+                        "rating": film.get("rating", ""),
+                        "runtime": film.get("runningTime", film.get("runtime", "")),
+                        "synopsis": film.get("synopsis", "")[:150] if film.get("synopsis") else ""
+                    })
+            return films
+    except Exception as e:
+        pass
+    
+    # Fallback: return now_playing as proxy for Vue listings
+    return []
+
+@st.cache_data(ttl=3600)
+def get_upcoming_releases_2025(region: str = "GB") -> List[Dict]:
+    """Get upcoming major releases for the rest of the year with release dates."""
+    movies = []
+    # Get multiple pages of upcoming
+    for page in range(1, 5):
+        data = _tmdb_get("/movie/upcoming", {
+            "region": region,
+            "page": page,
+            "language": "en-GB"
+        })
+        if data and "results" in data:
+            movies.extend(data["results"])
+    
+    # Filter to only include movies with decent popularity (major releases)
+    major_releases = [m for m in movies if m.get("popularity", 0) > 20]
+    
+    # Sort by release date
+    major_releases.sort(key=lambda x: x.get("release_date", "9999"))
+    return major_releases
+
+@st.cache_data(ttl=3600)
 def get_trending_movies(time_window: str = "week") -> List[Dict]:
     """Get trending movies."""
     data = _tmdb_get(f"/trending/movie/{time_window}")
