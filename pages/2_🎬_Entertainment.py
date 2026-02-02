@@ -114,54 +114,60 @@ with st.expander("📰🎮 Entertainment & Gaming News", expanded=True):
             else:
                 filtered = news
             
-            # Build complete HTML with embedded styles
+            # Build complete HTML with 2-row grid
             html_content = '''
             <style>
-            .news-scroll {
-                display: flex;
+            .news-grid {
+                display: grid;
+                grid-template-rows: repeat(2, 1fr);
+                grid-auto-flow: column;
+                grid-auto-columns: 240px;
+                gap: 0.8rem;
                 overflow-x: auto;
-                gap: 1rem;
                 padding: 0.5rem;
                 scroll-behavior: smooth;
             }
-            .news-scroll::-webkit-scrollbar {
+            .news-grid::-webkit-scrollbar {
                 height: 8px;
             }
-            .news-scroll::-webkit-scrollbar-track {
+            .news-grid::-webkit-scrollbar-track {
                 background: rgba(128,128,128,0.1);
                 border-radius: 4px;
             }
-            .news-scroll::-webkit-scrollbar-thumb {
+            .news-grid::-webkit-scrollbar-thumb {
                 background: rgba(128,128,128,0.4);
                 border-radius: 4px;
             }
             .news-card {
-                flex: 0 0 260px;
-                border-radius: 12px;
+                border-radius: 10px;
                 overflow: hidden;
                 background: #1e1e2e;
                 border: 1px solid rgba(128,128,128,0.3);
                 transition: transform 0.2s, box-shadow 0.2s;
+                display: flex;
+                flex-direction: column;
             }
             .news-card:hover {
-                transform: translateY(-4px);
-                box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+                transform: translateY(-3px);
+                box-shadow: 0 6px 20px rgba(0,0,0,0.3);
+                border-color: #8b5cf6;
             }
             .news-card img {
                 width: 100%;
-                height: 130px;
+                height: 100px;
                 object-fit: cover;
             }
             .news-card-body {
-                padding: 0.7rem;
+                padding: 0.5rem;
+                flex: 1;
             }
             .news-badge {
                 display: inline-block;
-                padding: 2px 8px;
+                padding: 2px 6px;
                 border-radius: 4px;
-                font-size: 0.65rem;
+                font-size: 0.6rem;
                 font-weight: 600;
-                margin-bottom: 0.4rem;
+                margin-bottom: 0.3rem;
             }
             .news-badge.gaming {
                 background: linear-gradient(135deg, #10b981, #059669);
@@ -172,12 +178,12 @@ with st.expander("📰🎮 Entertainment & Gaming News", expanded=True):
                 color: white;
             }
             .news-title {
-                font-size: 0.8rem;
-                line-height: 1.3;
+                font-size: 0.75rem;
+                line-height: 1.25;
                 margin: 0;
                 color: #e0e0e0;
                 display: -webkit-box;
-                -webkit-line-clamp: 3;
+                -webkit-line-clamp: 2;
                 -webkit-box-orient: vertical;
                 overflow: hidden;
             }
@@ -186,11 +192,10 @@ with st.expander("📰🎮 Entertainment & Gaming News", expanded=True):
                 text-decoration: none;
             }
             .news-title a:hover {
-                color: #8b5cf6;
-                text-decoration: underline;
+                color: #a78bfa;
             }
             </style>
-            <div class="news-scroll">
+            <div class="news-grid">
             '''
             
             for article in filtered[:news_count]:
@@ -204,11 +209,11 @@ with st.expander("📰🎮 Entertainment & Gaming News", expanded=True):
                 badge_icon = "🎮" if is_gaming else "🎬"
                 
                 if not image:
-                    image = "https://placehold.co/260x130/1a1a2e/8b5cf6?text=News"
+                    image = "https://placehold.co/240x100/1a1a2e/8b5cf6?text=News"
                 
                 html_content += f'''
                 <div class="news-card">
-                    <img src="{image}" alt="" onerror="this.src='https://placehold.co/260x130/1a1a2e/8b5cf6?text=News'">
+                    <img src="{image}" alt="" onerror="this.src='https://placehold.co/240x100/1a1a2e/8b5cf6?text=News'">
                     <div class="news-card-body">
                         <span class="news-badge {badge_class}">{badge_icon} {source}</span>
                         <p class="news-title"><a href="{link}" target="_blank">{title}</a></p>
@@ -218,9 +223,8 @@ with st.expander("📰🎮 Entertainment & Gaming News", expanded=True):
             
             html_content += '</div>'
             
-            # Use components.html for proper rendering
             import streamlit.components.v1 as components
-            components.html(html_content, height=220, scrolling=True)
+            components.html(html_content, height=380, scrolling=False)
         else:
             st.info("No news available")
     except Exception as e:
@@ -453,14 +457,29 @@ with right_col:
         activity = lb_data.get("activity", [])
         watchlist = lb_data.get("watchlist", [])
         
-        # ALWAYS show debug for now to diagnose issue
-        with st.expander("🔧 Debug Info", expanded=False):
+        # Debug panel
+        with st.expander("🔧 Debug Info", expanded=True):
             st.write(f"**Activity:** {len(activity)} items")
-            st.write(f"**Watchlist:** {len(watchlist)} films (from {lb_data.get('pages_scraped', 1)} pages)")
+            st.write(f"**Watchlist:** {len(watchlist)} films (from {lb_data.get('pages_scraped', 0)} pages)")
             st.write(f"**Status:** {lb_data.get('watchlist_status', 'N/A')}")
+            st.write(f"**Last URL:** {lb_data.get('last_url', 'N/A')}")
+            
+            # Show debug info
+            if lb_data.get('debug_info'):
+                for info in lb_data['debug_info']:
+                    st.write(info)
+            
+            # Show per-page counts
+            for i in range(1, 11):
+                key = f"page_{i}_posters"
+                if key in lb_data:
+                    st.write(f"Page {i}: {lb_data[key]} posters")
             
             if lb_data.get('watchlist_error'):
                 st.error(f"Error: {lb_data.get('watchlist_error')}")
+            
+            if lb_data.get('response_preview'):
+                st.code(lb_data.get('response_preview')[:300], language="html")
             
             if watchlist:
                 st.success(f"✅ Got {len(watchlist)} films!")
