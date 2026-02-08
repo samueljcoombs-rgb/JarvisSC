@@ -319,12 +319,26 @@ def _episode_card(show_display: str, ep: dict, thumb_url: Optional[str], is_sele
         unsafe_allow_html=True,
     )
 
-def _filter_by_day(episodes: List[dict], day_ymd: str) -> List[dict]:
+def _filter_by_day(episodes: List[dict], day_ymd: str, include_yesterday: bool = False) -> List[dict]:
+    """Filter episodes by release date. Optionally include yesterday for 'Today' filter."""
+    from datetime import date
+    
+    target_dates = {day_ymd}
+    
+    if include_yesterday:
+        # Parse the day and add yesterday
+        try:
+            target_date = date.fromisoformat(day_ymd)
+            yesterday = (target_date - timedelta(days=1)).isoformat()
+            target_dates.add(yesterday)
+        except:
+            pass
+    
     out = []
     for ep in episodes:
         try:
             ymd = (ep.get("release_date") or "")[:10]
-            if ymd == day_ymd:
+            if ymd in target_dates:
                 out.append(ep)
         except Exception:
             pass
@@ -355,6 +369,9 @@ def render():
     )
     selected_ymd = values[labels.index(sel_label)]
     is_today = selected_ymd == _today_ymd()
+    
+    if is_today:
+        st.caption("💡 Includes yesterday's episodes (Spotify API can delay new releases)")
 
     cid, cs = _spotify_creds()
     if not cid or not cs:
@@ -371,15 +388,15 @@ def render():
 
         # 1) GB pages
         episodes_gb: List[dict] = _get_show_episodes_paged(sid, use_market=True, is_today=is_today)
-        eps_that_day: List[dict] = _filter_by_day(episodes_gb, selected_ymd)
+        eps_that_day: List[dict] = _filter_by_day(episodes_gb, selected_ymd, include_yesterday=is_today)
 
         # 2) If empty (region lag), fetch GLOBAL pages and filter
         if not eps_that_day:
             episodes_global: List[dict] = _get_show_episodes_paged(sid, use_market=False, is_today=is_today)
-            eps_that_day = _filter_by_day(episodes_global, selected_ymd)
+            eps_that_day = _filter_by_day(episodes_global, selected_ymd, include_yesterday=is_today)
 
-        # Deterministic order
-        eps_that_day.sort(key=lambda e: ((e.get("release_date") or "")[:10], e.get("name","")), reverse=False)
+        # Deterministic order - newest first
+        eps_that_day.sort(key=lambda e: ((e.get("release_date") or "")[:10], e.get("name","")), reverse=True)
 
         for ep in eps_that_day:
             thumb = _episode_image_url(ep, show_img)
