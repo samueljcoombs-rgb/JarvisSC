@@ -804,3 +804,142 @@ def get_vue_cinema_listings(cinema_slug: str = "basingstoke-festival-place") -> 
         
     except Exception as e:
         return [{"error": str(e)}]
+
+# ============================================================
+# Steam Top Sellers
+# ============================================================
+
+@st.cache_data(ttl=3600)
+def get_steam_top_sellers() -> List[Dict]:
+    """Get Steam top selling games via SteamSpy API."""
+    try:
+        # SteamSpy provides top games data
+        url = "https://steamspy.com/api.php?request=top100in2weeks"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            games = []
+            for app_id, info in list(data.items())[:20]:
+                games.append({
+                    "name": info.get("name", "Unknown"),
+                    "app_id": app_id,
+                    "players": info.get("ccu", 0),  # concurrent users
+                    "price": info.get("price", 0) / 100 if info.get("price") else 0,
+                    "link": f"https://store.steampowered.com/app/{app_id}"
+                })
+            # Sort by players
+            games.sort(key=lambda x: x.get("players", 0), reverse=True)
+            return games
+    except Exception as e:
+        pass
+    return []
+
+# ============================================================
+# Major Game Releases
+# ============================================================
+
+@st.cache_data(ttl=3600)
+def get_major_game_releases() -> List[Dict]:
+    """Get upcoming major game releases from gaming RSS feeds."""
+    releases = []
+    
+    # Parse IGN's upcoming games feed
+    feeds = [
+        "https://www.ign.com/rss/articles/feed?tags=games",
+        "https://www.gamespot.com/feeds/game-news/",
+    ]
+    
+    for feed_url in feeds:
+        try:
+            feed = feedparser.parse(feed_url)
+            for entry in feed.entries[:10]:
+                title = entry.get("title", "")
+                # Look for release-related articles
+                if any(word in title.lower() for word in ["release", "launch", "coming", "announce", "reveal"]):
+                    releases.append({
+                        "title": title[:80],
+                        "link": entry.get("link", ""),
+                        "source": "IGN" if "ign" in feed_url else "GameSpot"
+                    })
+        except:
+            pass
+    
+    return releases[:15]
+
+# ============================================================
+# MMORPG News
+# ============================================================
+
+@st.cache_data(ttl=1800)
+def get_mmorpg_news() -> List[Dict]:
+    """Get MMORPG news from gaming RSS feeds."""
+    news = []
+    
+    feeds = [
+        ("MMORPG.com", "https://www.mmorpg.com/rss/news.xml"),
+        ("MassivelyOP", "https://massivelyop.com/feed/"),
+    ]
+    
+    for source, url in feeds:
+        try:
+            feed = feedparser.parse(url)
+            for entry in feed.entries[:8]:
+                news.append({
+                    "title": entry.get("title", "")[:70],
+                    "link": entry.get("link", ""),
+                    "source": source
+                })
+        except:
+            pass
+    
+    return news[:12]
+
+# ============================================================
+# Major Film Releases (Full Year)
+# ============================================================
+
+@st.cache_data(ttl=7200)
+def get_major_releases_full_year(region: str = "GB") -> List[Dict]:
+    """Get major film releases for the entire year using TMDB discover."""
+    from datetime import datetime
+    
+    movies = []
+    current_year = datetime.now().year
+    
+    # Use discover endpoint for more control
+    # Get highly anticipated films (high popularity + upcoming)
+    for page in range(1, 4):
+        data = _tmdb_get("/discover/movie", {
+            "region": region,
+            "page": page,
+            "language": "en-GB",
+            "primary_release_year": current_year,
+            "sort_by": "popularity.desc",
+            "with_original_language": "en",
+            "vote_count.gte": 0
+        })
+        if data and "results" in data:
+            movies.extend(data["results"])
+    
+    # Also get next year's big releases
+    for page in range(1, 2):
+        data = _tmdb_get("/discover/movie", {
+            "region": region,
+            "page": page,
+            "language": "en-GB",
+            "primary_release_year": current_year + 1,
+            "sort_by": "popularity.desc",
+            "with_original_language": "en"
+        })
+        if data and "results" in data:
+            movies.extend(data["results"])
+    
+    # Filter for major releases (high popularity)
+    major = [m for m in movies if m.get("popularity", 0) > 50]
+    
+    # Sort by release date
+    major.sort(key=lambda x: x.get("release_date", "9999"))
+    
+    return major
+
