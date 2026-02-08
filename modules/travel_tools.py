@@ -28,6 +28,52 @@ def _serpapi_key() -> Optional[str]:
     """Get SerpAPI key for flight searches."""
     return st.secrets.get("SERPAPI_KEY") or os.getenv("SERPAPI_KEY")
 
+def _telegram_config() -> tuple[Optional[str], Optional[str]]:
+    """Get Telegram bot token and chat ID."""
+    token = st.secrets.get("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = st.secrets.get("TELEGRAM_CHAT_ID") or os.getenv("TELEGRAM_CHAT_ID")
+    return token, chat_id
+
+# ============================================================
+# Telegram Notifications
+# ============================================================
+
+def send_telegram_message(message: str, parse_mode: str = "HTML") -> bool:
+    """Send a message via Telegram bot."""
+    token, chat_id = _telegram_config()
+    if not token or not chat_id:
+        return False
+    
+    try:
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        payload = {
+            "chat_id": chat_id,
+            "text": message,
+            "parse_mode": parse_mode
+        }
+        r = requests.post(url, json=payload, timeout=10)
+        return r.status_code == 200
+    except Exception as e:
+        return False
+
+def send_flight_deal_notification(deal: Dict) -> bool:
+    """Send a flight deal notification via Telegram."""
+    route = deal.get("route", "Unknown route")
+    current_price = deal.get("current_price", "?")
+    max_price = deal.get("max_price", "?")
+    airline = deal.get("airline", "")
+    
+    message = f"""✈️ <b>Flight Deal Alert!</b>
+
+🛫 <b>{route}</b>
+💰 Current Price: <b>£{current_price}</b>
+🎯 Your Target: £{max_price}
+{"✈️ Airline: " + airline if airline else ""}
+
+🔗 <a href="https://www.google.com/flights">Book on Google Flights</a>"""
+    
+    return send_telegram_message(message)
+
 # Common airports
 UK_AIRPORTS = {
     "LHR": "London Heathrow",
@@ -244,10 +290,11 @@ def update_flight_alert(alert_id: str, updates: Dict) -> Dict:
     """Update a flight alert."""
     return sm.update_flight_alert(alert_id, updates)
 
-def check_flight_alerts() -> List[Dict]:
+def check_flight_alerts(send_notifications: bool = True) -> List[Dict]:
     """
     Check all active flight alerts against current prices.
     Returns alerts where current price is below max_price.
+    Optionally sends Telegram notifications for deals found.
     """
     alerts = get_flight_alerts(status="active")
     triggered = []
@@ -267,14 +314,26 @@ def check_flight_alerts() -> List[Dict]:
             current_price = estimate["min_price"]
             
             if current_price <= max_price:
-                triggered.append({
+                # Get airport names for nicer display
+                origin_name = UK_AIRPORTS.get(origin, origin)
+                dest_name = POPULAR_DESTINATIONS.get(destination, destination)
+                route = f"{origin_name} → {dest_name}"
+                
+                deal = {
                     "alert": alert,
                     "current_price": current_price,
                     "max_price": max_price,
                     "savings": round(max_price - current_price, 2),
                     "origin": origin,
-                    "destination": destination
-                })
+                    "destination": destination,
+                    "route": route,
+                    "airline": estimate.get("airline", "")
+                }
+                triggered.append(deal)
+                
+                # Send Telegram notification
+                if send_notifications:
+                    send_flight_deal_notification(deal)
             
             # Update last checked
             sm.update_flight_alert(alert.get("alert_id"), {
@@ -283,21 +342,13 @@ def check_flight_alerts() -> List[Dict]:
     
     return triggered
 
-# ============================================================
-# Jack's Flight Club Integration (RSS)
-# ============================================================
 
-@st.cache_data(ttl=1800)
-def get_jacks_flight_club_deals() -> List[Dict]:
+def check_flight_alerts_silent() -> List[Dict]:
     """
-    Get deals from Jack's Flight Club.
-    Note: This requires a public RSS feed or scraping - limited without account.
-    For now, we'll provide instructions for manual integration.
+    Check flight alerts without sending notifications.
+    Used for homepage banner display.
     """
-    # Jack's Flight Club doesn't have a public API or RSS
-    # Users receive deals via email
-    # This is a placeholder for manual entry
-    return []
+    return check_flight_alerts(send_notifications=False)
 
 # ============================================================
 # UI Components
@@ -550,41 +601,6 @@ def render_flight_alerts():
                     st.info("No deals found below your price targets yet")
     else:
         st.info("No active alerts. Create one to track prices!")
-
-def render_jacks_flight_club():
-    """Render Jack's Flight Club section."""
-    st.markdown("### 🎟️ Jack's Flight Club Deals")
-    
-    st.info("""
-    **Jack's Flight Club** sends deals via email - there's no public API.
-    
-    **To integrate:**
-    1. Sign up at [jacksflightclub.com](https://jacksflightclub.com)
-    2. When you see a good deal in your email, add it as a trip here!
-    
-    **Tips:**
-    - Set up email filters to highlight their deals
-    - Act fast - best deals go quickly!
-    - Use the flight search above to verify prices
-    """)
-    
-    # Manual deal entry
-    with st.expander("📝 Add a Deal from Email"):
-        deal_dest = st.text_input("Destination", key="jfc_dest")
-        deal_price = st.text_input("Price", placeholder="e.g., £199 return", key="jfc_price")
-        deal_dates = st.text_input("Valid Dates", placeholder="e.g., Jan-Mar 2025", key="jfc_dates")
-        deal_notes = st.text_area("Deal Details", key="jfc_notes")
-        
-        if st.button("💾 Save Deal", key="save_jfc_deal"):
-            if deal_dest:
-                result = add_travel_plan(
-                    destination=deal_dest,
-                    budget=deal_price,
-                    notes=f"JFC Deal - {deal_dates}\n{deal_notes}"
-                )
-                if result.get("ok"):
-                    st.success("Deal saved!")
-                    st.rerun()
 
 def render_travel_stats():
     """Render travel statistics."""
