@@ -167,22 +167,118 @@ def search_news(
 # RSS Feed Functions
 # ============================================================
 
-@st.cache_data(ttl=1200)
-def get_rss_feed(url: str, max_items: int = 10) -> List[Dict]:
-    """Fetch and parse an RSS feed."""
+def _extract_image_from_entry(entry) -> Optional[str]:
+    """Extract image URL from RSS entry using various methods."""
+    # Method 1: media:content
+    if hasattr(entry, 'media_content') and entry.media_content:
+        for media in entry.media_content:
+            if media.get('medium') == 'image' or media.get('type', '').startswith('image'):
+                return media.get('url')
+            # Some feeds just have url without type
+            url = media.get('url', '')
+            if url and any(ext in url.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']):
+                return url
+    
+    # Method 2: media:thumbnail
+    if hasattr(entry, 'media_thumbnail') and entry.media_thumbnail:
+        return entry.media_thumbnail[0].get('url')
+    
+    # Method 3: enclosure
+    if hasattr(entry, 'enclosures') and entry.enclosures:
+        for enc in entry.enclosures:
+            if enc.get('type', '').startswith('image'):
+                return enc.get('href') or enc.get('url')
+    
+    # Method 4: Parse from summary/content HTML
+    import re
+    content = entry.get('summary', '') or entry.get('content', [{}])[0].get('value', '') if hasattr(entry, 'content') else ''
+    if content:
+        img_match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', content)
+        if img_match:
+            return img_match.group(1)
+    
+    # Method 5: image tag in feed
+    if hasattr(entry, 'image') and entry.image:
+        if isinstance(entry.image, dict):
+            return entry.image.get('href') or entry.image.get('url')
+        return str(entry.image)
+    
+    return None
+
+def _parse_date(date_str: str) -> Optional[datetime]:
+    """Parse various date formats from RSS feeds."""
+    from email.utils import parsedate_to_datetime
+    if not date_str:
+        return None
+    try:
+        return parsedate_to_datetime(date_str)
+    except:
+        pass
+    
+    # Try common formats
+    formats = [
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%d %H:%M:%S",
+        "%a, %d %b %Y %H:%M:%S %z",
+        "%a, %d %b %Y %H:%M:%S %Z",
+    ]
+    for fmt in formats:
+        try:
+            return datetime.strptime(date_str, fmt)
+        except:
+            continue
+    return None
+
+@st.cache_data(ttl=900)
+def get_rss_feed(url: str, max_items: int = 10, max_age_hours: int = 48) -> List[Dict]:
+    """Fetch and parse an RSS feed with images and freshness filter."""
     try:
         feed = feedparser.parse(url)
         articles = []
+        now = datetime.now(TZ)
+        cutoff = now - timedelta(hours=max_age_hours)
         
-        for entry in feed.entries[:max_items]:
+        for entry in feed.entries[:max_items * 2]:  # Fetch more to account for filtered items
+            # Parse and filter by date
+            pub_date = _parse_date(entry.get("published", "") or entry.get("updated", ""))
+            
+            if pub_date:
+                # Make timezone-aware if needed
+                if pub_date.tzinfo is None:
+                    pub_date = pub_date.replace(tzinfo=TZ)
+                
+                # Skip old articles
+                if pub_date < cutoff:
+                    continue
+                
+                # Format relative time
+                age = now - pub_date.astimezone(TZ)
+                if age.total_seconds() < 3600:
+                    age_str = f"{int(age.total_seconds() / 60)}m ago"
+                elif age.total_seconds() < 86400:
+                    age_str = f"{int(age.total_seconds() / 3600)}h ago"
+                else:
+                    age_str = f"{int(age.days)}d ago"
+            else:
+                age_str = ""
+            
+            # Extract image
+            image_url = _extract_image_from_entry(entry)
+            
             article = {
                 "title": entry.get("title", ""),
                 "link": entry.get("link", ""),
                 "published": entry.get("published", ""),
+                "age": age_str,
                 "summary": (entry.get("summary", "") or "")[:200],
                 "source": feed.feed.get("title", "Unknown"),
+                "image": image_url,
             }
             articles.append(article)
+            
+            if len(articles) >= max_items:
+                break
         
         return articles
     except Exception as e:
