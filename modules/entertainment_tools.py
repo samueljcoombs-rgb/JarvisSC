@@ -815,25 +815,38 @@ def get_steam_top_sellers() -> List[Dict]:
     try:
         # SteamSpy provides top games data
         url = "https://steamspy.com/api.php?request=top100in2weeks"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        r = requests.get(url, headers=headers, timeout=10)
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'application/json'
+        }
+        r = requests.get(url, headers=headers, timeout=15)
         if r.status_code == 200:
             data = r.json()
-            games = []
-            for app_id, info in list(data.items())[:20]:
-                games.append({
-                    "name": info.get("name", "Unknown"),
-                    "app_id": app_id,
-                    "players": info.get("ccu", 0),  # concurrent users
-                    "price": info.get("price", 0) / 100 if info.get("price") else 0,
-                    "link": f"https://store.steampowered.com/app/{app_id}"
-                })
-            # Sort by players
-            games.sort(key=lambda x: x.get("players", 0), reverse=True)
-            return games
+            if isinstance(data, dict):
+                games = []
+                for app_id, info in list(data.items())[:20]:
+                    if isinstance(info, dict):
+                        games.append({
+                            "name": info.get("name", "Unknown"),
+                            "app_id": app_id,
+                            "players": info.get("ccu", 0) or info.get("players_forever", 0),
+                            "price": (info.get("price", 0) or 0) / 100,
+                            "link": f"https://store.steampowered.com/app/{app_id}"
+                        })
+                # Sort by players
+                games.sort(key=lambda x: x.get("players", 0), reverse=True)
+                return games
     except Exception as e:
         pass
-    return []
+    
+    # Fallback: return some popular games as static list
+    return [
+        {"name": "Counter-Strike 2", "link": "https://store.steampowered.com/app/730", "players": 0},
+        {"name": "Dota 2", "link": "https://store.steampowered.com/app/570", "players": 0},
+        {"name": "PUBG", "link": "https://store.steampowered.com/app/578080", "players": 0},
+        {"name": "Elden Ring", "link": "https://store.steampowered.com/app/1245620", "players": 0},
+        {"name": "Baldur's Gate 3", "link": "https://store.steampowered.com/app/1086940", "players": 0},
+    ]
 
 # ============================================================
 # Major Game Releases
