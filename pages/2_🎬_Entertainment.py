@@ -349,32 +349,43 @@ with left_col:
     
     # --- COMING SOON (Full Year) ---
     st.subheader("🗓️ Coming Soon")
-    st.caption("Major releases this year")
+    st.caption("Major releases")
     
     try:
-        upcoming = et.get_major_releases_full_year("GB")
+        # Use regular upcoming with more pages
+        upcoming = et.get_upcoming_movies("GB", pages=5)
         if upcoming:
             today = datetime.now().strftime("%Y-%m-%d")
-            # Only future releases
-            future = [m for m in upcoming if m.get("release_date", "0000") >= today][:12]
+            # Filter: future, English, popular
+            future = [m for m in upcoming 
+                     if m.get("release_date", "0000") >= today 
+                     and m.get("original_language") == "en"
+                     and m.get("popularity", 0) > 15]
+            # Sort by date
+            future.sort(key=lambda x: x.get("release_date", "9999"))
             
-            box = st.container(height=200)
-            with box:
-                for movie in future:
-                    title = movie.get("title", "?")
-                    date = movie.get("release_date", "")
-                    tmdb_id = movie.get("id")
-                    if date:
-                        try:
-                            dt = datetime.strptime(date, "%Y-%m-%d")
-                            date_str = dt.strftime("%d %b")
-                        except:
-                            date_str = date
-                    else:
-                        date_str = "TBA"
-                    
-                    url = f"https://www.themoviedb.org/movie/{tmdb_id}" if tmdb_id else "#"
-                    st.write(f"**{date_str}** · [{title}]({url})")
+            if future:
+                box = st.container(height=200)
+                with box:
+                    for movie in future[:15]:
+                        title = movie.get("title", "?")
+                        date = movie.get("release_date", "")
+                        tmdb_id = movie.get("id")
+                        if date:
+                            try:
+                                dt = datetime.strptime(date, "%Y-%m-%d")
+                                date_str = dt.strftime("%d %b")
+                            except:
+                                date_str = date
+                        else:
+                            date_str = "TBA"
+                        
+                        url = f"https://www.themoviedb.org/movie/{tmdb_id}" if tmdb_id else "#"
+                        st.write(f"**{date_str}** · [{title}]({url})")
+            else:
+                st.caption("No upcoming releases found")
+        else:
+            st.caption("Could not load releases")
     except Exception as e:
         st.caption(f"Error: {e}")
     
@@ -508,13 +519,13 @@ with mid_col:
     
     c1, c2, c3 = st.columns(3)
     with c1:
-        if st.button("🎯 Recommend", key="ent_rec", use_column_width=True):
+        if st.button("🎯 Recommend", key="ent_rec", use_container_width=True):
             st.session_state.ent_pending = "Based on my Letterboxd, recommend 5 films I'd love."
     with c2:
-        if st.button("🎲 Tonight?", key="ent_tonight", use_column_width=True):
+        if st.button("🎲 Tonight?", key="ent_tonight", use_container_width=True):
             st.session_state.ent_pending = "Help me decide what to watch tonight."
     with c3:
-        if st.button("🗑️ Clear", key="ent_clear", use_column_width=True):
+        if st.button("🗑️ Clear", key="ent_clear", use_container_width=True):
             st.session_state.ent_chat = []
             st.rerun()
     
@@ -688,17 +699,17 @@ st.divider()
 
 c1, c2, c3, c4, c5 = st.columns(5)
 with c1:
-    if st.button("🏠 Home", use_column_width=True):
+    if st.button("🏠 Home", use_container_width=True):
         st.switch_page("app.py")
 with c2:
-    if st.button("🏋️ Health", use_column_width=True):
+    if st.button("🏋️ Health", use_container_width=True):
         st.switch_page("pages/1_🏋️_Health_Fitness.py")
 with c3:
-    if st.button("🎯 Goals", use_column_width=True):
+    if st.button("🎯 Goals", use_container_width=True):
         st.switch_page("pages/3_🎯_Goals.py")
 with c4:
-    if st.button("✈️ Travel", use_column_width=True):
+    if st.button("✈️ Travel", use_container_width=True):
         st.switch_page("pages/4_✈️_Travel.py")
 with c5:
-    if st.button("📰 News", use_column_width=True):
+    if st.button("📰 News", use_container_width=True):
         st.switch_page("pages/5_📰_News.py")
