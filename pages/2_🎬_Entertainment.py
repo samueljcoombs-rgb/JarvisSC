@@ -347,30 +347,24 @@ with left_col:
     
     st.divider()
     
-    # --- COMING SOON (Full Year) ---
-    st.subheader("🗓️ Coming Soon")
-    st.caption("Major releases")
+    # --- COMING SOON (2026 Major Releases) ---
+    st.subheader("🗓️ Coming Soon 2026")
+    st.caption("[Full list at Movie Insider →](https://www.movieinsider.com/movies/2026)")
     
     try:
-        # Use regular upcoming with more pages
-        upcoming = et.get_upcoming_movies("GB", pages=5)
-        if upcoming:
+        releases = et.get_2026_major_releases()
+        if releases:
             today = datetime.now().strftime("%Y-%m-%d")
-            # Filter: future, English, popular
-            future = [m for m in upcoming 
-                     if m.get("release_date", "0000") >= today 
-                     and m.get("original_language") == "en"
-                     and m.get("popularity", 0) > 15]
-            # Sort by date
-            future.sort(key=lambda x: x.get("release_date", "9999"))
+            # Only future releases
+            future = [r for r in releases if r.get("date", "0000") >= today]
             
             if future:
-                box = st.container(height=200)
+                box = st.container(height=250)
                 with box:
-                    for movie in future[:15]:
+                    for movie in future:
                         title = movie.get("title", "?")
-                        date = movie.get("release_date", "")
-                        tmdb_id = movie.get("id")
+                        date = movie.get("date", "")
+                        studio = movie.get("studio", "")
                         if date:
                             try:
                                 dt = datetime.strptime(date, "%Y-%m-%d")
@@ -380,10 +374,9 @@ with left_col:
                         else:
                             date_str = "TBA"
                         
-                        url = f"https://www.themoviedb.org/movie/{tmdb_id}" if tmdb_id else "#"
-                        st.write(f"**{date_str}** · [{title}]({url})")
+                        st.write(f"**{date_str}** · {title} *({studio})*")
             else:
-                st.caption("No upcoming releases found")
+                st.caption("No upcoming releases")
         else:
             st.caption("Could not load releases")
     except Exception as e:
@@ -393,6 +386,7 @@ with left_col:
     
     # --- TRENDING TV ---
     st.subheader("📺 Trending TV Shows")
+    st.caption("[View all on TMDB →](https://www.themoviedb.org/tv)")
     
     try:
         trending_tv = et.get_trending_tv()
@@ -453,6 +447,7 @@ with left_col:
     
     # --- TRENDING FILMS ---
     st.subheader("🔥 Trending Films")
+    st.caption("[View all on TMDB →](https://www.themoviedb.org/movie)")
     
     try:
         trending = et.get_trending_movies()
@@ -625,20 +620,33 @@ with right_col:
     st.divider()
     
     # --- STEAM TOP SELLERS ---
-    st.subheader("🔥 Steam Top Sellers")
+    st.subheader("🔥 Steam Top 20")
+    st.caption("[View on Steam →](https://store.steampowered.com/search/?filter=topsellers)")
     
     try:
         steam_games = et.get_steam_top_sellers()
         if steam_games:
-            for game in steam_games[:10]:
-                name = game.get("name", "?")
-                players = game.get("players", 0)
-                link = game.get("link", "")
-                if players and players > 0:
-                    players_str = f"👥 {players:,}"
-                    st.write(f"[{name}]({link}) · {players_str}")
-                else:
-                    st.write(f"[{name}]({link})")
+            box = st.container(height=350)
+            with box:
+                for i, game in enumerate(steam_games[:20], 1):
+                    name = game.get("name", "?")
+                    players = game.get("players", 0)
+                    price = game.get("price", 0)
+                    link = game.get("link", "")
+                    
+                    # Build info string
+                    info_parts = []
+                    if players and players > 0:
+                        info_parts.append(f"👥 {players:,}")
+                    if price and price > 0:
+                        info_parts.append(f"£{price:.2f}")
+                    
+                    info_str = " · ".join(info_parts) if info_parts else ""
+                    
+                    if info_str:
+                        st.write(f"**{i}.** [{name}]({link}) · {info_str}")
+                    else:
+                        st.write(f"**{i}.** [{name}]({link})")
         else:
             st.caption("Could not load Steam data")
     except Exception as e:
