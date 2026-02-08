@@ -278,7 +278,7 @@ with tab_feed:
             # Fetch from RSS feeds for each interest
             for interest in selected_interests:
                 try:
-                    cat_articles = nt.get_category_news(interest, limit=5)
+                    cat_articles = nt.get_category_news(interest, max_per_source=5)
                     articles.extend(cat_articles)
                 except Exception as e:
                     st.warning(f"Could not load {interest}: {e}")
@@ -361,7 +361,7 @@ with tab_headlines:
         st.info("Using RSS feeds instead:")
         
         # Fallback to RSS
-        rss_articles = nt.get_category_news("uk_news", limit=10)
+        rss_articles = nt.get_category_news("uk_news", max_per_source=10)
         for article in rss_articles:
             with st.container():
                 st.markdown('<div class="article-card">', unsafe_allow_html=True)
@@ -406,7 +406,7 @@ with tab_category:
     
     with st.spinner(f"Loading {selected_cat}..."):
         try:
-            cat_articles = nt.get_category_news(selected_cat, limit=15)
+            cat_articles = nt.get_category_news(selected_cat, max_per_source=15)
             
             if cat_articles:
                 # Group by source
@@ -452,7 +452,7 @@ with tab_search:
             if search_source in ["RSS + NewsAPI", "RSS only"]:
                 for cat in nt.RSS_FEEDS.keys():
                     try:
-                        cat_articles = nt.get_category_news(cat, limit=10)
+                        cat_articles = nt.get_category_news(cat, max_per_source=10)
                         for article in cat_articles:
                             title = article.get("title", "").lower()
                             summary = article.get("summary", "").lower()
