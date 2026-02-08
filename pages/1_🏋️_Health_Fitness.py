@@ -385,14 +385,10 @@ def get_openai_client():
 # Helper: Get Today's Workout from Google Sheets
 # ============================================================
 
-def get_gym_workout(day_name: str = None):
+@st.cache_data(ttl=300)  # Cache for 5 minutes to avoid repeated API calls
+def get_gym_workout_cached(day_name: str):
     """Get workout for a specific day from the gym_workout sheet in Jarvis_Data."""
-    if day_name is None:
-        day_name = DAY_NAME
-    
     try:
-        # Use sheets_memory's connection to Jarvis_Data
-        # Read directly from gym_workout tab
         import gspread
         from google.oauth2.service_account import Credentials
         import json
@@ -408,16 +404,13 @@ def get_gym_workout(day_name: str = None):
         ])
         gc = gspread.authorize(creds)
         
-        # Use JARVIS_DATA_SHEET_URL (same as sheets_memory uses)
         jarvis_url = st.secrets.get("JARVIS_DATA_SHEET_URL") or os.getenv("JARVIS_DATA_SHEET_URL")
         if not jarvis_url:
-            # Fallback
             jarvis_url = st.secrets.get("TODO_SHEET_URL") or os.getenv("TODO_SHEET_URL")
         
         if jarvis_url:
             sh = gc.open_by_url(jarvis_url)
             
-            # Look for gym_workout sheet
             try:
                 ws = sh.worksheet("gym_workout")
             except:
@@ -430,7 +423,6 @@ def get_gym_workout(day_name: str = None):
                 for row in rows[1:]:
                     if row and len(row) > 0:
                         row_day = row[0].strip() if row[0] else ""
-                        # Case-insensitive match
                         if row_day.lower() == day_name.lower():
                             ex = {}
                             for i, h in enumerate(headers):
@@ -440,8 +432,20 @@ def get_gym_workout(day_name: str = None):
         return []
     except Exception as e:
         return []
-    except Exception as e:
-        return []
+
+def get_gym_workout(day_name: str = None):
+    """Wrapper to get workout - uses session state to persist across reruns."""
+    if day_name is None:
+        day_name = DAY_NAME
+    
+    # Use session state key for this day's workout
+    cache_key = f"gym_workout_{day_name}"
+    
+    # If we don't have it in session state, fetch it
+    if cache_key not in st.session_state:
+        st.session_state[cache_key] = get_gym_workout_cached(day_name)
+    
+    return st.session_state[cache_key]
 
 def get_last_weight_for_exercise(exercise_name: str) -> dict:
     """Get the last logged weight for a specific exercise."""
@@ -758,7 +762,17 @@ with left_col:
                 exercise_names = [ex.get("exercise", "") for ex in exercises]
                 exercise_names.append("➕ Custom Exercise")
                 
-                selected_ex = st.selectbox("Exercise", exercise_names, key="wl_select", label_visibility="collapsed")
+                # Use a unique key that resets properly
+                if "workout_select_idx" not in st.session_state:
+                    st.session_state.workout_select_idx = 0
+                
+                selected_ex = st.selectbox(
+                    "Exercise", 
+                    exercise_names, 
+                    index=0,  # Always start at first exercise
+                    key="wl_select", 
+                    label_visibility="collapsed"
+                )
                 
                 if selected_ex == "➕ Custom Exercise":
                     exercise_name = st.text_input("Exercise Name", key="wl_custom")
@@ -783,23 +797,26 @@ with left_col:
                         last_date = last_data.get("date", "")
                         st.info(f"💡 Last time: **{default_weight}kg** (on {last_date})")
                 
-                with st.form("workout_log_form"):
+                # Use unique form key based on selected exercise to avoid state conflicts
+                form_key = f"workout_log_form_{hash(selected_ex) % 10000}"
+                
+                with st.form(form_key, clear_on_submit=True):
                     if is_time_exercise:
                         # Time-based exercise - different UI
                         c1, c2 = st.columns(2)
                         with c1:
-                            sets = st.number_input("Sets", min_value=1, max_value=10, value=default_sets, key="wl_sets")
+                            sets = st.number_input("Sets", min_value=1, max_value=10, value=default_sets)
                         with c2:
-                            time_input = st.text_input("Duration/Reps", value=str(default_reps), key="wl_time", help="e.g., 60 seconds, 20 steps")
+                            time_input = st.text_input("Duration/Reps", value=str(default_reps), help="e.g., 60 seconds, 20 steps")
                         
                         # Some time exercises still have weight (like weighted planks)
-                        weight = st.number_input("Weight (kg, if any)", min_value=0.0, max_value=500.0, value=default_weight, step=2.5, key="wl_weight")
+                        weight = st.number_input("Weight (kg, if any)", min_value=0.0, max_value=500.0, value=default_weight, step=2.5)
                         reps = 0  # Will store time_input in notes
                     else:
                         # Rep-based exercise
                         c1, c2, c3 = st.columns(3)
                         with c1:
-                            sets = st.number_input("Sets", min_value=1, max_value=10, value=default_sets, key="wl_sets")
+                            sets = st.number_input("Sets", min_value=1, max_value=10, value=default_sets)
                         with c2:
                             # Parse default reps from string like "8-10"
                             try:
@@ -811,12 +828,14 @@ with left_col:
                                     reps_val = 10
                             except:
                                 reps_val = 10
-                            reps = st.number_input("Reps", min_value=1, max_value=100, value=reps_val, key="wl_reps")
+                            reps = st.number_input("Reps", min_value=1, max_value=100, value=reps_val)
                         with c3:
-                            weight = st.number_input("Weight (kg)", min_value=0.0, max_value=500.0, value=default_weight, step=2.5, key="wl_weight")
+                            weight = st.number_input("Weight (kg)", min_value=0.0, max_value=500.0, value=default_weight, step=2.5)
                         time_input = None
                     
-                    if st.form_submit_button("💾 Log Exercise", use_container_width=True, type="primary"):
+                    submitted = st.form_submit_button("💾 Log Exercise", use_container_width=True, type="primary")
+                    
+                    if submitted:
                         ex_to_log = exercise_name if selected_ex != "➕ Custom Exercise" else exercise_name
                         if ex_to_log:
                             try:
@@ -841,22 +860,22 @@ with left_col:
                                         workout_type="strength"
                                     )
                                 st.success(f"✅ {ex_to_log} logged!")
-                                st.rerun()
+                                # Don't rerun - form will clear itself due to clear_on_submit=True
                             except Exception as e:
                                 st.error(f"Error: {e}")
                         else:
                             st.warning("Enter exercise name")
             else:
                 st.info("No workout plan found. Add custom exercise:")
-                with st.form("custom_workout_form"):
-                    exercise_name = st.text_input("Exercise", key="cwl_ex")
+                with st.form("custom_workout_form", clear_on_submit=True):
+                    exercise_name = st.text_input("Exercise")
                     c1, c2, c3 = st.columns(3)
                     with c1:
-                        sets = st.number_input("Sets", min_value=1, max_value=10, value=3, key="cwl_sets")
+                        sets = st.number_input("Sets", min_value=1, max_value=10, value=3)
                     with c2:
-                        reps = st.number_input("Reps", min_value=1, max_value=100, value=10, key="cwl_reps")
+                        reps = st.number_input("Reps", min_value=1, max_value=100, value=10)
                     with c3:
-                        weight = st.number_input("Weight (kg)", min_value=0.0, max_value=500.0, value=0.0, step=2.5, key="cwl_weight")
+                        weight = st.number_input("Weight (kg)", min_value=0.0, max_value=500.0, value=0.0, step=2.5)
                     
                     if st.form_submit_button("💾 Log", use_container_width=True, type="primary"):
                         if exercise_name:
@@ -869,7 +888,6 @@ with left_col:
                                 workout_type="strength"
                             )
                             st.success("✅ Logged!")
-                            st.rerun()
     
     else:  # Run Day
         with st.expander("🏃 Log Run", expanded=True):
