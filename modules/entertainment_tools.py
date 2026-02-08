@@ -912,6 +912,33 @@ def get_mmorpg_news() -> List[Dict]:
 # Major Film Releases (Full Year)
 # ============================================================
 
+@st.cache_data(ttl=86400)
+def get_2026_major_releases() -> List[Dict]:
+    """Get major 2026 film releases - curated list of biggest movies."""
+    releases = [
+        {"title": "Scream 7", "date": "2026-02-27", "studio": "Paramount"},
+        {"title": "The Bride!", "date": "2026-03-20", "studio": "Warner Bros"},
+        {"title": "Project Hail Mary", "date": "2026-03-20", "studio": "MGM"},
+        {"title": "The Super Mario Galaxy Movie", "date": "2026-04-03", "studio": "Universal"},
+        {"title": "Michael (MJ Biopic)", "date": "2026-04-18", "studio": "Lionsgate"},
+        {"title": "The Mandalorian and Grogu", "date": "2026-05-22", "studio": "Disney"},
+        {"title": "The Devil Wears Prada 2", "date": "2026-05-29", "studio": "Disney"},
+        {"title": "Mortal Kombat II", "date": "2026-05-29", "studio": "Warner Bros"},
+        {"title": "Toy Story 5", "date": "2026-06-19", "studio": "Pixar"},
+        {"title": "Supergirl: Woman of Tomorrow", "date": "2026-06-26", "studio": "DC"},
+        {"title": "The Odyssey (Christopher Nolan)", "date": "2026-07-17", "studio": "Universal"},
+        {"title": "Spider-Man: Brand New Day", "date": "2026-07-24", "studio": "Sony/Marvel"},
+        {"title": "Minions 3", "date": "2026-07-31", "studio": "Illumination"},
+        {"title": "Digger (Tom Cruise)", "date": "2026-10-02", "studio": "Warner Bros"},
+        {"title": "Street Fighter", "date": "2026-10-09", "studio": "Legendary"},
+        {"title": "The Hunger Games: Sunrise on the Reaping", "date": "2026-11-20", "studio": "Lionsgate"},
+        {"title": "Narnia (Greta Gerwig)", "date": "2026-11-26", "studio": "Netflix"},
+        {"title": "Avengers: Doomsday", "date": "2026-12-01", "studio": "Marvel"},
+        {"title": "Jumanji 4", "date": "2026-12-11", "studio": "Sony"},
+        {"title": "Dune: Part Three", "date": "2026-12-18", "studio": "Warner Bros"},
+    ]
+    return releases
+
 @st.cache_data(ttl=7200)
 def get_major_releases_full_year(region: str = "GB") -> List[Dict]:
     """Get major film releases for the entire year using TMDB discover."""
@@ -955,4 +982,5 @@ def get_major_releases_full_year(region: str = "GB") -> List[Dict]:
     major.sort(key=lambda x: x.get("release_date", "9999"))
     
     return major
+
 
