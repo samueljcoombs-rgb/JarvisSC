@@ -1,8 +1,9 @@
 # pages/2_🎬_Entertainment.py
 """
-Entertainment Dashboard - PURE STREAMLIT, NO HTML
+Entertainment Dashboard - Films & Gaming Hub
 """
 import streamlit as st
+import streamlit.components.v1 as components
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import os
@@ -35,15 +36,88 @@ def make_vue_film_url(title: str) -> str:
     return f"https://www.myvue.com/cinema/{VUE_CINEMA_SLUG}/film/{slug}"
 
 # ============================================================
-# Page Config
+# Page Config - SIDEBAR COLLAPSED BY DEFAULT
 # ============================================================
 
 st.set_page_config(
     page_title="Entertainment | Jarvis",
     page_icon="🎬",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed"
 )
+
+gs.inject_global_styles()
+
+# ============================================================
+# Premium CSS (matching homepage)
+# ============================================================
+
+st.markdown("""
+<style>
+@keyframes gradientShift {
+    0% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
+}
+
+.ent-header {
+    background: linear-gradient(-45deg, #0f0c29, #302b63, #24243e, #1a1a2e);
+    background-size: 400% 400%;
+    animation: gradientShift 15s ease infinite;
+    padding: 1.5rem 2rem;
+    border-radius: 20px;
+    margin-bottom: 1.5rem;
+    box-shadow: 0 15px 40px rgba(139, 92, 246, 0.3);
+}
+
+.ent-header h1 {
+    margin: 0;
+    font-size: 2.2rem;
+    font-weight: 800;
+    background: linear-gradient(135deg, #ec4899, #8b5cf6, #60a5fa);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+.ent-header p {
+    color: rgba(255,255,255,0.7);
+    margin: 0.3rem 0 0 0;
+    font-size: 0.95rem;
+}
+
+.section-card {
+    background: linear-gradient(145deg, #1e1e2e, #2a2a3e);
+    border: 1px solid rgba(139, 92, 246, 0.2);
+    border-radius: 16px;
+    padding: 1rem;
+    margin-bottom: 1rem;
+}
+
+.film-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
+    gap: 0.5rem;
+}
+
+.quick-link {
+    display: inline-block;
+    padding: 0.4rem 0.8rem;
+    background: linear-gradient(135deg, rgba(139,92,246,0.2), rgba(236,72,153,0.2));
+    border: 1px solid rgba(139,92,246,0.3);
+    border-radius: 8px;
+    color: #a78bfa;
+    text-decoration: none;
+    font-size: 0.85rem;
+    margin: 0.2rem;
+    transition: all 0.2s;
+}
+
+.quick-link:hover {
+    background: linear-gradient(135deg, rgba(139,92,246,0.4), rgba(236,72,153,0.4));
+    transform: translateY(-2px);
+}
+</style>
+""", unsafe_allow_html=True)
 
 # ============================================================
 # OpenAI Client
@@ -60,7 +134,7 @@ def get_openai_client():
     return None
 
 # ============================================================
-# Sidebar
+# Sidebar (collapsed by default)
 # ============================================================
 
 with st.sidebar:
@@ -70,7 +144,7 @@ with st.sidebar:
     gaming_sources = st.multiselect(
         "🎮 Gaming",
         ["IGN", "Polygon", "Kotaku", "Eurogamer"],
-        default=["IGN", "Polygon", "Kotaku"],
+        default=["IGN", "Polygon"],
     )
     ent_sources = st.multiselect(
         "🎬 Entertainment", 
@@ -78,28 +152,20 @@ with st.sidebar:
         default=["Variety", "Collider"],
     )
     news_count = st.slider("Max articles", 10, 40, 20)
-    
-    st.divider()
-    
-    st.subheader("🔗 Quick Links")
-    st.write(f"🎟️ [Vue Basingstoke]({VUE_WHATS_ON_URL})")
-    st.write(f"🎭 [Letterboxd @{LETTERBOXD_USER}](https://letterboxd.com/{LETTERBOXD_USER}/)")
-    st.write(f"📋 [My Watchlist](https://letterboxd.com/{LETTERBOXD_USER}/watchlist/)")
-    
-    st.divider()
-    show_debug = st.checkbox("🔧 Debug mode")
 
 # ============================================================
 # Header
 # ============================================================
 
-st.title("🎬 Entertainment Hub")
-st.caption("Cinema • Letterboxd • Games • AI Recommendations")
-
-st.divider()
+st.markdown("""
+<div class="ent-header">
+    <h1>🎬 Entertainment Hub</h1>
+    <p>🎥 Films • 📺 TV Shows • 🎮 Games • 🤖 AI Recommendations</p>
+</div>
+""", unsafe_allow_html=True)
 
 # ============================================================
-# Entertainment & Gaming News
+# Entertainment News - Full Width (2-row tiles)
 # ============================================================
 
 with st.expander("📰🎮 Entertainment & Gaming News", expanded=True):
@@ -114,7 +180,7 @@ with st.expander("📰🎮 Entertainment & Gaming News", expanded=True):
             else:
                 filtered = news
             
-            # Build 2-row scrolling grid with images
+            # Build 2-row scrolling grid
             html_content = '''
             <style>
             .news-grid {
@@ -126,45 +192,24 @@ with st.expander("📰🎮 Entertainment & Gaming News", expanded=True):
                 overflow-x: scroll;
                 padding: 0.5rem 0.5rem 1rem 0.5rem;
                 scroll-behavior: smooth;
-                max-width: 100%;
             }
-            .news-grid::-webkit-scrollbar {
-                height: 10px;
-            }
-            .news-grid::-webkit-scrollbar-track {
-                background: rgba(128,128,128,0.2);
-                border-radius: 5px;
-            }
-            .news-grid::-webkit-scrollbar-thumb {
-                background: rgba(139,92,246,0.6);
-                border-radius: 5px;
-            }
-            .news-grid::-webkit-scrollbar-thumb:hover {
-                background: rgba(139,92,246,0.8);
-            }
+            .news-grid::-webkit-scrollbar { height: 10px; }
+            .news-grid::-webkit-scrollbar-track { background: rgba(128,128,128,0.2); border-radius: 5px; }
+            .news-grid::-webkit-scrollbar-thumb { background: rgba(139,92,246,0.6); border-radius: 5px; }
             .news-card {
                 border-radius: 10px;
                 overflow: hidden;
                 background: #1e1e2e;
                 border: 1px solid rgba(128,128,128,0.3);
                 transition: transform 0.2s, box-shadow 0.2s;
-                display: flex;
-                flex-direction: column;
             }
             .news-card:hover {
                 transform: translateY(-3px);
                 box-shadow: 0 6px 20px rgba(0,0,0,0.3);
                 border-color: #8b5cf6;
             }
-            .news-card img {
-                width: 100%;
-                height: 100px;
-                object-fit: cover;
-            }
-            .news-card-body {
-                padding: 0.5rem;
-                flex: 1;
-            }
+            .news-card img { width: 100%; height: 100px; object-fit: cover; }
+            .news-card-body { padding: 0.5rem; }
             .news-badge {
                 display: inline-block;
                 padding: 2px 6px;
@@ -173,14 +218,8 @@ with st.expander("📰🎮 Entertainment & Gaming News", expanded=True):
                 font-weight: 600;
                 margin-bottom: 0.3rem;
             }
-            .news-badge.gaming {
-                background: linear-gradient(135deg, #10b981, #059669);
-                color: white;
-            }
-            .news-badge.entertainment {
-                background: linear-gradient(135deg, #ec4899, #db2777);
-                color: white;
-            }
+            .news-badge.gaming { background: linear-gradient(135deg, #10b981, #059669); color: white; }
+            .news-badge.entertainment { background: linear-gradient(135deg, #ec4899, #db2777); color: white; }
             .news-title {
                 font-size: 0.75rem;
                 line-height: 1.25;
@@ -191,29 +230,21 @@ with st.expander("📰🎮 Entertainment & Gaming News", expanded=True):
                 -webkit-box-orient: vertical;
                 overflow: hidden;
             }
-            .news-title a {
-                color: #e0e0e0;
-                text-decoration: none;
-            }
-            .news-title a:hover {
-                color: #a78bfa;
-            }
+            .news-title a { color: #e0e0e0; text-decoration: none; }
+            .news-title a:hover { color: #a78bfa; }
             </style>
             <div class="news-grid">
             '''
             
             for article in filtered[:news_count]:
-                title = article.get("title", "").replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
+                title = article.get("title", "").replace('"', '&quot;').replace('<', '&lt;')
                 source = article.get("source", "")
                 link = article.get("link", "")
-                image = article.get("image", "")
+                image = article.get("image", "") or "https://placehold.co/240x100/1a1a2e/8b5cf6?text=News"
                 
                 is_gaming = source in ["IGN", "Polygon", "Kotaku", "Eurogamer"]
                 badge_class = "gaming" if is_gaming else "entertainment"
                 badge_icon = "🎮" if is_gaming else "🎬"
-                
-                if not image:
-                    image = "https://placehold.co/240x100/1a1a2e/8b5cf6?text=News"
                 
                 html_content += f'''
                 <div class="news-card">
@@ -226,8 +257,6 @@ with st.expander("📰🎮 Entertainment & Gaming News", expanded=True):
                 '''
             
             html_content += '</div>'
-            
-            import streamlit.components.v1 as components
             components.html(html_content, height=400, scrolling=True)
         else:
             st.info("No news available")
@@ -237,125 +266,259 @@ with st.expander("📰🎮 Entertainment & Gaming News", expanded=True):
 st.divider()
 
 # ============================================================
-# Main 3-Column Layout
+# Main 2-Column Layout: LEFT = Films, RIGHT = Games
 # ============================================================
 
-left_col, mid_col, right_col = st.columns([3, 4, 3], gap="large")
+left_col, mid_col, right_col = st.columns([4, 4, 3], gap="large")
 
 # ============================================================
-# LEFT COLUMN: Coming Soon + In Cinemas
+# LEFT COLUMN: All Film/TV Content
 # ============================================================
 
 with left_col:
-    st.subheader("🗓️ Coming Soon")
-    st.caption("Major UK cinema releases")
+    # --- LETTERBOXD ---
+    st.subheader("🎭 Letterboxd")
     
     try:
-        upcoming = et.get_upcoming_movies("GB", pages=6)
+        lb_data = et.get_letterboxd_activity(LETTERBOXD_USER)
+        activity = lb_data.get("activity", [])
+        watchlist = lb_data.get("watchlist", [])
         
-        if upcoming:
-            # ENGLISH ONLY, sorted by date
-            major = sorted(
-                [m for m in upcoming if m.get("popularity", 0) > 5 and m.get("original_language") == "en"],
-                key=lambda x: x.get("release_date", "9999")
-            )
-            
-            coming_box = st.container(height=350)
-            with coming_box:
-                current_month = None
-                for movie in major[:40]:
-                    title = movie.get("title", "Unknown")
-                    release_date = movie.get("release_date", "")
-                    tmdb_id = movie.get("id")
-                    
-                    if release_date:
-                        try:
-                            dt = datetime.strptime(release_date, "%Y-%m-%d")
-                            month_year = dt.strftime("%B %Y")
-                            date_str = dt.strftime("%d")
-                            
-                            if month_year != current_month:
-                                current_month = month_year
-                                st.markdown(f"**📅 {month_year}**")
-                        except:
-                            date_str = "?"
-                    else:
-                        date_str = "?"
-                    
-                    c1, c2 = st.columns([1, 5])
-                    with c1:
-                        st.write(f"**{date_str}**")
-                    with c2:
-                        if tmdb_id:
-                            st.write(f"[{title}](https://www.themoviedb.org/movie/{tmdb_id})")
+        tab1, tab2 = st.tabs([f"📋 Watchlist ({len(watchlist)})", f"🎬 Activity ({len(activity)})"])
+        
+        with tab1:
+            if watchlist:
+                box = st.container(height=200)
+                with box:
+                    for item in watchlist[:25]:
+                        title = item.get("title", "?")
+                        link = item.get("link", "")
+                        if link:
+                            st.write(f"🎬 [{title}]({link})")
                         else:
-                            st.write(title)
-        else:
-            st.info("No upcoming releases")
+                            st.write(f"🎬 {title}")
+            else:
+                st.caption("No watchlist items")
+            st.caption(f"[View full watchlist →](https://letterboxd.com/{LETTERBOXD_USER}/watchlist/)")
+        
+        with tab2:
+            if activity:
+                box = st.container(height=200)
+                with box:
+                    for item in activity[:15]:
+                        title = item.get("title", "")
+                        link = item.get("link", "")
+                        star = " ⭐" if item.get("has_rating") else ""
+                        if link:
+                            st.write(f"🎬 [{title}]({link}){star}")
+                        else:
+                            st.write(f"🎬 {title}{star}")
+            else:
+                st.caption("No recent activity")
+            st.caption(f"[View profile →](https://letterboxd.com/{LETTERBOXD_USER}/)")
     except Exception as e:
-        st.error(f"Error: {e}")
+        st.error(f"Letterboxd error: {e}")
     
     st.divider()
     
-    # IN CINEMAS NOW - ENGLISH ONLY
+    # --- IN CINEMAS NOW ---
     st.subheader("🎥 In Cinemas Now")
-    st.write(f"[🎟️ Vue Basingstoke]({VUE_WHATS_ON_URL})")
+    st.caption(f"[🎟️ Book at Vue Basingstoke]({VUE_WHATS_ON_URL})")
     
     try:
         now_playing = et.get_now_playing("GB")
-        
         if now_playing:
-            # ENGLISH ONLY, good rating
-            filtered = sorted(
-                [f for f in now_playing 
-                 if f.get("vote_average", 0) > 5.0 
-                 and f.get("original_language") == "en"],
-                key=lambda x: x.get("vote_average", 0),
-                reverse=True
-            )[:9]
+            # Filter to English, sort by popularity
+            english_films = [f for f in now_playing if f.get("original_language") == "en"]
+            sorted_films = sorted(english_films, key=lambda x: x.get("popularity", 0), reverse=True)[:8]
             
-            cols = st.columns(3)
-            for i, film in enumerate(filtered):
-                with cols[i % 3]:
+            cols = st.columns(4)
+            for i, film in enumerate(sorted_films):
+                with cols[i % 4]:
+                    poster = film.get("poster_path")
                     title = film.get("title", "?")
                     rating = film.get("vote_average", 0)
-                    poster = film.get("poster_path")
-                    
                     if poster:
-                        st.image(et.get_poster_url(poster, "w154"), use_column_width=True)
-                    
-                    vue_url = make_vue_film_url(title)
-                    short = title[:14] + "…" if len(title) > 14 else title
-                    st.write(f"[{short}]({vue_url})")
-                    st.caption(f"⭐ {rating:.1f}")
-        else:
-            st.info("No films found")
+                        st.image(et.get_poster_url(poster, "w154"), use_container_width=True)
+                    short = title[:12] + "..." if len(title) > 12 else title
+                    st.caption(f"[{short}]({make_vue_film_url(title)}) ⭐{rating:.1f}")
     except Exception as e:
-        st.error(f"Error: {e}")
+        st.caption(f"Error: {e}")
+    
+    st.divider()
+    
+    # --- COMING SOON (Full Year) ---
+    st.subheader("🗓️ Coming Soon")
+    st.caption("Major releases this year")
+    
+    try:
+        upcoming = et.get_major_releases_full_year("GB")
+        if upcoming:
+            today = datetime.now().strftime("%Y-%m-%d")
+            # Only future releases
+            future = [m for m in upcoming if m.get("release_date", "0000") >= today][:12]
+            
+            box = st.container(height=200)
+            with box:
+                for movie in future:
+                    title = movie.get("title", "?")
+                    date = movie.get("release_date", "")
+                    tmdb_id = movie.get("id")
+                    if date:
+                        try:
+                            dt = datetime.strptime(date, "%Y-%m-%d")
+                            date_str = dt.strftime("%d %b")
+                        except:
+                            date_str = date
+                    else:
+                        date_str = "TBA"
+                    
+                    url = f"https://www.themoviedb.org/movie/{tmdb_id}" if tmdb_id else "#"
+                    st.write(f"**{date_str}** · [{title}]({url})")
+    except Exception as e:
+        st.caption(f"Error: {e}")
+    
+    st.divider()
+    
+    # --- TRENDING TV ---
+    st.subheader("📺 Trending TV Shows")
+    
+    try:
+        trending_tv = et.get_trending_tv()
+        if trending_tv:
+            cols = st.columns(4)
+            for i, show in enumerate(trending_tv[:8]):
+                with cols[i % 4]:
+                    poster = show.get("poster_path")
+                    name = show.get("name", "?")
+                    rating = show.get("vote_average", 0)
+                    tmdb_id = show.get("id")
+                    if poster:
+                        st.image(et.get_poster_url(poster, "w154"), use_container_width=True)
+                    short = name[:12] + "..." if len(name) > 12 else name
+                    url = f"https://www.themoviedb.org/tv/{tmdb_id}"
+                    st.caption(f"[{short}]({url}) ⭐{rating:.1f}")
+    except Exception as e:
+        st.caption(f"Error: {e}")
+    
+    st.divider()
+    
+    # --- TV WATCHLIST ---
+    st.subheader("📺 TV Watchlist")
+    
+    try:
+        tv_data = sm.get_watchlist(status="to_watch")
+        tv_shows = [t for t in tv_data if t.get("type") == "tv"] if tv_data else []
+    except:
+        tv_shows = []
+    
+    if tv_shows:
+        for show in tv_shows[:8]:
+            col1, col2 = st.columns([5, 1])
+            with col1:
+                st.write(f"📺 {show.get('title', '?')}")
+            with col2:
+                if st.button("✓", key=f"tv_{show.get('id')}"):
+                    try:
+                        sm.update_watchlist_item(show.get("id"), {"status": "completed"})
+                        st.rerun()
+                    except:
+                        pass
+    else:
+        st.caption("No TV shows in watchlist")
+    
+    with st.expander("➕ Add TV Show"):
+        new_tv = st.text_input("Show title", key="new_tv")
+        if st.button("Add", key="add_tv"):
+            if new_tv:
+                try:
+                    sm.add_to_watchlist(title=new_tv, media_type="tv")
+                    st.success("Added!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(str(e))
+    
+    st.divider()
+    
+    # --- TRENDING FILMS ---
+    st.subheader("🔥 Trending Films")
+    
+    try:
+        trending = et.get_trending_movies()
+        if trending:
+            cols = st.columns(4)
+            for i, movie in enumerate(trending[:8]):
+                with cols[i % 4]:
+                    poster = movie.get("poster_path")
+                    title = movie.get("title", "?")
+                    tmdb_id = movie.get("id")
+                    if poster:
+                        st.image(et.get_poster_url(poster, "w154"), use_container_width=True)
+                    short = title[:12] + "..." if len(title) > 12 else title
+                    url = f"https://www.themoviedb.org/movie/{tmdb_id}"
+                    st.caption(f"[{short}]({url})")
+    except Exception as e:
+        st.caption(f"Error: {e}")
+    
+    st.divider()
+    
+    # --- SEARCH TMDB ---
+    st.subheader("🔍 Search TMDB")
+    
+    search_q = st.text_input("Search movies or TV...", key="tmdb_search", placeholder="Enter title...")
+    
+    if search_q:
+        search_type = st.radio("Type", ["Movies", "TV"], horizontal=True, key="search_type")
+        
+        try:
+            results = et.search_movie(search_q) if search_type == "Movies" else et.search_tv(search_q)
+            if results:
+                for item in results[:5]:
+                    title = item.get("title") or item.get("name", "?")
+                    year = (item.get("release_date") or item.get("first_air_date") or "")[:4]
+                    rating = item.get("vote_average", 0)
+                    tmdb_id = item.get("id")
+                    media = "movie" if search_type == "Movies" else "tv"
+                    url = f"https://www.themoviedb.org/{media}/{tmdb_id}"
+                    st.write(f"[**{title}**]({url}) ({year}) ⭐{rating:.1f}")
+            else:
+                st.caption("No results")
+        except Exception as e:
+            st.caption(f"Error: {e}")
+    
+    st.divider()
+    
+    # --- IMDB TOP 250 LINKS ---
+    st.subheader("🏆 IMDB Top 250")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("[🎬 Top 250 Films](https://www.imdb.com/chart/top/)")
+    with c2:
+        st.markdown("[📺 Top 250 TV Shows](https://www.imdb.com/chart/toptv/)")
 
 # ============================================================
-# MIDDLE COLUMN: AI Coach + Games
+# MIDDLE COLUMN: AI Coach
 # ============================================================
 
 with mid_col:
-    st.subheader("🤖 AI Movie Coach")
+    st.subheader("🤖 AI Entertainment Coach")
     
     if "ent_chat" not in st.session_state:
         st.session_state.ent_chat = []
     
     c1, c2, c3 = st.columns(3)
     with c1:
-        if st.button("🎯 Recommend", use_container_width=True):
-            st.session_state.ent_pending = "Based on my Letterboxd, recommend 5 films I'd love. Explain why."
+        if st.button("🎯 Recommend", key="ent_rec", use_container_width=True):
+            st.session_state.ent_pending = "Based on my Letterboxd, recommend 5 films I'd love."
     with c2:
-        if st.button("🎲 Tonight?", use_container_width=True):
-            st.session_state.ent_pending = "Help me pick something to watch tonight."
+        if st.button("🎲 Tonight?", key="ent_tonight", use_container_width=True):
+            st.session_state.ent_pending = "Help me decide what to watch tonight."
     with c3:
-        if st.button("🗑️ Clear", use_container_width=True):
+        if st.button("🗑️ Clear", key="ent_clear", use_container_width=True):
             st.session_state.ent_chat = []
             st.rerun()
     
-    user_input = st.chat_input("Ask about movies...")
+    user_input = st.chat_input("Ask about movies, TV, games...", key="ent_input")
     
     if "ent_pending" in st.session_state and st.session_state.ent_pending:
         user_input = st.session_state.ent_pending
@@ -366,18 +529,24 @@ with mid_col:
         
         try:
             lb_data = et.get_letterboxd_activity(LETTERBOXD_USER)
-            activity = lb_data.get("activity", [])[:15]
-            watchlist = lb_data.get("watchlist", [])[:20]
-            activity_text = "\n".join([f"- {a.get('title', '')} ({a.get('year', '')})" for a in activity])
-            watchlist_text = "\n".join([f"- {w.get('title', '')} ({w.get('year', '')})" for w in watchlist])
+            activity = lb_data.get("activity", [])[:10]
+            lb_watchlist = lb_data.get("watchlist", [])[:20]
+            activity_text = "\n".join([f"- {a.get('title', '')}" for a in activity])
+            watchlist_text = "\n".join([f"- {w.get('title', '')}" for w in lb_watchlist])
         except:
             activity_text = "No data"
             watchlist_text = "No data"
         
-        context = f"""Expert film critic. USER'S LETTERBOXD:
-Recently watched: {activity_text}
-Watchlist: {watchlist_text}
-Give personalized recommendations explaining why they'd like each."""
+        context = f"""You're an expert entertainment critic and recommendation AI.
+
+USER'S LETTERBOXD:
+Recent (watched/rated):
+{activity_text}
+
+Watchlist:
+{watchlist_text}
+
+Give personalized recommendations. Be specific about WHY they'd like each one."""
         
         client = get_openai_client()
         if client:
@@ -385,7 +554,8 @@ Give personalized recommendations explaining why they'd like each."""
                 messages = [{"role": "system", "content": context}]
                 messages.extend(st.session_state.ent_chat)
                 resp = client.chat.completions.create(model="gpt-4o", messages=messages, max_tokens=800)
-                st.session_state.ent_chat.append({"role": "assistant", "content": resp.choices[0].message.content})
+                reply = resp.choices[0].message.content
+                st.session_state.ent_chat.append({"role": "assistant", "content": reply})
             except Exception as e:
                 st.session_state.ent_chat.append({"role": "assistant", "content": f"Error: {e}"})
         else:
@@ -393,17 +563,20 @@ Give personalized recommendations explaining why they'd like each."""
         st.rerun()
     
     if st.session_state.ent_chat:
-        chat_box = st.container(height=200)
+        chat_box = st.container(height=400)
         with chat_box:
-            for msg in reversed(st.session_state.ent_chat):
+            for msg in st.session_state.ent_chat:
                 with st.chat_message(msg["role"]):
                     st.write(msg["content"])
     else:
-        st.info("💡 Get AI recommendations based on your Letterboxd!")
-    
-    st.divider()
-    
-    # Games
+        st.info("💡 Ask for recommendations based on your taste!")
+
+# ============================================================
+# RIGHT COLUMN: Games
+# ============================================================
+
+with right_col:
+    # --- GAMES TO PLAY ---
     st.subheader("🎮 Games To Play")
     
     try:
@@ -414,22 +587,22 @@ Give personalized recommendations explaining why they'd like each."""
     
     if games:
         for game in games[:8]:
-            c1, c2 = st.columns([5, 1])
-            with c1:
+            col1, col2 = st.columns([5, 1])
+            with col1:
                 st.write(f"🎮 {game.get('title', '?')}")
-            with c2:
-                if st.button("✓", key=f"g_{game.get('id')}"):
+            with col2:
+                if st.button("✓", key=f"game_{game.get('id')}"):
                     try:
                         sm.update_watchlist_item(game.get("id"), {"status": "completed"})
                         st.rerun()
                     except:
                         pass
     else:
-        st.caption("No games in list yet")
+        st.caption("No games in list")
     
     with st.expander("➕ Add Game"):
         new_game = st.text_input("Game title", key="new_game")
-        if st.button("Add Game"):
+        if st.button("Add", key="add_game"):
             if new_game:
                 try:
                     sm.add_to_watchlist(title=new_game, media_type="game")
@@ -437,114 +610,72 @@ Give personalized recommendations explaining why they'd like each."""
                     st.rerun()
                 except Exception as e:
                     st.error(str(e))
-
-# ============================================================
-# RIGHT COLUMN: Letterboxd + Trending
-# ============================================================
-
-with right_col:
-    st.subheader("🎭 Letterboxd")
-    
-    c1, c2 = st.columns(2)
-    with c1:
-        st.write(f"[📋 Watchlist](https://letterboxd.com/{LETTERBOXD_USER}/watchlist/)")
-    with c2:
-        st.write(f"[🎬 Profile](https://letterboxd.com/{LETTERBOXD_USER}/)")
-    
-    try:
-        lb_data = et.get_letterboxd_activity(LETTERBOXD_USER)
-        activity = lb_data.get("activity", [])
-        watchlist = lb_data.get("watchlist", [])
-        
-        tab1, tab2 = st.tabs(["📋 Watchlist", "🎬 Activity"])
-        
-        with tab1:
-            if watchlist:
-                st.success(f"✅ {len(watchlist)} films to watch")
-                box = st.container(height=280)
-                with box:
-                    for item in watchlist[:30]:
-                        title = item.get("title", "?")
-                        year = item.get("year", "")
-                        link = item.get("link", "")
-                        display = f"🎬 {title}" + (f" ({year})" if year else "")
-                        if link:
-                            st.write(f"[{display}]({link})")
-                        else:
-                            st.write(display)
-            else:
-                st.warning("⚠️ Watchlist not loading")
-                st.write(f"RSS: letterboxd.com/{LETTERBOXD_USER}/watchlist/rss/")
-                st.write("Make sure your watchlist is PUBLIC!")
-                st.write("Try clicking 🔄 Refresh above")
-        
-        with tab2:
-            if activity:
-                st.success(f"✅ {len(activity)} recent films")
-                box = st.container(height=280)
-                with box:
-                    for item in activity[:20]:
-                        title = item.get("title", "?")
-                        year = item.get("year", "")
-                        link = item.get("link", "")
-                        star = " ⭐" if item.get("has_rating") else ""
-                        display = f"🎬 {title}" + (f" ({year})" if year else "") + star
-                        if link:
-                            st.write(f"[{display}]({link})")
-                        else:
-                            st.write(display)
-            else:
-                st.info("No recent activity")
-                
-    except Exception as e:
-        st.error(f"Letterboxd error: {e}")
     
     st.divider()
     
-    # Trending
-    st.subheader("🔥 Trending Now")
+    # --- STEAM TOP SELLERS ---
+    st.subheader("🔥 Steam Top Sellers")
     
     try:
-        trending = et.get_trending_movies()
-        if trending:
-            cols = st.columns(3)
-            for i, movie in enumerate(trending[:6]):
-                with cols[i % 3]:
-                    poster = movie.get("poster_path")
-                    title = movie.get("title", "?")
-                    tmdb_id = movie.get("id")
-                    rating = movie.get("vote_average", 0)
-                    
-                    if poster:
-                        st.image(et.get_poster_url(poster, "w154"), use_column_width=True)
-                    
-                    short = title[:10] + "…" if len(title) > 10 else title
-                    if tmdb_id:
-                        st.write(f"[{short}](https://www.themoviedb.org/movie/{tmdb_id})")
-                    st.caption(f"⭐ {rating:.1f}")
+        steam_games = et.get_steam_top_sellers()
+        if steam_games:
+            for game in steam_games[:10]:
+                name = game.get("name", "?")
+                players = game.get("players", 0)
+                link = game.get("link", "")
+                players_str = f"{players:,}" if players else "?"
+                st.write(f"[{name}]({link}) · 👥 {players_str}")
+        else:
+            st.caption("Could not load Steam data")
     except Exception as e:
         st.caption(f"Error: {e}")
     
     st.divider()
     
-    # Search
-    st.subheader("🔍 Search TMDB")
+    # --- GAME RELEASES ---
+    st.subheader("📅 Game News & Releases")
     
-    q = st.text_input("Search movies or TV...", label_visibility="collapsed", placeholder="Search...")
-    
-    if q:
-        stype = st.radio("Type", ["Movies", "TV"], horizontal=True, label_visibility="collapsed")
-        results = et.search_movie(q) if stype == "Movies" else et.search_tv(q)
-        
-        if results:
-            for r in results[:5]:
-                title = r.get("title") or r.get("name", "?")
-                year = (r.get("release_date") or r.get("first_air_date") or "")[:4]
-                tid = r.get("id")
-                url = f"https://www.themoviedb.org/{'movie' if stype == 'Movies' else 'tv'}/{tid}"
-                st.write(f"**[{title}]({url})** ({year})")
+    try:
+        releases = et.get_major_game_releases()
+        if releases:
+            for release in releases[:8]:
+                title = release.get("title", "?")
+                link = release.get("link", "")
+                source = release.get("source", "")
+                st.write(f"[{title}]({link}) · *{source}*")
         else:
-            st.caption("No results")
+            st.caption("No release news")
+    except Exception as e:
+        st.caption(f"Error: {e}")
+    
+    st.divider()
+    
+    # --- MMORPG NEWS ---
+    st.subheader("⚔️ MMORPG News")
+    
+    try:
+        mmo_news = et.get_mmorpg_news()
+        if mmo_news:
+            for news in mmo_news[:8]:
+                title = news.get("title", "?")
+                link = news.get("link", "")
+                source = news.get("source", "")
+                st.write(f"[{title}]({link}) · *{source}*")
+        else:
+            st.caption("No MMO news")
+    except Exception as e:
+        st.caption(f"Error: {e}")
+    
+    st.divider()
+    
+    # --- QUICK LINKS ---
+    st.subheader("🔗 Gaming Links")
+    st.markdown("""
+- [Steam Store](https://store.steampowered.com/)
+- [IGN](https://www.ign.com/)
+- [Metacritic](https://www.metacritic.com/game)
+- [HowLongToBeat](https://howlongtobeat.com/)
+    """)
 
 # ============================================================
 # Footer
