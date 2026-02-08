@@ -333,6 +333,55 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
+# ----- Flight Deals Banner -----
+try:
+    from modules import travel_tools as tt
+    
+    serpapi_key = st.secrets.get("SERPAPI_KEY") or os.getenv("SERPAPI_KEY")
+    if serpapi_key:
+        # Check for deals (silent - no notifications on page load)
+        deals = tt.check_flight_alerts_silent()
+        
+        if deals:
+            deals_html = ""
+            for deal in deals[:3]:  # Show max 3 deals
+                route = deal.get("route", "Unknown")
+                price = deal.get("current_price", "?")
+                target = deal.get("max_price", "?")
+                savings = deal.get("savings", 0)
+                
+                deals_html += f"""
+                <div style="background: linear-gradient(135deg, rgba(16, 185, 129, 0.2), rgba(16, 185, 129, 0.1)); 
+                            border: 1px solid rgba(16, 185, 129, 0.4); border-radius: 12px; padding: 1rem; 
+                            margin-bottom: 0.5rem; display: flex; justify-content: space-between; align-items: center;">
+                    <div>
+                        <strong style="color: #34d399;">✈️ {route}</strong><br>
+                        <span style="color: rgba(255,255,255,0.7);">£{price} (Target: £{target}) • Save £{savings}</span>
+                    </div>
+                    <a href="https://www.google.com/flights" target="_blank" 
+                       style="background: #10b981; color: white; padding: 0.5rem 1rem; border-radius: 8px; 
+                              text-decoration: none; font-weight: 600;">Book Now →</a>
+                </div>
+                """
+            
+            st.markdown(f"""
+            <div style="background: linear-gradient(145deg, rgba(16, 185, 129, 0.15), rgba(16, 185, 129, 0.05));
+                        border: 2px solid rgba(16, 185, 129, 0.3); border-radius: 16px; padding: 1.25rem;
+                        margin-bottom: 1.5rem; animation: pulse-glow 2s ease-in-out infinite;">
+                <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem;">
+                    <span style="font-size: 1.5rem;">🎉</span>
+                    <span style="font-size: 1.1rem; font-weight: 700; color: #34d399;">
+                        Flight Deal{'' if len(deals) == 1 else 's'} Found!
+                    </span>
+                    <span style="background: #10b981; color: white; padding: 0.2rem 0.6rem; border-radius: 12px; 
+                                 font-size: 0.75rem; font-weight: 700;">{len(deals)} ALERT{'S' if len(deals) > 1 else ''}</span>
+                </div>
+                {deals_html}
+            </div>
+            """, unsafe_allow_html=True)
+except Exception as e:
+    pass  # Silently fail if travel_tools not available
+
 # ----- Navigation Cards -----
 st.markdown("### Quick Navigation")
 
