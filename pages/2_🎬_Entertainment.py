@@ -351,36 +351,52 @@ with left_col:
     st.subheader("🗓️ Coming Soon 2026")
     st.caption("[Full list at Movie Insider →](https://www.movieinsider.com/movies/2026)")
     
-    try:
-        releases = et.get_2026_major_releases()
-        if releases:
-            today = datetime.now().strftime("%Y-%m-%d")
-            # Only future releases
-            future = [r for r in releases if r.get("date", "0000") >= today]
-            
-            if future:
-                box = st.container(height=250)
-                with box:
-                    for movie in future:
-                        title = movie.get("title", "?")
-                        date = movie.get("date", "")
-                        studio = movie.get("studio", "")
-                        if date:
-                            try:
-                                dt = datetime.strptime(date, "%Y-%m-%d")
-                                date_str = dt.strftime("%d %b")
-                            except:
-                                date_str = date
-                        else:
-                            date_str = "TBA"
-                        
-                        st.write(f"**{date_str}** · {title} *({studio})*")
-            else:
-                st.caption("No upcoming releases")
-        else:
-            st.caption("Could not load releases")
-    except Exception as e:
-        st.caption(f"Error: {e}")
+    # Curated 2026 releases (inline to avoid module caching issues)
+    releases_2026 = [
+        {"title": "Scream 7", "date": "2026-02-27", "studio": "Paramount"},
+        {"title": "The Bride!", "date": "2026-03-20", "studio": "Warner Bros"},
+        {"title": "Project Hail Mary", "date": "2026-03-20", "studio": "MGM"},
+        {"title": "The Super Mario Galaxy Movie", "date": "2026-04-03", "studio": "Universal"},
+        {"title": "Michael (MJ Biopic)", "date": "2026-04-18", "studio": "Lionsgate"},
+        {"title": "The Mandalorian and Grogu", "date": "2026-05-22", "studio": "Disney"},
+        {"title": "The Devil Wears Prada 2", "date": "2026-05-29", "studio": "Disney"},
+        {"title": "Mortal Kombat II", "date": "2026-05-29", "studio": "Warner Bros"},
+        {"title": "Toy Story 5", "date": "2026-06-19", "studio": "Pixar"},
+        {"title": "Supergirl: Woman of Tomorrow", "date": "2026-06-26", "studio": "DC"},
+        {"title": "The Odyssey (Christopher Nolan)", "date": "2026-07-17", "studio": "Universal"},
+        {"title": "Spider-Man: Brand New Day", "date": "2026-07-24", "studio": "Sony/Marvel"},
+        {"title": "Minions 3", "date": "2026-07-31", "studio": "Illumination"},
+        {"title": "Digger (Tom Cruise)", "date": "2026-10-02", "studio": "Warner Bros"},
+        {"title": "Street Fighter", "date": "2026-10-09", "studio": "Legendary"},
+        {"title": "The Hunger Games: Sunrise on the Reaping", "date": "2026-11-20", "studio": "Lionsgate"},
+        {"title": "Narnia (Greta Gerwig)", "date": "2026-11-26", "studio": "Netflix"},
+        {"title": "Avengers: Doomsday", "date": "2026-12-01", "studio": "Marvel"},
+        {"title": "Jumanji 4", "date": "2026-12-11", "studio": "Sony"},
+        {"title": "Dune: Part Three", "date": "2026-12-18", "studio": "Warner Bros"},
+    ]
+    
+    today = datetime.now().strftime("%Y-%m-%d")
+    future = [r for r in releases_2026 if r.get("date", "0000") >= today]
+    
+    if future:
+        box = st.container(height=280)
+        with box:
+            for movie in future:
+                title = movie.get("title", "?")
+                date = movie.get("date", "")
+                studio = movie.get("studio", "")
+                if date:
+                    try:
+                        dt = datetime.strptime(date, "%Y-%m-%d")
+                        date_str = dt.strftime("%d %b")
+                    except:
+                        date_str = date
+                else:
+                    date_str = "TBA"
+                
+                st.write(f"**{date_str}** · {title} *({studio})*")
+    else:
+        st.caption("No upcoming releases")
     
     st.divider()
     
@@ -619,38 +635,40 @@ with right_col:
     
     st.divider()
     
-    # --- STEAM TOP SELLERS ---
-    st.subheader("🔥 Steam Top 20")
-    st.caption("[View on Steam →](https://store.steampowered.com/search/?filter=topsellers)")
+    # --- STEAM TOP 20 ---
+    st.subheader("🔥 Steam Popular Games")
+    st.caption("[View live chart on Steam →](https://store.steampowered.com/charts/topselling/global)")
     
-    try:
-        steam_games = et.get_steam_top_sellers()
-        if steam_games:
-            box = st.container(height=350)
-            with box:
-                for i, game in enumerate(steam_games[:20], 1):
-                    name = game.get("name", "?")
-                    players = game.get("players", 0)
-                    price = game.get("price", 0)
-                    link = game.get("link", "")
-                    
-                    # Build info string
-                    info_parts = []
-                    if players and players > 0:
-                        info_parts.append(f"👥 {players:,}")
-                    if price and price > 0:
-                        info_parts.append(f"£{price:.2f}")
-                    
-                    info_str = " · ".join(info_parts) if info_parts else ""
-                    
-                    if info_str:
-                        st.write(f"**{i}.** [{name}]({link}) · {info_str}")
-                    else:
-                        st.write(f"**{i}.** [{name}]({link})")
-        else:
-            st.caption("Could not load Steam data")
-    except Exception as e:
-        st.caption(f"Error: {e}")
+    # Curated list of popular Steam games (API blocked on Streamlit Cloud)
+    steam_popular = [
+        {"name": "Counter-Strike 2", "link": "https://store.steampowered.com/app/730"},
+        {"name": "Dota 2", "link": "https://store.steampowered.com/app/570"},
+        {"name": "PUBG: Battlegrounds", "link": "https://store.steampowered.com/app/578080"},
+        {"name": "Elden Ring", "link": "https://store.steampowered.com/app/1245620"},
+        {"name": "Baldur's Gate 3", "link": "https://store.steampowered.com/app/1086940"},
+        {"name": "Grand Theft Auto V", "link": "https://store.steampowered.com/app/271590"},
+        {"name": "Apex Legends", "link": "https://store.steampowered.com/app/1172470"},
+        {"name": "Rust", "link": "https://store.steampowered.com/app/252490"},
+        {"name": "Team Fortress 2", "link": "https://store.steampowered.com/app/440"},
+        {"name": "Destiny 2", "link": "https://store.steampowered.com/app/1085660"},
+        {"name": "Path of Exile", "link": "https://store.steampowered.com/app/238960"},
+        {"name": "Warframe", "link": "https://store.steampowered.com/app/230410"},
+        {"name": "Monster Hunter: World", "link": "https://store.steampowered.com/app/582010"},
+        {"name": "Cyberpunk 2077", "link": "https://store.steampowered.com/app/1091500"},
+        {"name": "The Witcher 3", "link": "https://store.steampowered.com/app/292030"},
+        {"name": "Hogwarts Legacy", "link": "https://store.steampowered.com/app/990080"},
+        {"name": "Palworld", "link": "https://store.steampowered.com/app/1623730"},
+        {"name": "Lethal Company", "link": "https://store.steampowered.com/app/1966720"},
+        {"name": "Red Dead Redemption 2", "link": "https://store.steampowered.com/app/1174180"},
+        {"name": "Stardew Valley", "link": "https://store.steampowered.com/app/413150"},
+    ]
+    
+    box = st.container(height=350)
+    with box:
+        for i, game in enumerate(steam_popular, 1):
+            name = game.get("name", "?")
+            link = game.get("link", "")
+            st.write(f"**{i}.** [{name}]({link})")
     
     st.divider()
     
