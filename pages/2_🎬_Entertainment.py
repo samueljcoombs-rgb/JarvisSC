@@ -339,7 +339,7 @@ with left_col:
                     title = film.get("title", "?")
                     rating = film.get("vote_average", 0)
                     if poster:
-                        st.image(et.get_poster_url(poster, "w154"), use_container_width=True)
+                        st.image(et.get_poster_url(poster, "w154"), use_column_width=True)
                     short = title[:12] + "..." if len(title) > 12 else title
                     st.caption(f"[{short}]({make_vue_film_url(title)}) ⭐{rating:.1f}")
     except Exception as e:
@@ -394,7 +394,7 @@ with left_col:
                     rating = show.get("vote_average", 0)
                     tmdb_id = show.get("id")
                     if poster:
-                        st.image(et.get_poster_url(poster, "w154"), use_container_width=True)
+                        st.image(et.get_poster_url(poster, "w154"), use_column_width=True)
                     short = name[:12] + "..." if len(name) > 12 else name
                     url = f"https://www.themoviedb.org/tv/{tmdb_id}"
                     st.caption(f"[{short}]({url}) ⭐{rating:.1f}")
@@ -453,7 +453,7 @@ with left_col:
                     title = movie.get("title", "?")
                     tmdb_id = movie.get("id")
                     if poster:
-                        st.image(et.get_poster_url(poster, "w154"), use_container_width=True)
+                        st.image(et.get_poster_url(poster, "w154"), use_column_width=True)
                     short = title[:12] + "..." if len(title) > 12 else title
                     url = f"https://www.themoviedb.org/movie/{tmdb_id}"
                     st.caption(f"[{short}]({url})")
@@ -508,13 +508,13 @@ with mid_col:
     
     c1, c2, c3 = st.columns(3)
     with c1:
-        if st.button("🎯 Recommend", key="ent_rec", use_container_width=True):
+        if st.button("🎯 Recommend", key="ent_rec", use_column_width=True):
             st.session_state.ent_pending = "Based on my Letterboxd, recommend 5 films I'd love."
     with c2:
-        if st.button("🎲 Tonight?", key="ent_tonight", use_container_width=True):
+        if st.button("🎲 Tonight?", key="ent_tonight", use_column_width=True):
             st.session_state.ent_pending = "Help me decide what to watch tonight."
     with c3:
-        if st.button("🗑️ Clear", key="ent_clear", use_container_width=True):
+        if st.button("🗑️ Clear", key="ent_clear", use_column_width=True):
             st.session_state.ent_chat = []
             st.rerun()
     
@@ -623,8 +623,11 @@ with right_col:
                 name = game.get("name", "?")
                 players = game.get("players", 0)
                 link = game.get("link", "")
-                players_str = f"{players:,}" if players else "?"
-                st.write(f"[{name}]({link}) · 👥 {players_str}")
+                if players and players > 0:
+                    players_str = f"👥 {players:,}"
+                    st.write(f"[{name}]({link}) · {players_str}")
+                else:
+                    st.write(f"[{name}]({link})")
         else:
             st.caption("Could not load Steam data")
     except Exception as e:
@@ -685,17 +688,17 @@ st.divider()
 
 c1, c2, c3, c4, c5 = st.columns(5)
 with c1:
-    if st.button("🏠 Home", use_container_width=True):
+    if st.button("🏠 Home", use_column_width=True):
         st.switch_page("app.py")
 with c2:
-    if st.button("🏋️ Health", use_container_width=True):
+    if st.button("🏋️ Health", use_column_width=True):
         st.switch_page("pages/1_🏋️_Health_Fitness.py")
 with c3:
-    if st.button("🎯 Goals", use_container_width=True):
+    if st.button("🎯 Goals", use_column_width=True):
         st.switch_page("pages/3_🎯_Goals.py")
 with c4:
-    if st.button("✈️ Travel", use_container_width=True):
+    if st.button("✈️ Travel", use_column_width=True):
         st.switch_page("pages/4_✈️_Travel.py")
 with c5:
-    if st.button("📰 News", use_container_width=True):
+    if st.button("📰 News", use_column_width=True):
         st.switch_page("pages/5_📰_News.py")
