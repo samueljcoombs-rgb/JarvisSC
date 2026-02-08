@@ -337,7 +337,7 @@ with tab_search:
             st.markdown("""
             - [Google Flights](https://www.google.com/flights)
             - [Skyscanner](https://www.skyscanner.net)
-            - [Jack's Flight Club](https://jacksflightclub.com)
+            - [Kayak](https://www.kayak.co.uk)
             """)
         else:
             with st.spinner("Searching flights..."):
@@ -348,17 +348,22 @@ with tab_search:
                         return_date.isoformat() if return_date else None
                     )
                     
-                    if results:
-                        st.success(f"Found {len(results)} flights!")
-                        for flight in results[:5]:
+                    # Extract flights list from results dict
+                    flights = results.get("flights", []) if isinstance(results, dict) else []
+                    
+                    if flights:
+                        st.success(f"Found {len(flights)} flights!")
+                        for flight in flights[:5]:
                             st.markdown(f"""
                             <div class="flight-result">
                                 <div class="flight-price">£{flight.get('price', 'N/A')}</div>
                                 <div><strong>{flight.get('airline', 'Unknown')}</strong></div>
-                                <div>Duration: {flight.get('duration', 'N/A')}</div>
+                                <div>Duration: {flight.get('duration', 'N/A')} mins</div>
                                 <div>Stops: {flight.get('stops', 'N/A')}</div>
                             </div>
                             """, unsafe_allow_html=True)
+                    elif results.get("error"):
+                        st.error(f"Search error: {results.get('error')}")
                     else:
                         st.info("No flights found. Try different dates.")
                 except Exception as e:
@@ -445,48 +450,57 @@ with tab_alerts:
                 st.warning("SerpAPI key needed for price checks")
             else:
                 with st.spinner("Checking prices..."):
-                    triggered = tt.check_flight_alerts()
+                    triggered = tt.check_flight_alerts(send_notifications=True)
                     if triggered:
+                        # Check if Telegram is configured
+                        tg_token = st.secrets.get("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
+                        tg_chat = st.secrets.get("TELEGRAM_CHAT_ID") or os.getenv("TELEGRAM_CHAT_ID")
+                        
+                        if tg_token and tg_chat:
+                            st.success(f"🔔 {len(triggered)} deal(s) found! Telegram notification sent.")
+                        else:
+                            st.success(f"🎉 {len(triggered)} deal(s) found!")
+                        
                         for deal in triggered:
                             st.markdown(f"""
                             <div class="deal-card">
                                 <strong>🎉 Deal Found!</strong><br>
                                 {deal.get('route')} - £{deal.get('current_price')}<br>
-                                <small>Your target: £{deal.get('max_price')}</small>
+                                <small>Your target: £{deal.get('max_price')} • Save £{deal.get('savings')}</small>
                             </div>
                             """, unsafe_allow_html=True)
                     else:
                         st.info("No deals found yet. Prices are above your targets.")
+        
+        # Telegram status
+        st.markdown("---")
+        tg_token = st.secrets.get("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
+        tg_chat = st.secrets.get("TELEGRAM_CHAT_ID") or os.getenv("TELEGRAM_CHAT_ID")
+        
+        if tg_token and tg_chat:
+            st.success("✅ Telegram notifications enabled")
+            if st.button("🧪 Test Telegram", key="test_telegram"):
+                if tt.send_telegram_message("🧪 Test from Jarvis! Flight alerts are working."):
+                    st.success("Test message sent!")
+                else:
+                    st.error("Failed to send test message")
+        else:
+            with st.expander("📱 Enable Telegram Notifications"):
+                st.info("""
+                **To get notified when deals are found:**
+                
+                1. Message [@BotFather](https://t.me/botfather) on Telegram
+                2. Send `/newbot` and follow the instructions
+                3. Copy the **Bot Token** you receive
+                4. Message [@userinfobot](https://t.me/userinfobot) to get your **Chat ID**
+                5. Add to Streamlit secrets:
+                ```
+                TELEGRAM_BOT_TOKEN = "your-bot-token"
+                TELEGRAM_CHAT_ID = "your-chat-id"
+                ```
+                """)
     else:
         st.markdown('<div class="empty-state">No active alerts. Create one above!</div>', unsafe_allow_html=True)
-    
-    # Jack's Flight Club section
-    st.markdown("---")
-    st.markdown("### 🎫 Jack's Flight Club")
-    st.caption("Manual deal entry from Jack's Flight Club emails")
-    
-    with st.expander("📧 Log a Deal from Email"):
-        st.info("When you get a great deal from Jack's Flight Club, log it here for reference!")
-        
-        deal_route = st.text_input("Route", placeholder="e.g., London → Tokyo")
-        deal_price = st.number_input("Price (£)", min_value=0, value=0, key="jfc_price")
-        deal_notes = st.text_area("Deal Details", placeholder="Dates, airline, booking link...")
-        
-        if st.button("💾 Save Deal"):
-            if deal_route and deal_price:
-                sm.append_row("travel_plans", {
-                    "trip_id": str(int(datetime.now().timestamp() * 1000)),
-                    "destination": deal_route,
-                    "start_date": "",
-                    "end_date": "",
-                    "status": "planning",
-                    "budget": str(deal_price),
-                    "notes": f"JFC Deal: {deal_notes}",
-                    "flight_watched": "true",
-                    "created": datetime.now(TZ).isoformat()
-                })
-                st.success("Deal saved to your trips!")
-                st.rerun()
 
 # ============================================================
 # Plan Trip Tab
